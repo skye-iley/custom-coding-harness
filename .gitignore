@@ -1,0 +1,9 @@
+**/.cursorignore
+**/.claudeignore
+**/.env
+**/*.env
+**/env.*
+**/*.env.*
+**/old/
+**/suggestions/
+!**/.env.example
