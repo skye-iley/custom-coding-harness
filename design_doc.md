@@ -13,7 +13,51 @@
 
 ---
 
+## Implementation Status — Built vs. Planned
+
+> **Read this first.** This document is the *target design*, not a description of current code.
+> Most of it is **not built yet**. The table below is the source of truth for what exists today;
+> everything else is aspirational. Where a section below is not ✅ here, read it as a spec to build
+> against. Status legend: ✅ Built · 🟡 Partial · ⬜ Planned · 🔬 Research.
+
+**Built today (the MVP):** a single Docker image (`deepagent-harness`: Ubuntu 24.04 + uv venv +
+Miniforge) that runs **one** `create_deep_agent` against a bind-mounted workspace. Model selection
+is the `PROVIDERS` registry in `project/main.py` (explicit, or auto-selected by which API key is set
+— **there is no classifier**). It loads MCP tools (`.mcp.json`), runs lifecycle shell hooks
+(`hooks.json`), persists conversation state to a per-workspace SqliteSaver checkpoint (keyed by
+thread id), isolates workspace dependencies in a workspace-local conda env, and receives secrets via
+`--env-file` at run time. That is roughly the §1/§4 provider layer + the built parts of §2/§3.
+
+| § | Capability | Status | Notes |
+|---|------------|--------|-------|
+| 1, 4 | Provider-agnostic model interface | ✅ Built | `PROVIDERS` registry; native openai/anthropic/google/deepseek + OpenAI-compatible cursor/openrouter/lmstudio |
+| 1, 4 | FSM classifier routing (local↔cloud) | 🔬 Research | No classifier exists; routing is explicit or auto-by-API-key. >95% accuracy target has no baseline |
+| 2 | Single container (uv venv + conda) | ✅ Built | `Dockerfile` |
+| 2 | Workspace conda env isolation | ✅ Built | workspace-local `.conda/env`, `run-in-env.sh` |
+| 2 | Secret provisioning (`--env-file`) | ✅ Built | `.env` gitignored, never baked into image |
+| 2 | Persistent workspace + gitconfig mount | ✅ Built | `run-docker` bind-mounts workspace; mounts `~/.gitconfig` read-only |
+| 2 | Conversation checkpoint (SqliteSaver) | ✅ Built | per-workspace `.deepagents/checkpoints.sqlite`, thread-keyed |
+| 2 | Dual-container (orchestrator + executor) | ⬜ Planned | One container today |
+| 2 | Bubblewrap executor jail | 🟡 Partial | `scripts/sandbox-exec.sh` + `bwrap` installed in image, but **not wired into agent shell calls** and unverified at runtime (no `--security-opt` in `run-docker`) |
+| 2 | `HarnessProfile` dynamic bind mounts | ⬜ Planned | Fixed bind list; no per-agent profile |
+| 2 | Path Guard middleware (`validate_path`) | ⬜ Planned | Snippet only; not in `main.py` |
+| 2 | Resource limits (`--cpus`/`--pids-limit`/mem) | ⬜ Planned | Not set in `run-docker` |
+| 3 | Workflow lifecycle hooks (`hooks.json`) | ✅ Built | `ShellHooksMiddleware` (session/agent/model/tool events) |
+| — | MCP tool loading (`.mcp.json`) | ✅ Built | `load_mcp_tools` (not a separate doc section) |
+| 3 | Git branch/commit/push/PR lifecycle | ⬜ Planned | No git automation in `main.py` |
+| 5 | Multi-agent funnel (classifier→orchestrator→worker) | ⬜ Planned | Single `create_deep_agent` today |
+| 6 | Token/cost tracker + `prices.json` | ⬜ Planned | `TokenCostTracker` is a stub |
+| 7 | Headroom / Caveman / caching pipeline | ⬜ Planned | Nothing integrated |
+| 8 | Observability, telemetry, telemetry-to-PR | ⬜ Planned | No trace/metrics files written |
+| 9 | CLI frontend (Typer/Rich) + TUI | ⬜ Planned | Only `argparse` `main.py` + `run-docker` scripts |
+| 9 | HITL autonomy config (`.harness-config.yaml`) | ⬜ Planned | — |
+| 10 | Security verification test suite | ⬜ Planned | Risk analysis is design-only |
+| 11 | Future extensions & roadmap | 🔬 Research | By definition |
+
+---
+
 ## 2. Sandboxing Strategy & Container Layout
+> **Status:** 🟡 Partial — single container + conda isolation + secret provisioning + persistent workspace built; dual-container, bubblewrap jail (built but not wired in), `HarnessProfile` binds, path guard, and resource limits **planned**. See the status matrix above.
 
 ### Dual-Container Boundary
 *   **Orchestrator Container**: Hosts Deep Agents runtime and coordinates agent execution. No mount to host Docker socket (`/var/run/docker.sock`).
@@ -143,6 +187,7 @@ API keys and tokens must reach the orchestrator without leaking to the agent or 
 ---
 
 ## 3. Git Session Lifecycle & Integration
+> **Status:** ⬜ Planned — workflow lifecycle hooks (`hooks.json`) are built; the git branch/commit/push/PR automation described below is **not** built. See the status matrix above.
 
 ### Deterministic Branching
 *   **Naming Pattern**: `agent/{provider}/{session-id}`
@@ -184,6 +229,7 @@ API keys and tokens must reach the orchestrator without leaking to the agent or 
 ---
 
 ## 4. Model Routing & Provider Abstraction
+> **Status:** 🟡 Partial — the `PROVIDERS` provider abstraction is built; the FSM traffic classifier and local/cloud orchestrator split are **planned/research** (see the MVP-framing note below). See the status matrix above.
 
 ### Router Architecture
 *   **Deep Agents API**: Utilizes `create_deep_agent` from the `deepagents` package to initialize agents with defined backends, profiles, and middleware.
@@ -220,6 +266,7 @@ API keys and tokens must reach the orchestrator without leaking to the agent or 
 ---
 
 ## 5. Agent Architecture & Framework Comparison
+> **Status:** ⬜ Planned — a single Custom `create_deep_agent` runs today; the classifier→orchestrator→worker multi-agent funnel is **not** built. See the status matrix above.
 
 ### Structural Options
 *   **Base Deep Agents Core**:
@@ -252,6 +299,7 @@ API keys and tokens must reach the orchestrator without leaking to the agent or 
 ---
 
 ## 6. Token Usage & Cost Tracker
+> **Status:** ⬜ Planned — `TokenCostTracker` is a stub; no `prices.json` or cost accounting is wired in. See the status matrix above.
 
 ### Callback Implementation
 Deep Agents provides hooks to monitor execution streams:
@@ -286,6 +334,7 @@ Local dictionary for calculating financial cost of session:
 ---
 
 ## 7. Token Optimization Pipeline (Headroom & Caveman)
+> **Status:** ⬜ Planned — neither Headroom, Caveman, nor prompt caching is integrated. See the status matrix above.
 
 ### Headroom Context Compression Layer
 *   **Tool**: Integrate `chopratejas/headroom` inside the orchestrator container environment.
@@ -363,6 +412,7 @@ Local dictionary for calculating financial cost of session:
 ---
 
 ## 8. Observability & Metrics
+> **Status:** ⬜ Planned — no trace/metrics files are written and no telemetry is appended to PRs. See the status matrix above.
 
 ### Logging Architecture
 *   **System Logs**: Docker container stdout/stderr for runtime health and harness errors.
@@ -387,6 +437,7 @@ Local dictionary for calculating financial cost of session:
 ---
 
 ## 9. CLI Frontend & User Interface
+> **Status:** ⬜ Planned — current entry points are `argparse` `main.py` + the `run-docker` scripts; no Typer/Rich CLI, TUI, or `.harness-config.yaml` exists. See the status matrix above.
 
 ### Interface Architecture
 *   **Implementation Stack**: Python-based CLI using `Typer` (command structure) and `Rich` (terminal rendering).
@@ -420,6 +471,7 @@ Users can configure their level of autonomy via a `.harness-config.yaml` file:
 ---
 
 ## 10. Security, Verification, & Testing Plan
+> **Status:** ⬜ Planned — this is a risk analysis and test *plan*; the verification suite is not built. See the status matrix above.
 
 ### Risk Analysis & Mitigation
 *   **Classifier Misrouting**:
@@ -454,6 +506,7 @@ Users can configure their level of autonomy via a `.harness-config.yaml` file:
 ---
 
 ## 11. Future Extensions & Roadmap
+> **Status:** 🔬 Research — roadmap items, not built.
 
 ### Agentic Evolutions
 *   **Multi-Agent Peer Review**: Introduce a secondary "Reviewer Agent" that must approve changes in the sandbox before they are committed to the Git branch.

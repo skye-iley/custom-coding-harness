@@ -62,15 +62,11 @@ def _provider_for(model: str) -> Provider | None:
     return None
 
 DEFAULT_TASK = (
-    "Line1 here "
-    "line2 here "
+    "inspect workspace, summarize structure." 
 )
 
 
-BASE_SYSTEM_PROMPT = """multi line
-system prompt
-here
-"""
+BASE_SYSTEM_PROMPT = """You are an expert coding assistant operating inside a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files."""
 
 ## ------------------------------------------------##
 #                  Helpful Functions                #

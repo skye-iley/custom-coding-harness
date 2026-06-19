@@ -7,3 +7,4 @@
 **/old/
 **/suggestions/
 !**/.env.example
+**/.claude/
