@@ -8,3 +8,4 @@
 **/suggestions/
 !**/.env.example
 **/.claude/
+.serena/
