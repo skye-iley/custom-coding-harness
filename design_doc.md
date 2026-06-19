@@ -20,6 +20,17 @@
 *   **Executor Sandbox**: Commands run inside ultra-restrictive nested jail powered by `bubblewrap` (bwrap).
 
 ### Bubblewrap Configuration
+
+> **Prerequisites.** `bubblewrap` is installed in the orchestrator Dockerfile
+> (`apt-get install -y bubblewrap`), and `scripts/sandbox-exec.sh` implements the two-phase wrapper
+> below (installed as `/usr/local/bin/sandbox-exec`). Still unverified at runtime: `bwrap` nested inside
+> Docker also needs unprivileged user namespaces enabled on the host *and* the container must not
+> block the `clone`/`unshare` syscalls. In practice that means running the orchestrator with
+> `--security-opt seccomp=unconfined` (or a custom profile that permits `unshare`/`clone` with
+> `CLONE_NEW*`), or enabling `kernel.unprivileged_userns_clone=1`. **Validate that `bwrap
+> --unshare-all true` actually runs in the deployed image before building features on top of it** —
+> if it fails silently, the executor is not sandboxed.
+
 Shell tool executions wrapped dynamically via host execution template. The bind-mount list is generated per-agent based on the `HarnessProfile`:
 ```bash
 bwrap \
@@ -45,6 +56,20 @@ bwrap \
 *   `--unshare-all`: Isolates net, ipc, uts, pid, user namespaces.
 *   `--ro-bind`: Prevents injection or corruption of system paths.
 
+> **Two execution phases — network must be conditional, not always-off.** `--unshare-all` removes
+> the network namespace, which is correct for running *agent-authored code* (defense against
+> exfiltration). But dependency resolution (`pip install`, `conda env create`, `npm install`) needs
+> the network, and it runs through the same execution wrapper. Resolve by splitting into two
+> profiles instead of a blanket `--unshare-all`:
+> *   **Install phase** — network allowed (omit `--unshare-net`; keep `--unshare-user/pid/ipc/uts`),
+>     writes limited to the workspace env dir (`/workspace/.conda`, caches). Invoked explicitly for
+>     setup steps.
+> *   **Execution phase** — full `--unshare-all` (no NIC) for running tests and agent-authored
+>     commands.
+>
+> The `HarnessProfile` selects the phase; the default for arbitrary agent commands is the
+> network-isolated execution phase.
+
 ### Path Guard Middleware
 Pre-flight check in Python tool execution class prevents symlink escapes and directory traversal:
 ```python
@@ -53,10 +78,16 @@ import os
 def validate_path(target_path: str, base_dir: str = "/workspace") -> str:
     abs_target = os.path.realpath(target_path)
     abs_base = os.path.realpath(base_dir)
-    if not abs_target.startswith(abs_base):
+    # Use commonpath, NOT startswith: startswith("/workspace") also matches
+    # "/workspace-evil", allowing a sibling-directory escape.
+    if os.path.commonpath([abs_target, abs_base]) != abs_base:
         raise PermissionError("Path out of sandboxed workspace bounds")
     return abs_target
 ```
+> **Defense-in-depth only.** This check is racy (TOCTOU: a symlink can be swapped between
+> `realpath` validation and the actual open). It is a guard rail, not the security boundary — the
+> bubblewrap bind-mount whitelist is the real boundary. Where possible, open with `O_NOFOLLOW` /
+> resolve-and-hold a file descriptor rather than re-deriving the path after the check.
 
 ### Workspace Environment Isolation
 To prevent dependency conflicts between the orchestrator runtime and the target project:
@@ -69,12 +100,45 @@ To prevent dependency conflicts between the orchestrator runtime and the target 
 
 To ensure workspace and configuration persistence across container deployments:
 *   **Workspace Mounting**: Start container with `-v /host/path/to/workspace:/workspace`. All agent work inside `/workspace` is automatically persisted on host filesystem.
-*   **Config Persistence**: Mount specific host files to container internal paths:
-    *   `-v /host/.gitconfig:/root/.gitconfig`
-    *   `-v /host/.ssh:/root/.ssh`
-    *   `-v /host/.agent_telemetry.json:/workspace/.agent_telemetry.json`
+*   **Config Persistence**: Mount config into the **agent** user's home, not `/root` — the container
+    runs `USER agent` (uid 10001), so `/root`-targeted mounts are unreadable and ignored:
+    *   `-v /host/.gitconfig:/home/agent/.gitconfig:ro`
+    *   `-v /host/agent-telemetry/{session-id}.json:/workspace/.agent_telemetry.json` (per-session
+        file; do **not** share one host file across concurrent sessions — they race on writes).
+
+> **Do not mount host `~/.ssh` into an autonomous-agent container.** Full private-key exposure to a
+> codegen agent contradicts the secret-scrubbing posture (§10) and is the highest-impact escape
+> path if the agent is compromised. For Git push, use one of:
+> *   a **scoped, per-session deploy key** (write access to a single repo) injected as a secret and
+>     removed at teardown, or
+> *   a **short-lived token** via a credential helper (`gh auth` / `GIT_ASKPASS`), never persisted to
+>     disk in the workspace.
 
 This guarantees agent session state, Git identity, and accumulated metrics survive container teardown.
+
+### Resource Limits
+
+Isolation is not just filesystem/network — an agent loop can also exhaust host resources. Apply
+hard caps at container start (independent of bubblewrap):
+*   **CPU / memory**: `docker run --cpus=N --memory=Mg --memory-swap=Mg` to bound a runaway loop.
+*   **Processes**: `--pids-limit=512` to contain fork bombs (the executor also has its own PID
+    namespace via `--unshare-pid`).
+*   **Disk**: cap workspace growth (e.g. a size-limited volume or quota) so logs/build artifacts
+    cannot fill the host disk.
+*   **Wall-clock**: a per-session and per-command timeout (the harness kills the session after
+    `max_session_seconds` / a single command after `max_command_seconds`) to stop infinite loops.
+
+### Secret Provisioning
+
+API keys and tokens must reach the orchestrator without leaking to the agent or to disk:
+*   **Runtime injection only**: pass secrets via `--env-file project/.env` at `docker run` time.
+    **Never bake them into the image** — `.dockerignore` excludes `.env*` from the build context.
+*   **Not in the workspace bind**: secrets live in the orchestrator's environment, never under
+    `/project/workspace` (which is host-mounted and visible to the agent's tools).
+*   **Scoped Git credentials**: use a per-session deploy key or short-lived token for pushes, not
+    long-lived host SSH keys (see Config Persistence above).
+*   **Scrubbing on the way out**: trace/metrics writers mask key-shaped strings before persisting
+    (see §10 *Telemetry Leakage*).
 
 ---
 
@@ -83,6 +147,10 @@ This guarantees agent session state, Git identity, and accumulated metrics survi
 ### Deterministic Branching
 *   **Naming Pattern**: `agent/{provider}/{session-id}`
 *   **Session ID**: `sha256(user_id + workspace_path + timestamp)[:12]`
+    *   The `timestamp` makes each session unique (avoids branch-name collisions across runs on the
+        same workspace). Compute the `session-id` **once at session init and persist it**; teardown
+        must reuse the stored value, not recompute it — otherwise the pushed branch name won't match
+        the one created at start.
 
 ### Workflow Hooks
 
@@ -128,6 +196,12 @@ This guarantees agent session state, Git identity, and accumulated metrics survi
         *   `MODERATE`: Single-file logic changes, bug fixes in isolated functions $\rightarrow$ Local Orchestrator.
         *   `COMPLEX`: Cross-file refactoring, architectural changes, new feature design $\rightarrow$ Cloud Orchestrator.
         *   `CRITICAL`: Security patches, core system migrations $\rightarrow$ Cloud Orchestrator (highest reasoning model).
+
+> **MVP framing.** The local-classifier routing in this section (FSM-constrained Qwen, knowledge
+> distillation, the >95% routing-accuracy target in §10) is a later-phase research track, not the
+> first deliverable — and >95% is aspirational with no baseline yet. For the MVP, route by an
+> explicit signal (caller-supplied category, or a single cloud model) and treat the classifier as an
+> optimization to add once there is a labeled "Gold Set" to measure it against.
 
 *   **Expert Orchestrator Roles**:
     *   **Local Orchestrator**: Optimized for speed and cost. Handles `TRIVIAL` and `MODERATE` tasks.
@@ -203,6 +277,11 @@ Local dictionary for calculating financial cost of session:
   }
 }
 ```
+> **Staleness & coverage caveats.** Hardcoded prices drift as providers change rates — treat
+> `prices.json` as a versioned snapshot (record its date; refresh on a schedule) and fail loudly on
+> a model key that isn't present rather than silently costing it at `0`. Also account for tokens the
+> simple prompt/completion split misses: **cached-input tokens** (Anthropic prompt caching, billed at
+> a reduced rate) and any reasoning/thinking tokens, or per-task cost will read low.
 
 ---
 
@@ -232,10 +311,10 @@ Local dictionary for calculating financial cost of session:
 ### Deep Agents Integration Specifics
 
 #### Headroom Integration
-*   **Proxy-Level (No Code Changes)**:
-    Execute Deep Agents in a Docker runtime with `HTTP_PROXY` and `HTTPS_PROXY` pointing to `http://localhost:8787` (Headroom proxy). Outgoing model queries automatically compress redundant logs, JSON tool outputs, and duplicate messages.
-*   **Adapter Wrapper**:
-    Configure model clients via Deep Agents configuration to route through Headroom:
+*   **Adapter Wrapper (preferred — actually works)**:
+    Point the model client's `api_base` at the local Headroom endpoint so it terminates the request,
+    compresses the body, and forwards upstream. This is the realistic integration; configure model
+    clients via Deep Agents configuration to route through Headroom:
     ```python
     # Example approach for binding Headroom proxy within Deep Agents config
     model_config = {
@@ -244,16 +323,37 @@ Local dictionary for calculating financial cost of session:
         "api_key": "mock-key-for-proxy"
     }
     ```
+> **Why not transparent `HTTP_PROXY`/`HTTPS_PROXY`?** Model APIs are HTTPS. A standard proxy only
+> sees `CONNECT` + an encrypted tunnel — it cannot read or rewrite request bodies (the messages to
+> compress) without terminating TLS via its own CA installed in the container trust store (MITM).
+> That is fragile and breaks cert pinning. Prefer the explicit `api_base` adapter above, where the
+> client speaks plaintext HTTP to a localhost endpoint that re-encrypts upstream.
 
 #### Caveman Integration
 *   **Prompt Pre-processor**:
     Register prompt-slicing middleware within the Deep Agents execution chain:
     ```python
-    from caveman_compressor import caveman_compress # Custom prompt trimmer
+    import re
+    from caveman_compressor import caveman_compress  # Custom prompt trimmer
+
+    # Caveman drops articles/pronouns/auxiliaries — fine for prose, DESTRUCTIVE for
+    # code, diffs, JSON, and file paths. Compress prose segments only; pass fenced
+    # code blocks and inline code through verbatim.
+    _FENCE = re.compile(r"(```.*?```|`[^`]*`)", re.DOTALL)
+
+    def _compress_prose_only(text: str) -> str:
+        parts = _FENCE.split(text)
+        # Odd indices are code (the captured group); leave them untouched.
+        return "".join(
+            seg if i % 2 else caveman_compress(seg, level="full")
+            for i, seg in enumerate(parts)
+        )
 
     def compress_messages_runnable(messages):
         for msg in messages:
-            msg['content'] = caveman_compress(msg['content'], level="full")
+            # Never compress tool results / code-bearing roles; only natural-language turns.
+            if msg.get("role") in ("user", "assistant") and isinstance(msg.get("content"), str):
+                msg["content"] = _compress_prose_only(msg["content"])
         return messages
 
     # Deep Agents internal chain integration point

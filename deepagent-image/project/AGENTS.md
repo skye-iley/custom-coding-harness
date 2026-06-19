@@ -43,6 +43,19 @@ conda activate /project/workspace/.conda/env
 python -m pytest
 ```
 
+## Sandboxed execution (network phases)
+
+`sandbox-exec` wraps a command in a bubblewrap jail whose only writable path is the workspace.
+Two phases control network access:
+
+```bash
+sandbox-exec install -- pip install -r requirements.txt   # network ALLOWED (fetch deps)
+sandbox-exec exec    -- python -m pytest                  # network DENIED  (run code/tests)
+```
+
+Use `install` only for dependency resolution; run tests and any agent-authored code under `exec`
+so it cannot reach the network. (Requires unprivileged user namespaces — see `design_doc.md` §2.)
+
 ## Filesystem
 
 - Work only under the workspace root (`/project/workspace` by default).

@@ -54,9 +54,18 @@ $dockerArgs = @(
     "run", "--rm",
     "--env-file", $EnvFile,
     "-e", "AGENT_WORKSPACE=/project/workspace",
-    "-v", "${WorkspacePath}:/project/workspace",
-    "deepagent-harness"
+    "-v", "${WorkspacePath}:/project/workspace"
 )
+
+# Git identity: mount host .gitconfig read-only into the agent user's home (uid 10001 -> /home/agent),
+# not /root (container runs USER agent). Never mount ~/.ssh into an autonomous-agent container -
+# use a scoped, per-session deploy key or a short-lived token for pushes instead.
+$GitConfig = Join-Path $env:USERPROFILE ".gitconfig"
+if (Test-Path $GitConfig) {
+    $dockerArgs += "-v", "${GitConfig}:/home/agent/.gitconfig:ro"
+}
+
+$dockerArgs += "deepagent-harness"
 
 if ($TaskParts.Count -gt 0) {
     $dockerArgs += "python3", "main.py"

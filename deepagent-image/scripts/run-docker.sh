@@ -31,11 +31,20 @@ mkdir -p "$WORKSPACE"
 WORKSPACE="$(cd "$WORKSPACE" && pwd)"
 seed_workspace "$WORKSPACE" "$SEED_SOURCE"
 
+# Git identity: mount host .gitconfig read-only into the agent user's home (uid 10001 -> /home/agent),
+# not /root (container runs USER agent). Never mount ~/.ssh into an autonomous-agent container -
+# use a scoped, per-session deploy key or a short-lived token for pushes instead.
+GIT_MOUNT=()
+if [[ -f "$HOME/.gitconfig" ]]; then
+  GIT_MOUNT=(-v "$HOME/.gitconfig:/home/agent/.gitconfig:ro")
+fi
+
 if [[ $# -gt 0 ]]; then
 exec docker run --rm \
   --env-file "$ENV_FILE" \
   -e AGENT_WORKSPACE=/project/workspace \
   -v "$WORKSPACE:/project/workspace" \
+  ${GIT_MOUNT[@]+"${GIT_MOUNT[@]}"} \
   deepagent-harness \
   python3 main.py "$@"
 fi
@@ -44,4 +53,5 @@ exec docker run --rm \
   --env-file "$ENV_FILE" \
   -e AGENT_WORKSPACE=/project/workspace \
   -v "$WORKSPACE:/project/workspace" \
+  ${GIT_MOUNT[@]+"${GIT_MOUNT[@]}"} \
   deepagent-harness

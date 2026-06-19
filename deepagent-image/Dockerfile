@@ -10,6 +10,7 @@ ENV AGENT_WORKSPACE=/project/workspace
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        bubblewrap \
         build-essential \
         ca-certificates \
         curl \
@@ -44,8 +45,10 @@ RUN useradd --create-home --uid 10001 agent
 WORKDIR /project
 COPY project/ .
 COPY scripts/conda-init-workspace.sh /usr/local/bin/conda-init-workspace
+COPY scripts/sandbox-exec.sh /usr/local/bin/sandbox-exec
 COPY project/workspace/ /project/workspace-seed/
 RUN chmod +x /usr/local/bin/conda-init-workspace \
+    && chmod +x /usr/local/bin/sandbox-exec \
     && chmod +x /project/workspace/scripts/run-in-env.sh \
     && chmod +x /project/workspace-seed/scripts/run-in-env.sh \
     && mkdir -p /project/workspace \
