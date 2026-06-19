@@ -7,15 +7,27 @@ on user code inside a separate **workspace** conda env. `project/main.py` is the
 > Scope note: this file is guidance for working **on** this repo (the harness). `project/AGENTS.md`
 > is a different file — instructions for the agent running **inside** the built container. Don't
 > conflate them. `build_agent` reads `AGENTS.md` from the container CWD (`/project`) and **appends
-> it verbatim to the agent's system prompt** (`main.py`, after `BASE_SYSTEM_PROMPT`), so editing
+> it verbatim to the agent's system prompt** (`harness/agent.py`, after `BASE_SYSTEM_PROMPT`), so editing
 > `AGENTS.md` directly changes agent behavior at run time — treat it as prompt code, not docs.
 
 ## Layout
 
+> Why the extra `project/` level: it is bind-mounted to the container's `/project` (the WORKDIR)
+> at run time, so it is the agent's filesystem root, not just a source folder. `main.py` reads
+> `AGENTS.md` / `.mcp.json` / `hooks.json` from CWD (`/project`), and the workspace mounts under it
+> at `/project/workspace`. Keep run-time config files directly in `project/`.
+
 - `Dockerfile` — builds the `deepagent-harness` image (ubuntu:24.04 + uv venv at `/opt/venv` +
-  Miniforge at `/opt/conda`). Sets `DEEPAGENTS_IN_CONTAINER=1` so `main.py` knows it's in-image.
-- `project/main.py` — harness entrypoint. Provider/model routing, MCP tool loading, hooks,
-  SqliteSaver checkpointer, builds the deep agent and runs the task.
+  Miniforge at `/opt/conda`). Sets `DEEPAGENTS_IN_CONTAINER=1` so the harness knows it's in-image.
+- `project/main.py` — thin entrypoint shim (kept so `python3 main.py` still works). All logic lives
+  in the `harness/` package; `python3 -m harness` is the equivalent entry.
+- `project/harness/` — the harness package, split by concern:
+  - `providers.py` — `PROVIDERS` registry + `choose_model` / `validate_credentials` /
+    `resolve_chat_model` (model routing; see "Model routing" below).
+  - `loaders.py` — optional-file IO: `AGENTS.md` text, `.mcp.json` tools, `hooks.json`.
+  - `hooks.py` — `ShellHooksMiddleware` for per-event hooks; session hooks fire in `cli.py`.
+  - `agent.py` — workspace resolution, system prompt, `build_agent`, result extraction.
+  - `cli.py` — `parse_args` + `main()`: wires the above around the SqliteSaver checkpointer.
 - `project/requirements.txt` — harness deps only (installed into `/opt/venv`). Not the agent's
   workspace deps.
 - `project/.env.example` — copy to `project/.env`, set API keys. **`.env` is gitignored and never
@@ -48,7 +60,7 @@ on user code inside a separate **workspace** conda env. `project/main.py` is the
 Harness changes → `project/requirements.txt` + rebuild. Never edit `/opt/venv`, `/opt/conda`, or
 `main.py` to satisfy a *workspace* dependency.
 
-## Model routing (`main.py`)
+## Model routing (`harness/providers.py`)
 
 `PROVIDERS` is the single source of truth — `choose_model`, credential validation, and chat-model
 resolution all derive from it, so maps can't drift. Auto-selection scans the list top-to-bottom
@@ -61,8 +73,8 @@ OpenAI-compatible providers (cursor, openrouter, lmstudio) route via `ChatOpenAI
 
 - Secrets live in `project/.env` only. Don't commit them, don't `COPY` them into the image, don't
   echo them into logs.
-- `main.py` uses the `DEEPAGENTS_IN_CONTAINER` env marker to detect the harness image — don't
-  swap it back to filesystem sniffing (e.g. checking for `/project`).
+- `resolve_workspace` (`harness/agent.py`) uses the `DEEPAGENTS_IN_CONTAINER` env marker to detect
+  the harness image — don't swap it back to filesystem sniffing (e.g. checking for `/project`).
 - Conversation state persists at `<workspace>/.deepagents/checkpoints.sqlite`, keyed by
   `DEEPAGENTS_THREAD_ID`. Reuse the id to resume a thread.
 - `project/suggestions/old/` is archived reference, not live code — ignore it.

@@ -9,3 +9,5 @@
 !**/.env.example
 **/.claude/
 .serena/
+**/__pycache__/
+**/*.py[cod]
