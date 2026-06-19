@@ -1,0 +1,8 @@
+{
+  "hooks": [
+    {
+      "command": ["echo '--- Hook Triggered Test - session end' " ],
+      "events": ["session.end"]
+    }
+  ]
+}
