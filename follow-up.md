@@ -1,5 +1,13 @@
 # Follow-up: fix `project/workspace/project/workspace` nesting bug
 
+## BLOCKED: could not push / open PR
+
+Same as a prior session (commit `27f74f1`): no `gh` CLI, no credential helper, no `~/.ssh` keys in
+this sandbox, and the remote is HTTPS. `git push` fails with "could not read Username for
+'https://github.com'". Work is committed locally on `nested-workspace-bugfixing` (commit
+`cb68167`). Push it yourself and open the PR (`gh pr create --base main --fill`), or authenticate
+this environment and ask me to retry.
+
 Generated while fixing the nested-workspace bug autonomously. Captures the root cause, the fix,
 what was verified vs. not, and judgment calls made without user sign-off. Delete sections once
 resolved/accepted.
