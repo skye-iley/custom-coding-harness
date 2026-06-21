@@ -11,3 +11,6 @@
 .serena/
 **/__pycache__/
 **/*.py[cod]
+
+# Compound Engineering machine-local config
+.compound-engineering/*.local.yaml

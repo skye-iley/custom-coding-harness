@@ -7,6 +7,7 @@ and resolve_chat_model all derive from it so the maps can't drift.
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 
 # NOTE: eventually set up a config file to define the ordering and default models given the API keys
@@ -77,7 +78,18 @@ def validate_credentials(model: str) -> None:
     # Local providers (ollama, lmstudio) carry requires_key=False, so they are
     # not enforced here. Unknown prefixes pass through to init_chat_model.
     provider = _provider_for(model)
-    if provider and provider.requires_key and not os.getenv(provider.api_key_env):
+    if provider is None:
+        # Passthrough stays intentional, but surface it: a typo'd prefix
+        # (e.g. 'claude:' for 'anthropic:') would otherwise skip validation
+        # and reappear as a raw init_chat_model traceback. Note, don't fail.
+        known = ", ".join(p.prefix for p in PROVIDERS)
+        print(
+            f"[harness] note: model '{model}' matches no known provider prefix "
+            f"({known}); passing through to init_chat_model.",
+            file=sys.stderr,
+        )
+        return
+    if provider.requires_key and not os.getenv(provider.api_key_env):
         raise SystemExit(f"Model '{model}' requires {provider.api_key_env}.")
 
 
