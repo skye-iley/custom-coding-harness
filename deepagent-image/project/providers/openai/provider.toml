@@ -1,0 +1,5 @@
+# OpenAI via langchain-openai (native init_chat_model prefix).
+api_key_env = "OPENAI_API_KEY"
+requires_key = true
+priority = 3
+default_model = "gpt-5.5"

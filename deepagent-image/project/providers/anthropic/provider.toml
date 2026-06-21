@@ -1,0 +1,5 @@
+# Anthropic Claude via langchain-anthropic (native init_chat_model prefix).
+api_key_env = "ANTHROPIC_API_KEY"
+requires_key = true
+priority = 2
+default_model = "claude-haiku-4-5"
