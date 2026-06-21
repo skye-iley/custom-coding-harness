@@ -46,6 +46,37 @@ def _agent_shell_env() -> dict[str, str]:
 BASE_SYSTEM_PROMPT = """You are an expert coding assistant operating inside a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files."""
 
 
+class _WorkspaceShellBackend(LocalShellBackend):
+    """LocalShellBackend that tolerates real-root-prefixed virtual paths.
+
+    `virtual_mode=True` treats every path the model passes to file tools
+    (write_file/read_file/ls/glob/grep) as already relative to `root_dir`, so
+    `/foo.py` and `foo.py` both land at `{root_dir}/foo.py`. But the shell tool
+    runs with `cwd=root_dir` too, and a real `pwd` there prints root_dir's real
+    absolute path (e.g. `/project/workspace`). A model that shells out, sees
+    that path, and then reuses it verbatim in a file tool call (instead of a
+    root_dir-relative path) gets it silently re-anchored under root_dir a
+    second time -- e.g. `/project/workspace/foo.py` resolves to
+    `{root_dir}/project/workspace/foo.py`. This is exactly the
+    project/workspace/project/workspace nesting bug: two tools share one real
+    directory but expose two different path namespaces, and nothing in either
+    tool's response surfaces the mismatch for the model to notice.
+
+    Telling the model not to do this (see AGENTS.md) helps but isn't reliable.
+    This strips a literal root_dir prefix off incoming paths before the parent
+    class's virtual resolution runs, so both conventions land in the same
+    place instead of nesting.
+    """
+
+    def _resolve_path(self, key: str) -> Path:
+        if self.virtual_mode:
+            vpath = key if key.startswith("/") else "/" + key
+            marker = "/" + str(self.cwd).lstrip("/")
+            if vpath == marker or vpath.startswith(marker + "/"):
+                key = vpath[len(marker):] or "/"
+        return super()._resolve_path(key)
+
+
 def resolve_workspace(raw: str) -> Path:
     workspace = Path(raw).expanduser().resolve()
     # The image sets DEEPAGENTS_IN_CONTAINER=1 (see Dockerfile). An explicit
@@ -97,7 +128,7 @@ def build_agent(
     checkpointer: Any = None,
 ):
     workspace.mkdir(parents=True, exist_ok=True)
-    backend = LocalShellBackend(
+    backend = _WorkspaceShellBackend(
         root_dir=str(workspace),
         virtual_mode=True,
         inherit_env=False,
