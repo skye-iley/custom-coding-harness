@@ -27,7 +27,8 @@ on user code inside a separate **workspace** conda env. `project/main.py` is the
   - `loaders.py` — optional-file IO: `AGENTS.md` text, `.mcp.json` tools, `hooks.json`.
   - `hooks.py` — `ShellHooksMiddleware` for per-event hooks; session hooks fire in `cli.py`.
   - `agent.py` — workspace resolution, system prompt, `build_agent`, result extraction.
-  - `cli.py` — `parse_args` + `main()`: wires the above around the SqliteSaver checkpointer.
+  - `cli.py` — `parse_args` + `main()`: wires the above around the SqliteSaver checkpointer, builds
+    the agent once, then hands off to `run_repl()` — the interactive multi-turn loop (see below).
 - `project/requirements.txt` — harness deps only (installed into `/opt/venv`). Not the agent's
   workspace deps.
 - `project/.env.example` — copy to `project/.env`, set API keys. **`.env` is gitignored and never
@@ -43,12 +44,17 @@ on user code inside a separate **workspace** conda env. `project/main.py` is the
 .\scripts\build.ps1                       # docker build -t deepagent-harness
 .\scripts\verify.ps1                      # sanity-check harness venv + conda in one start
 .\scripts\smoke.ps1                       # smoke test
-.\scripts\run-docker.ps1 "your task"      # run agent against project\workspace
+.\scripts\run-docker.ps1                  # opens straight to the you> prompt
+.\scripts\run-docker.ps1 "your task"      # runs that task first, then drops to the prompt
 .\scripts\run-docker.ps1 -WorkspacePath C:\path\to\repo "your task"
 ```
 
 `run-docker.ps1` refuses to start without `project\.env`. It bind-mounts the workspace to
-`/project/workspace` and seeds missing `environment.yml` / `.gitignore` / `run-in-env.sh`.
+`/project/workspace`, seeds missing `environment.yml` / `.gitignore` / `run-in-env.sh`, and runs
+the container with `-it` so the in-container REPL (`harness/cli.py:run_repl`) has a TTY for its
+`you>` prompt loop — the container stays up across turns until `/exit`/`/quit`/Ctrl-D. A redirected
+stdin (CI, piped smoke runs) drops `-t` and the harness itself degrades to a single non-interactive
+turn (see `design_doc_mvp.md` §1a).
 
 ## Two Python stacks — do not mix
 

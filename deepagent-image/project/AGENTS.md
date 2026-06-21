@@ -58,5 +58,9 @@ so it cannot reach the network. (Requires unprivileged user namespaces — see `
 
 ## Filesystem
 
-- Work only under the workspace root (`/project/workspace` by default).
+- The workspace root is your current working directory. Create and edit files using paths
+  relative to it — e.g. `pong.txt` or `src/main.py`, **not** `/project/workspace/pong.txt`.
+  Never prepend the workspace path (`/project/workspace` or `project/workspace`) yourself; doing
+  so nests files one directory too deep.
+- Work only within the workspace; do not write outside it.
 - Do not modify `/opt/venv`, `/opt/conda`, or `/project/main.py` unless explicitly asked to change the harness.
