@@ -1,0 +1,4 @@
+name = "qwen/qwen3-coder-30b-a3b-instruct"
+context_window = 160000
+price_completion = "0.00000027"
+price_prompt = "0.00000007"

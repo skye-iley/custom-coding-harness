@@ -1,0 +1,4 @@
+name = "openai/gpt-4"
+context_window = 8191
+price_completion = "0.00006"
+price_prompt = "0.00003"

@@ -1,0 +1,4 @@
+name = "sao10k/l3-lunaris-8b"
+context_window = 8192
+price_completion = "0.00000005"
+price_prompt = "0.00000004"

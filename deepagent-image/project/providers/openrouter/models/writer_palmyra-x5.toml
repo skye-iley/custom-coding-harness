@@ -1,0 +1,4 @@
+name = "writer/palmyra-x5"
+context_window = 1040000
+price_completion = "0.000006"
+price_prompt = "0.0000006"

@@ -1,0 +1,4 @@
+name = "sao10k/l3.1-70b-hanami-x1"
+context_window = 16000
+price_completion = "0.000003"
+price_prompt = "0.000003"

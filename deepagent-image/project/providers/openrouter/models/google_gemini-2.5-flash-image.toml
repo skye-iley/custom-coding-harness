@@ -1,0 +1,4 @@
+name = "google/gemini-2.5-flash-image"
+context_window = 32768
+price_completion = "0.0000025"
+price_prompt = "0.0000003"

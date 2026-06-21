@@ -1,51 +1,121 @@
 """Provider registry and model selection.
 
 PROVIDERS is the single source of truth: choose_model, validate_credentials,
-and resolve_chat_model all derive from it so the maps can't drift.
+and resolve_chat_model all derive from it so the maps can't drift. Unlike the
+old hard-coded list, PROVIDERS is now LOADED from the on-disk registry at
+`<project>/providers/` (see that dir's README.md for the layout). Each
+provider is one `<provider>/provider.toml`; its models are
+`<provider>/models/<model>.toml`. This keeps per-provider and per-model config
+in version-controlled files instead of one Python literal.
 """
 
 from __future__ import annotations
 
 import os
 import sys
-from dataclasses import dataclass
+import tomllib
+from dataclasses import dataclass, field
+from pathlib import Path
 
-# NOTE: eventually set up a config file to define the ordering and default models given the API keys
-DEFAULT_OPENAI_MODEL = "openai:gpt-5.5"
-DEFAULT_GOOGLE_MODEL = "google_genai:gemini-3.5-flash"
-DEFAULT_CLAUDE_MODEL = "anthropic:claude-haiku-4-5"
-DEFAULT_CURSOR_MODEL = "cursor:composer-2.5"
-DEFAULT_DEEPSEEK_MODEL = "deepseek:deepseek-v4-flash"
-# left as "None" intentionally until I have them set up.
-DEFAULT_OLLAMA_MODEL = None
-DEFAULT_LMSTUDIO_MODEL = None
-DEFAULT_OPENROUTER_MODEL = None
+# Registry root: <project>/providers/. providers.py lives at
+# <project>/harness/providers.py, so parent.parent is <project>. Holds in the
+# repo and in the container (harness at /project/harness, registry at
+# /project/providers). Override with DEEPAGENTS_PROVIDERS_DIR for tests.
+PROVIDERS_DIR = Path(
+    os.getenv("DEEPAGENTS_PROVIDERS_DIR")
+    or (Path(__file__).resolve().parent.parent / "providers")
+)
 
 
 @dataclass(frozen=True)
 class Provider:
-    """One provider declared once. choose_model, validate_credentials, and
-    resolve_chat_model all derive from this registry so the maps can't drift."""
+    """One provider loaded from <provider>/provider.toml. choose_model,
+    validate_credentials, and resolve_chat_model all derive from this registry
+    so the maps can't drift."""
 
     prefix: str              # model spec prefix, e.g. "openai:"
     api_key_env: str         # env var that holds the key / opts the provider in
     default_model: str | None  # auto-select default; None => never auto-selected
     requires_key: bool       # validate_credentials enforces api_key_env
     base_url_env: str | None = None  # set => OpenAI-compatible, routed via ChatOpenAI
+    priority: int = 1_000    # auto-selection order; lowest wins
+    models: tuple[str, ...] = field(default_factory=tuple)  # known model specs
 
 
-# Auto-selection scans this list top-to-bottom, so order = priority when several
-# provider keys are set. Local providers (ollama, lmstudio) need no real key.
-PROVIDERS: list[Provider] = [
-    Provider("google_genai:", "GOOGLE_API_KEY", DEFAULT_GOOGLE_MODEL, requires_key=True),
-    Provider("anthropic:", "ANTHROPIC_API_KEY", DEFAULT_CLAUDE_MODEL, requires_key=True),
-    Provider("openai:", "OPENAI_API_KEY", DEFAULT_OPENAI_MODEL, requires_key=True),
-    Provider("cursor:", "CURSOR_API_KEY", DEFAULT_CURSOR_MODEL, requires_key=True, base_url_env="CURSOR_BASE_URL"),
-    Provider("ollama:", "OLLAMA_API_KEY", DEFAULT_OLLAMA_MODEL, requires_key=False),
-    Provider("lmstudio:", "LMSTUDIO_API_KEY", DEFAULT_LMSTUDIO_MODEL, requires_key=False, base_url_env="LMSTUDIO_BASE_URL"),
-    Provider("deepseek:", "DEEPSEEK_API_KEY", DEFAULT_DEEPSEEK_MODEL, requires_key=True),
-    Provider("openrouter:", "OPENROUTER_API_KEY", DEFAULT_OPENROUTER_MODEL, requires_key=True, base_url_env="OPENROUTER_BASE_URL"),
-]
+def _load_provider(provider_dir: Path) -> Provider:
+    """Build one Provider from <provider>/provider.toml + its models/ dir."""
+    config_path = provider_dir / "provider.toml"
+    with config_path.open("rb") as fh:
+        cfg = tomllib.load(fh)
+
+    name = provider_dir.name
+    prefix = cfg.get("prefix", f"{name}:")
+
+    try:
+        api_key_env = cfg["api_key_env"]
+        requires_key = bool(cfg["requires_key"])
+        priority = int(cfg["priority"])
+    except KeyError as exc:
+        raise SystemExit(
+            f"Provider config {config_path} is missing required field {exc}."
+        ) from exc
+
+    # Collect known models from models/*.toml; each file's `name` (default: its
+    # stem) is appended to the prefix to form the full spec.
+    models: list[str] = []
+    models_dir = provider_dir / "models"
+    if models_dir.is_dir():
+        for model_path in sorted(models_dir.glob("*.toml")):
+            with model_path.open("rb") as fh:
+                model_cfg = tomllib.load(fh)
+            models.append(prefix + model_cfg.get("name", model_path.stem))
+
+    # default_model is a model stem in provider.toml; expand to a full spec.
+    default_stem = cfg.get("default_model")
+    default_model = prefix + default_stem if default_stem else None
+    if default_model and default_model not in models:
+        raise SystemExit(
+            f"Provider '{name}' default_model '{default_stem}' has no matching "
+            f"models/{default_stem}.toml."
+        )
+
+    return Provider(
+        prefix=prefix,
+        api_key_env=api_key_env,
+        default_model=default_model,
+        requires_key=requires_key,
+        base_url_env=cfg.get("base_url_env"),
+        priority=priority,
+        models=tuple(models),
+    )
+
+
+def _load_providers(registry_dir: Path = PROVIDERS_DIR) -> list[Provider]:
+    """Load every provider from the registry, ordered by priority.
+
+    Auto-selection scans the returned list top-to-bottom, so priority = order
+    (lowest first). Local providers (ollama, lmstudio) carry requires_key=False.
+    """
+    if not registry_dir.is_dir():
+        raise SystemExit(
+            f"Provider registry not found at {registry_dir}. Expected a "
+            "providers/ directory (see providers/README.md)."
+        )
+    providers = [
+        _load_provider(child)
+        for child in registry_dir.iterdir()
+        if child.is_dir() and (child / "provider.toml").is_file()
+    ]
+    if not providers:
+        raise SystemExit(
+            f"No providers found under {registry_dir}; expected "
+            "<provider>/provider.toml entries."
+        )
+    providers.sort(key=lambda p: p.priority)
+    return providers
+
+
+PROVIDERS: list[Provider] = _load_providers()
 
 
 def _provider_for(model: str) -> Provider | None:

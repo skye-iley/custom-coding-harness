@@ -1,0 +1,4 @@
+name = "amazon/nova-2-lite-v1"
+context_window = 1000000
+price_completion = "0.0000025"
+price_prompt = "0.0000003"

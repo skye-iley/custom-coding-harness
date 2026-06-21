@@ -1,0 +1,6 @@
+# OpenRouter: OpenAI-compatible, routed via ChatOpenAI (needs OPENROUTER_BASE_URL).
+# No default model pinned yet — set DEEPAGENTS_MODEL=openrouter:<model> explicitly.
+api_key_env = "OPENROUTER_API_KEY"
+requires_key = true
+priority = 8
+base_url_env = "OPENROUTER_BASE_URL"

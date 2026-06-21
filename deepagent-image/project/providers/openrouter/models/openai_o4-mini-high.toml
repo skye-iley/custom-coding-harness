@@ -1,0 +1,4 @@
+name = "openai/o4-mini-high"
+context_window = 200000
+price_completion = "0.0000044"
+price_prompt = "0.0000011"

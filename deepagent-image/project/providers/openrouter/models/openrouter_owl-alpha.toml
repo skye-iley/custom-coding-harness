@@ -1,0 +1,4 @@
+name = "openrouter/owl-alpha"
+context_window = 1048756
+price_completion = "0"
+price_prompt = "0"

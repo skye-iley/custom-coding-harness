@@ -1,0 +1,4 @@
+name = "relace/relace-search"
+context_window = 256000
+price_completion = "0.000003"
+price_prompt = "0.000001"

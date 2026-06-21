@@ -1,0 +1,4 @@
+name = "qwen/qwen3.6-max-preview"
+context_window = 262144
+price_completion = "0.00000624"
+price_prompt = "0.00000104"

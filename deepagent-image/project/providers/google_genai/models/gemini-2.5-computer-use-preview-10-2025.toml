@@ -1,0 +1,3 @@
+name = "gemini-2.5-computer-use-preview-10-2025"
+context_window = 131072
+output_token_limit = 65536

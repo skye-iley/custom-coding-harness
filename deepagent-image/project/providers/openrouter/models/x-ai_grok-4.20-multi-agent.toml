@@ -1,0 +1,4 @@
+name = "x-ai/grok-4.20-multi-agent"
+context_window = 2000000
+price_completion = "0.0000025"
+price_prompt = "0.00000125"

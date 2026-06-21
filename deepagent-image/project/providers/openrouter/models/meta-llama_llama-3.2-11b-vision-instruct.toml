@@ -1,0 +1,4 @@
+name = "meta-llama/llama-3.2-11b-vision-instruct"
+context_window = 131072
+price_completion = "0.000000345"
+price_prompt = "0.000000345"

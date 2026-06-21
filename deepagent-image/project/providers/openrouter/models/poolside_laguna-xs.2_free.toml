@@ -1,0 +1,4 @@
+name = "poolside/laguna-xs.2:free"
+context_window = 262144
+price_completion = "0"
+price_prompt = "0"

@@ -1,0 +1,3 @@
+name = "gemma-4-31b-it"
+context_window = 262144
+output_token_limit = 32768

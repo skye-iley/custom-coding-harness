@@ -1,0 +1,5 @@
+# Google Gemini via langchain-google-genai (native init_chat_model prefix).
+api_key_env = "GOOGLE_API_KEY"
+requires_key = true
+priority = 1
+default_model = "gemini-3.5-flash"

@@ -1,0 +1,4 @@
+name = "prime-intellect/intellect-3"
+context_window = 131072
+price_completion = "0.0000011"
+price_prompt = "0.0000002"

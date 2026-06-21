@@ -1,0 +1,4 @@
+name = "aion-labs/aion-1.0"
+context_window = 131072
+price_completion = "0.000008"
+price_prompt = "0.000004"

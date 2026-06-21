@@ -1,0 +1,4 @@
+name = "ibm-granite/granite-4.0-h-micro"
+context_window = 131000
+price_completion = "0.000000112"
+price_prompt = "0.000000017"

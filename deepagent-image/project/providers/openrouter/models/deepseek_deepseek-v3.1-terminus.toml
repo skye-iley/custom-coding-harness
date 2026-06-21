@@ -1,0 +1,4 @@
+name = "deepseek/deepseek-v3.1-terminus"
+context_window = 163840
+price_completion = "0.00000095"
+price_prompt = "0.00000027"

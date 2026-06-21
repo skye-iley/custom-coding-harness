@@ -1,0 +1,4 @@
+name = "deepseek/deepseek-v3.2-exp"
+context_window = 163840
+price_completion = "0.00000041"
+price_prompt = "0.00000027"

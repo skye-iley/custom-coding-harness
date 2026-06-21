@@ -1,0 +1,5 @@
+# DeepSeek via langchain-deepseek (native init_chat_model prefix).
+api_key_env = "DEEPSEEK_API_KEY"
+requires_key = true
+priority = 7
+default_model = "deepseek-v4-flash"

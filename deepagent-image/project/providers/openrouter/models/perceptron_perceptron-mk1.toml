@@ -1,0 +1,4 @@
+name = "perceptron/perceptron-mk1"
+context_window = 32768
+price_completion = "0.0000015"
+price_prompt = "0.00000015"

@@ -1,0 +1,4 @@
+name = "google/gemini-3.1-pro-preview-customtools"
+context_window = 1048756
+price_completion = "0.000012"
+price_prompt = "0.000002"

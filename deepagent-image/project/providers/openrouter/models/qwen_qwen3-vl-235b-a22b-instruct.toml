@@ -1,0 +1,4 @@
+name = "qwen/qwen3-vl-235b-a22b-instruct"
+context_window = 262144
+price_completion = "0.00000088"
+price_prompt = "0.0000002"

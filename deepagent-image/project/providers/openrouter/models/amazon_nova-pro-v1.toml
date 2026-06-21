@@ -1,0 +1,4 @@
+name = "amazon/nova-pro-v1"
+context_window = 300000
+price_completion = "0.0000032"
+price_prompt = "0.0000008"

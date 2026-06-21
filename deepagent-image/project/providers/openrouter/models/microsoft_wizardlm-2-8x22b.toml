@@ -1,0 +1,4 @@
+name = "microsoft/wizardlm-2-8x22b"
+context_window = 65536
+price_completion = "0.00000062"
+price_prompt = "0.00000062"

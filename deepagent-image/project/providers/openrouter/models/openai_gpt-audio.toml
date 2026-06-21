@@ -1,0 +1,4 @@
+name = "openai/gpt-audio"
+context_window = 128000
+price_completion = "0.00001"
+price_prompt = "0.0000025"

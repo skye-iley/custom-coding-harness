@@ -1,0 +1,4 @@
+name = "arcee-ai/trinity-large-thinking"
+context_window = 262144
+price_completion = "0.0000008"
+price_prompt = "0.00000025"

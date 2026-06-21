@@ -1,0 +1,6 @@
+# Cursor: OpenAI-compatible, routed via ChatOpenAI (needs CURSOR_BASE_URL).
+api_key_env = "CURSOR_API_KEY"
+requires_key = true
+priority = 4
+default_model = "composer-2.5"
+base_url_env = "CURSOR_BASE_URL"

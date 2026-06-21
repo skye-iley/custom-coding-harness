@@ -1,0 +1,4 @@
+name = "allenai/olmo-3-32b-think"
+context_window = 65536
+price_completion = "0.0000005"
+price_prompt = "0.00000015"

@@ -1,0 +1,4 @@
+name = "google/gemini-2.5-pro-preview-05-06"
+context_window = 1048576
+price_completion = "0.00001"
+price_prompt = "0.00000125"

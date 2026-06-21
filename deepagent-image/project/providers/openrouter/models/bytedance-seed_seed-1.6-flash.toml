@@ -1,0 +1,4 @@
+name = "bytedance-seed/seed-1.6-flash"
+context_window = 262144
+price_completion = "0.0000003"
+price_prompt = "0.000000075"

@@ -1,0 +1,4 @@
+name = "deepseek/deepseek-chat-v3.1"
+context_window = 163840
+price_completion = "0.00000079"
+price_prompt = "0.00000021"

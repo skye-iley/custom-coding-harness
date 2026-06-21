@@ -1,0 +1,4 @@
+name = "qwen/qwen-plus"
+context_window = 1000000
+price_completion = "0.00000078"
+price_prompt = "0.00000026"

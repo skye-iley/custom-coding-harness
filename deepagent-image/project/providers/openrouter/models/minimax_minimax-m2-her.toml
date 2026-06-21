@@ -1,0 +1,4 @@
+name = "minimax/minimax-m2-her"
+context_window = 65536
+price_completion = "0.0000012"
+price_prompt = "0.0000003"

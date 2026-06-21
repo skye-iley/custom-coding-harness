@@ -1,0 +1,3 @@
+name = "lyria-3-pro-preview"
+context_window = 1048576
+output_token_limit = 65536

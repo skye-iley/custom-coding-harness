@@ -1,0 +1,4 @@
+name = "nex-agi/nex-n2-pro:free"
+context_window = 262144
+price_completion = "0"
+price_prompt = "0"

@@ -1,0 +1,5 @@
+# Ollama: local, keyless (requires_key = false). No default model pinned yet,
+# so it is never auto-selected — set DEEPAGENTS_MODEL=ollama:<model> explicitly.
+api_key_env = "OLLAMA_API_KEY"
+requires_key = false
+priority = 5

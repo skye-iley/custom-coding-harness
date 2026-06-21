@@ -1,0 +1,4 @@
+name = "openai/gpt-oss-120b:free"
+context_window = 131072
+price_completion = "0"
+price_prompt = "0"

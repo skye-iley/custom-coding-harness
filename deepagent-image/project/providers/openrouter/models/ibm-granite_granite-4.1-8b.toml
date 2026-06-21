@@ -1,0 +1,4 @@
+name = "ibm-granite/granite-4.1-8b"
+context_window = 131072
+price_completion = "0.0000001"
+price_prompt = "0.00000005"

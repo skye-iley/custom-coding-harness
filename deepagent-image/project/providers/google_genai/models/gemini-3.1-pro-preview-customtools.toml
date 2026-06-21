@@ -1,0 +1,3 @@
+name = "gemini-3.1-pro-preview-customtools"
+context_window = 1048576
+output_token_limit = 65536

@@ -1,0 +1,4 @@
+name = "mistralai/voxtral-small-24b-2507"
+context_window = 32000
+price_completion = "0.0000003"
+price_prompt = "0.0000001"

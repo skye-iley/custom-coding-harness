@@ -1,0 +1,4 @@
+name = "~google/gemini-flash-latest"
+context_window = 1048576
+price_completion = "0.000009"
+price_prompt = "0.0000015"

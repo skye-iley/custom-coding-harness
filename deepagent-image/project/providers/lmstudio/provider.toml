@@ -1,0 +1,6 @@
+# LM Studio: OpenAI-compatible, local, keyless (needs LMSTUDIO_BASE_URL).
+# No default model pinned yet — set DEEPAGENTS_MODEL=lmstudio:<model> explicitly.
+api_key_env = "LMSTUDIO_API_KEY"
+requires_key = false
+priority = 6
+base_url_env = "LMSTUDIO_BASE_URL"

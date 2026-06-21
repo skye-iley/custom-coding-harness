@@ -1,0 +1,4 @@
+name = "qwen/qwen3-14b"
+context_window = 131702
+price_completion = "0.00000024"
+price_prompt = "0.0000001"

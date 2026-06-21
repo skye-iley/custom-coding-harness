@@ -1,0 +1,4 @@
+name = "ai21/jamba-large-1.7"
+context_window = 256000
+price_completion = "0.000008"
+price_prompt = "0.000002"

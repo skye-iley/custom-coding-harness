@@ -1,0 +1,4 @@
+name = "thedrummer/cydonia-24b-v4.1"
+context_window = 131072
+price_completion = "0.0000005"
+price_prompt = "0.0000003"

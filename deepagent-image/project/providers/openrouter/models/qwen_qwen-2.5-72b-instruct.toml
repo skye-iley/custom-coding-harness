@@ -1,0 +1,4 @@
+name = "qwen/qwen-2.5-72b-instruct"
+context_window = 131072
+price_completion = "0.0000004"
+price_prompt = "0.00000036"

@@ -1,0 +1,4 @@
+name = "qwen/qwen3-vl-30b-a3b-thinking"
+context_window = 131072
+price_completion = "0.00000156"
+price_prompt = "0.00000013"

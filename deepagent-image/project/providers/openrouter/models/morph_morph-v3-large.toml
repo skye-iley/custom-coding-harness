@@ -1,0 +1,4 @@
+name = "morph/morph-v3-large"
+context_window = 262144
+price_completion = "0.0000019"
+price_prompt = "0.0000009"

@@ -1,0 +1,4 @@
+name = "minimax/minimax-m2.7"
+context_window = 204800
+price_completion = "0.000001"
+price_prompt = "0.00000025"

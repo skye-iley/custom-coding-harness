@@ -1,0 +1,4 @@
+name = "switchpoint/router"
+context_window = 131072
+price_completion = "0.0000034"
+price_prompt = "0.00000085"
