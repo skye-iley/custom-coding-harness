@@ -1,0 +1,228 @@
+# Milestone 1 Plan: Cost/Token Visibility + Resource Caps
+
+**Status:** Planned. Successor to the MVP (interactive multi-turn REPL, validated core loop).
+**Maps to:** `design_doc.md` §6 (Token Usage & Cost Tracker) and §2 (Resource Limits).
+**Closes Known Limitations** (`design_doc_mvp.md` §9): "pays provider rates blind", "no per-session
+turn or token ceiling", "runaway agent can consume host CPU/memory".
+
+When this doc and `design_doc.md` disagree on *what we build next*, this doc wins (same rule the MVP
+doc has over the full design).
+
+---
+
+## 1. Goal & Definition of Done
+
+A session reports what it spent and refuses to spend without bound, and a container cannot exhaust
+the host.
+
+Done when:
+1. Each turn prints a per-turn and cumulative token + cost line (stderr, `[harness]`-prefixed, like
+   the existing stage markers — out of the agent's reply stream).
+2. Session end prints a total: tokens (input / output / cached) and dollar cost.
+3. An optional per-session budget (tokens or dollars) ends the REPL loudly when crossed.
+4. Cost comes from each provider's declared pricing (per-provider strategy in the `PROVIDERS`
+   registry); a model with no pricing **fails loudly**, never silently costs `0`
+   (`design_doc.md` §6 caveat).
+5. `run-docker.{ps1,sh}` apply `--cpus`, `--memory`, `--pids-limit` with sane defaults, overridable.
+6. Smoke test still passes (single non-interactive turn now also emits a usage line).
+
+Explicit non-goals (stay deferred): prompt caching *strategy*, Headroom/Caveman compression,
+telemetry-to-PR, account-level billing/usage APIs (OpenAI `/usage`, Anthropic admin cost API) for
+the live tracker (wrong granularity/latency — see §2.1), rate-table auto-refresh from a remote,
+multi-agent cost attribution. We only *account* for cached tokens if the provider reports them; we
+do not *introduce* caching here.
+
+---
+
+## 2. Cost/Token Tracker
+
+The tracker is a **fully optional module**: a gated middleware plus a null default. With it removed
+(or no pricing declared), the harness behaves byte-for-byte like the MVP. See §2.5.
+
+### 2.1 Tokens vs. cost — two different sources
+
+Separate the two; they do not come from the same place.
+
+**Tokens — in-band, free, always available.** LangChain attaches `usage_metadata` to each
+`AIMessage` (`input_tokens`, `output_tokens`, `total_tokens`, and `input_token_details` with
+`cache_read` / `cache_creation` when the provider reports them). This *is* the provider's usage API
+for our purpose — no extra call, no extra credential.
+
+**Cost — from the provider's declared pricing strategy (§2.2), not a global price file.** Three
+kinds; each `Provider` in the registry declares which it uses:
+
+| Strategy | Providers | How cost is derived |
+|----------|-----------|---------------------|
+| `ReportedCost` | OpenRouter (returns cost in-band) | read the cost the provider already put on the response; no local rate table to drift |
+| `RateTable` | native: anthropic / openai / google / deepseek | per-model `input` / `output` / `cache_read` rates declared in the registry; **a dated snapshot — staleness caveat from §6 stays** |
+| `Free` | local: ollama / lmstudio | cost = 0 |
+
+**Account-level billing APIs are explicitly rejected for the live tracker** (OpenAI `/usage`,
+Anthropic admin cost API): account-aggregate not per-session, delayed by hours, and need a separate
+admin/org credential the harness does not hold. Wrong granularity, latency, and cred surface for a
+per-turn display. (A later, separate reconciliation feature could use them — not M1.)
+
+*Token-attribution caveat (verify during build):* `usage_metadata` is per-LLM-call; one turn with
+tool use makes several model calls. Accumulating via the `after_model` middleware hook (§2.5) counts
+each call once as it happens, sidestepping the "which messages are new this turn" problem that a
+post-invoke `result["messages"]` walk would have. `--stream` path: confirm chunks still carry
+`usage_metadata`; if not, document that streamed runs skip the per-turn line (acceptable for M1).
+
+### 2.2 Pricing lives in the provider registry (`harness/providers.py`)
+
+`PROVIDERS` is already the single source of truth for model routing; pricing joins it so a
+custom/third-party provider is fully described by one registry entry — no second file to edit.
+
+```python
+@dataclass(frozen=True)
+class Provider:
+    prefix: str
+    api_key_env: str
+    default_model: str | None
+    requires_key: bool
+    base_url_env: str | None = None
+    pricing: Pricing = Free()        # NEW: how a turn on this provider is priced
+```
+
+`Pricing` is a small tagged interface (`ReportedCost` | `RateTable` | `Free`) with one method:
+`cost(usage_metadata, model_spec) -> float | None`. Price is **per-model**, so `RateTable` holds a
+`{model_name: {input, output, cache_read}}` map keyed by the bare model (the part after the prefix),
+not a scalar on the provider. `cost()` **raises loudly** when a `RateTable` provider is asked to
+price a model absent from its table — never returns `0` silently (§6 caveat). `ReportedCost` returns
+the in-band figure; `Free` returns `0`.
+
+Rates are a dated snapshot: stamp the registry (or a sidecar) with a `priced_as_of` date and warn
+when stale. `prices.json` is dropped; if a per-deployment override is ever wanted it can return as
+an *optional* file that patches the registry, but it is not the source of truth.
+
+### 2.3 New module: `harness/cost.py`
+
+Holds the *math and plumbing only* — the rate data lives in the registry (§2.2).
+
+- the `Pricing` types (`ReportedCost`, `RateTable`, `Free`) and the `cost()` dispatch.
+- `class UsageAccumulator` — running `input` / `output` / `cache_read` / `cache_creation` / `cost`;
+  `add(usage_metadata, provider)` delegates pricing to `provider.pricing.cost(...)`.
+- `format_line(turn_usage, totals) -> str` — the `[harness] usage:` string.
+- `class BudgetExceeded(Exception)` — raised when a ceiling is crossed (caught in `run_repl`, §2.5).
+
+### 2.4 `pricing` field, where it is read
+
+`cost.py` imports the `Pricing` types; `providers.py` imports them to populate each `Provider`. To
+avoid a circular import (providers ↔ cost), the `Pricing` types live in `cost.py` and `providers.py`
+imports *from* `cost.py` (one direction). `cost.py` must not import `providers.py`.
+
+### 2.5 Wiring — one gated middleware, null default (modularity seam)
+
+The tracker plugs in exactly like `ShellHooksMiddleware` (`harness/hooks.py`): an `AgentMiddleware`
+appended to the agent's middleware list. **`run_turn` is not touched.**
+
+```
+class CostTrackerMiddleware(AgentMiddleware):
+    after_model  -> accumulator.add(usage_metadata, provider); if over budget: raise BudgetExceeded
+    after_agent  -> print "[harness] usage: turn=… session=… cost=$…" to stderr (per turn)
+```
+
+`harness/cli.py` changes, total:
+- `main()`: build the middleware **only if** the resolved provider has non-`Free` pricing (or a
+  budget flag is set); append it to the `middleware` list passed to `build_agent`. Otherwise append
+  nothing → null behavior.
+- `run_repl()`: it already wraps each turn in `try/except KeyboardInterrupt`; add a sibling
+  `except BudgetExceeded` → `_stage("budget exceeded")`, print session total, break (same
+  deterministic exit as `/exit`). When the tracker is absent the exception is never raised, so the
+  clause is inert.
+- `parse_args`: add `--max-cost` (USD float) / `--max-tokens` (int), also from env
+  (`DEEPAGENTS_MAX_COST` / `DEEPAGENTS_MAX_TOKENS`); default unset = no ceiling.
+
+**Remove-without-functional-change check:** delete `cost.py`, drop the `pricing=` defaults
+(they default to `Free`) and the middleware-append + budget args in `cli.py`. The one residue is the
+`except BudgetExceeded` clause; it is inert when nothing raises it. Gate it behind the
+middleware-enabled flag if you want literally zero residue — a 1-line conditional, the only price of
+"fully modular."
+
+### 2.6 Files touched
+
+| File | Change |
+|------|--------|
+| `project/harness/cost.py` | **new** — `Pricing` types, `cost()` dispatch, `UsageAccumulator`, `CostTrackerMiddleware`, `BudgetExceeded`, `format_line` |
+| `project/harness/providers.py` | add `pricing: Pricing` to `Provider`; populate per provider (native → `RateTable` with dated per-model rates, openrouter → `ReportedCost`, ollama/lmstudio → `Free`) |
+| `project/harness/cli.py` | conditional middleware append in `main`; `except BudgetExceeded` + session total in `run_repl`; budget args in `parse_args` |
+| `project/.env.example` | document `DEEPAGENTS_MAX_COST` / `DEEPAGENTS_MAX_TOKENS` |
+| `deepagent-image/CLAUDE.md` | document the pricing strategies in the registry, budget env vars, the usage line, and the "tracker is removable" contract |
+
+---
+
+## 3. Resource Caps
+
+Pure run-script change; no image rebuild. Add to the `docker run` arg list in **both** scripts
+(keep the `.ps1` / `.sh` pair in sync):
+
+- `--cpus` (default e.g. `2`)
+- `--memory` (default e.g. `4g`)
+- `--pids-limit` (default e.g. `512`, blunts fork-bomb)
+
+Each overridable: `run-docker.ps1` gains `-Cpus` / `-Memory` / `-PidsLimit` params; `run-docker.sh`
+gains matching flags or env vars. Defaults live in one place near the top of each script.
+
+| File | Change |
+|------|--------|
+| `deepagent-image/scripts/run-docker.ps1` | add cap params + append to `$dockerArgs` |
+| `deepagent-image/scripts/run-docker.sh` | mirror exactly |
+| `deepagent-image/CLAUDE.md` | document the caps + override flags |
+| `design_doc.md` §2 / status matrix | flip Resource Limits ⬜ → ✅ when shipped |
+
+These are a Docker boundary control, not a sandbox — do not describe them as sandboxing
+(`design_doc_mvp.md` §5 / repo CLAUDE.md hard rule).
+
+---
+
+## 4. Build Order
+
+1. `cost.py`: `Pricing` types (`ReportedCost` / `RateTable` / `Free`), `cost()` dispatch,
+   `UsageAccumulator`, with unit coverage for per-model lookup and loud-fail-on-missing-rate.
+2. Add `pricing` to `Provider` in `providers.py`; populate each provider (native `RateTable` with a
+   dated rate map, openrouter `ReportedCost`, local `Free`).
+3. `CostTrackerMiddleware` + conditional append in `cli.py` (per-turn line + session total),
+   no budget yet. Verify token counts against a real provider turn (resolve the per-call
+   attribution caveat, §2.1). Confirm OpenRouter's in-band cost field and that LangChain surfaces
+   it before locking `ReportedCost`.
+4. `BudgetExceeded` + ceiling enforcement (`after_model` raise / `run_repl` catch); budget args.
+5. Resource caps in both run scripts.
+6. Update `smoke` expectation (single turn emits a usage line), run `verify` / `smoke`, update docs
+   and the `design_doc.md` status matrix.
+
+---
+
+## 5. Risks / Open Questions
+
+- **Per-call usage attribution.** A turn fans out into several model calls. The `after_model` hook
+  counts each call once as it fires, avoiding the "which messages are new" problem of a post-invoke
+  walk. Verify in step 3.
+- **`ReportedCost` (OpenRouter) is unconfirmed.** Need to verify OpenRouter returns cost in-band
+  *and* that LangChain's `ChatOpenAI` surfaces it (it may need `usage`/`extra_body` opt-in, and the
+  field may land in `response_metadata` rather than `usage_metadata`). If it does not surface, fall
+  back to a `RateTable` for OpenRouter. Gates step 3.
+- **Rate staleness.** `RateTable` is a dated snapshot; mitigated by a `priced_as_of` stamp + age
+  warning, not solved.
+- **`--stream` path** has no final message to read usage from — confirm chunks carry usage or
+  document the gap.
+- **OpenAI-compatible providers** route a renamed model through `ChatOpenAI`; confirm
+  `usage_metadata` survives and the per-model rate lookup keys off the right name (bare model after
+  the prefix).
+- **Cached tokens** only appear if the provider reports them; absent details, cache cost reads `0`
+  (acceptable — we are accounting, not enabling caching).
+- **Circular import** providers ↔ cost: `Pricing` types live in `cost.py`; `providers.py` imports
+  from `cost.py` only (§2.4).
+
+---
+
+## 6. Acceptance
+
+- `run-docker` turn prints a per-turn usage/cost line; session end prints a total.
+- A `RateTable` model with no rate aborts with a clear "no pricing for <model>" error, not a `$0`
+  total.
+- `--max-cost` / `--max-tokens` end the session at the ceiling with a `[harness] budget exceeded`
+  marker.
+- **Removing the tracker** (delete `cost.py`, default `pricing` to `Free`, drop the cli wiring)
+  leaves the harness behaving exactly as the MVP — verified by the smoke test passing unchanged.
+- `docker inspect` on a running container shows the cpu / memory / pids limits applied.
+- `smoke` and `verify` pass; `.ps1` and `.sh` scripts stay behavior-identical.
