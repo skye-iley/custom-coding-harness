@@ -48,8 +48,10 @@ EXIT_TOKENS = {"/exit", "/quit"}
 
 
 def _stage(message: str) -> None:
-    """Lifecycle marker, printed with a prefix distinct from agent replies."""
-    print(f"[harness] {message}")
+    """Lifecycle marker. Written to stderr (not stdout) with a distinct prefix
+    so it stays out of the agent's reply stream and can be grepped/suppressed
+    independently (MVP §1a req 6)."""
+    print(f"[harness] {message}", file=sys.stderr)
 
 
 def _is_exit_command(line: str) -> bool:
@@ -111,6 +113,12 @@ def run_repl(agent, config: dict, initial_task: str, stream: bool = False) -> in
         try:
             answer = run_turn(agent, line, config, stream=stream)
         except KeyboardInterrupt:
+            # Relies on KeyboardInterrupt propagating out of the synchronous
+            # invoke. Caveat: if the SIGINT lands mid-superstep (e.g. during a
+            # checkpoint write) the thread state for this thread_id can be left
+            # partial — the human message may or may not have persisted — so a
+            # later resume of the same thread could see slightly inconsistent
+            # history. Acceptable for the MVP; revisit if cancellation gets flaky.
             print("\n[harness] turn cancelled")
             continue
 
