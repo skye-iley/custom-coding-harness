@@ -79,8 +79,8 @@ close it. This is the in-container conversation loop only — **not** the host-s
 - `scripts/run-docker.ps1` / `scripts/run-docker.sh` — add `-it` so stdin/TTY is available for the
   prompt loop (keep `--rm`, the `.env` guard, and the optional task arg; keep the `.ps1`/`.sh` pair
   in sync).
-- Docs: update the run sections of `deepagent-image/CLAUDE.md` and root `CLAUDE.md` once the code
-  lands (they currently describe the single-shot flow).
+- Docs: ✅ done — the run sections of `deepagent-image/CLAUDE.md` and root `CLAUDE.md` now describe
+  the persistent multi-turn REPL (`docker run -it`, `/exit`/`/quit`, single-turn non-TTY fallback).
 
 ---
 
@@ -158,11 +158,17 @@ the `scripts/` wrappers:
   the model interpreting them; lifecycle stage markers (`container loading`, `building agent`,
   `thinking`, `reading prompt`, `session closed`) are printed distinctly from agent replies.
 - **Provider-agnostic model selection.** `PROVIDERS` is the single source of truth for
-  `choose_model`, credential validation, and chat-model resolution. Native providers
+  `choose_model`, credential validation, and chat-model resolution. It is **loaded at import time
+  from the on-disk `project/providers/` TOML registry** (`<provider>/provider.toml` +
+  `models/<model>.toml`), not hard-coded — add/change a provider or model by editing TOML, no Python
+  edit (`DEEPAGENTS_PROVIDERS_DIR` overrides the path for tests). Native providers
   (openai / anthropic / google_genai / deepseek / ollama) pass through to `init_chat_model`;
   OpenAI-compatible providers (cursor / openrouter / lmstudio) route via `ChatOpenAI` + a
-  `*_BASE_URL`. Selection precedence: `--model` → `DEEPAGENTS_MODEL` → first provider in the list
-  whose API key is set and whose `default_model` is non-`None`.
+  `*_BASE_URL`. Selection precedence: `--model` → `DEEPAGENTS_MODEL` → first provider by ascending
+  `priority` whose API key is set and whose `default_model` is non-`None`. The dev-time
+  `sync-models` command (`python3 -m harness sync-models`; `scripts/sync-models.{sh,ps1}`)
+  regenerates `models/*.toml` from each provider's live list-models endpoint — it needs keys +
+  network (the sealed runtime has neither) and never rewrites `provider.toml`.
 - **MCP tools.** `.mcp.json` (Claude/Cursor shape) is loaded via `langchain_mcp_adapters`; transport
   inferred from `command`/`url`. Empty/missing = no extra tools.
 - **Lifecycle hooks.** `hooks.json` shell commands fire on session / agent / model / tool events
@@ -240,6 +246,7 @@ copy project\.env.example project\.env      # then set ONE provider key
 | Exit command | typed at the `you>` prompt | `/exit` or `/quit` — matched in Python, no LLM; EOF/Ctrl-C also end the session |
 | `DEEPAGENTS_THREAD_ID` | `.env` | Optional (`default`); reuse to resume memory across sessions |
 | `AGENT_WORKSPACE` | `.env` | Fixed to `/project/workspace` for the standard mount |
+| Provider/model registry | `project/providers/` (TOML) | Built-in; edit to add providers/models. `DEEPAGENTS_PROVIDERS_DIR` overrides path (tests) |
 | MCP servers | `project/.mcp.json` | Optional |
 | Lifecycle hooks | `project/hooks.json` | Optional |
 | Project instructions | `AGENTS.md` (container CWD) | Optional; appended to system prompt |
