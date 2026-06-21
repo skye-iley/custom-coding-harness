@@ -39,8 +39,16 @@ if [[ -f "$HOME/.gitconfig" ]]; then
   GIT_MOUNT=(-v "$HOME/.gitconfig:/home/agent/.gitconfig:ro")
 fi
 
+# -it gives the REPL prompt loop a TTY. If stdin isn't actually a terminal
+# (CI, piped smoke tests), -t fails to allocate and Docker falls back to a
+# plain pipe, which the harness already handles via the non-TTY fallback.
+TTY_FLAGS="-i"
+if [[ -t 0 ]]; then
+  TTY_FLAGS="-it"
+fi
+
 if [[ $# -gt 0 ]]; then
-exec docker run --rm \
+exec docker run --rm $TTY_FLAGS \
   --env-file "$ENV_FILE" \
   -e AGENT_WORKSPACE=/project/workspace \
   -v "$WORKSPACE:/project/workspace" \
@@ -49,7 +57,7 @@ exec docker run --rm \
   python3 main.py "$@"
 fi
 
-exec docker run --rm \
+exec docker run --rm $TTY_FLAGS \
   --env-file "$ENV_FILE" \
   -e AGENT_WORKSPACE=/project/workspace \
   -v "$WORKSPACE:/project/workspace" \

@@ -46,8 +46,13 @@ cd deepagent-image
 .\scripts\build.ps1                       # docker build -t deepagent-harness
 .\scripts\verify.ps1                      # sanity-check harness venv + conda
 .\scripts\smoke.ps1                       # smoke test
-.\scripts\run-docker.ps1 "your task"      # run agent against project\workspace
+.\scripts\run-docker.ps1                  # opens a persistent interactive session (you> prompt)
+.\scripts\run-docker.ps1 "your task"      # runs that task first, then drops to the prompt
 ```
+
+`run-docker` is a persistent multi-turn session, not a one-shot: the container stays up across
+turns until you type `/exit` or `/quit` at the `you>` prompt (or Ctrl-D). It needs a TTY (`-it`);
+piped/non-interactive stdin collapses to a single turn for CI/smoke. See `design_doc_mvp.md` §1a.
 
 `.sh` equivalents exist for each script — **keep the `.ps1` and `.sh` pairs in sync** when editing one.
 

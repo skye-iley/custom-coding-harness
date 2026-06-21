@@ -50,8 +50,17 @@ function Seed-Workspace {
 $SeedSource = $DefaultWorkspace
 Seed-Workspace -Target $WorkspacePath -SeedSource $SeedSource
 
+# -it gives the REPL prompt loop a TTY. If stdin is redirected (CI, piped
+# smoke tests) only -i is requested; Docker can't allocate a pty for -t
+# without one, and the harness already handles the non-TTY case itself.
+$TtyFlags = @("-i")
+if (-not [Console]::IsInputRedirected) {
+    $TtyFlags = @("-i", "-t")
+}
+
 $dockerArgs = @(
-    "run", "--rm",
+    "run", "--rm"
+) + $TtyFlags + @(
     "--env-file", $EnvFile,
     "-e", "AGENT_WORKSPACE=/project/workspace",
     "-v", "${WorkspacePath}:/project/workspace"
