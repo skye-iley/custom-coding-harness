@@ -4,6 +4,25 @@ Generated while implementing `design_doc_mvp.md` §1a (interactive REPL). Captur
 without user sign-off, things that could not be verified in this environment, and options for
 anything that was genuinely a judgment call. Delete sections once resolved/accepted.
 
+## BLOCKED: could not push / open PR
+
+Work is committed locally on `feat/interactive-repl-mvp` (commit `4fbe5a3`), but this sandbox has
+no GitHub auth: no `gh` CLI installed, no `credential.helper`, no `~/.ssh` keys, and the remote is
+HTTPS (`https://github.com/skye-iley/custom-deepagent-based-harness.git`). `git push` fails with
+"could not read Username for 'https://github.com'".
+
+**Action needed from you** — pick one:
+1. Run `git push -u origin feat/interactive-repl-mvp` yourself from a host with GitHub auth, then
+   `gh pr create --base main --fill` (or open the PR via the GitHub web UI).
+2. Authenticate this environment (`gh auth login`, or configure a credential helper / PAT) and ask
+   me to retry the push + PR creation.
+
+Also note: I had to set a **repo-local** (not `--global`) git identity to even create the commit —
+`user.name = holder-agent`, `user.email = agent@localhost` — since none was configured anywhere on
+this machine and `git commit` refuses to run without one. You picked the "placeholder identity"
+option when I asked. Change it (`git config user.name "..."` / `user.email "..."`) if you want a
+real identity attached to this and future commits in this repo.
+
 ## Branch name
 
 Used `feat/interactive-repl-mvp`, not `feat/interactive-repl` — that name was already used (and
