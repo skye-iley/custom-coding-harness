@@ -68,32 +68,37 @@ each call once as it happens, sidestepping the "which messages are new this turn
 post-invoke `result["messages"]` walk would have. `--stream` path: confirm chunks still carry
 `usage_metadata`; if not, document that streamed runs skip the per-turn line (acceptable for M1).
 
-### 2.2 Pricing lives in the provider registry (`harness/providers.py`)
+### 2.2 Pricing lives in the on-disk TOML registry (`project/providers/`)
+
+> **Updated for the registry refactor.** `PROVIDERS` is no longer a hard-coded Python list — it is
+> loaded at import from `project/providers/<provider>/provider.toml` + `models/<model>.toml`
+> (`harness/providers.py:_load_providers`). So pricing data must live in those TOML files, **not** a
+> Python rate map. The earlier draft of this section hard-coded a `{model: rates}` dict on the
+> `Provider` dataclass; that is superseded by the layout below.
 
 `PROVIDERS` is already the single source of truth for model routing; pricing joins it so a
-custom/third-party provider is fully described by one registry entry — no second file to edit.
+custom/third-party provider is fully described by its registry files — no second file to edit.
 
-```python
-@dataclass(frozen=True)
-class Provider:
-    prefix: str
-    api_key_env: str
-    default_model: str | None
-    requires_key: bool
-    base_url_env: str | None = None
-    pricing: Pricing = Free()        # NEW: how a turn on this provider is priced
-```
+- **Strategy on the provider** — `provider.toml` declares which pricing strategy the provider uses,
+  e.g. `pricing = "rate_table"` (native anthropic/openai/google/deepseek), `pricing = "reported"`
+  (openrouter, cost in-band), or `pricing = "free"` (ollama/lmstudio; the default when omitted).
+- **Rates on the model** — for `rate_table` providers each `models/<model>.toml` carries a
+  `[pricing]` table (`input`, `output`, `cache_read` per token/Mtok) plus a `priced_as_of` date.
+  `sync-models` already pulls pricing for the providers that return it (google/openrouter/ollama),
+  so these snapshots are partly auto-populated and refreshable; hand-fill the rest.
+
+The loader (`_load_provider`) reads the strategy + per-model `[pricing]` tables into the in-memory
+registry. `harness/providers.py` adds a `pricing: Pricing` field on `Provider` (and per-model rate
+data on the model entries) built **from the TOML**, then `cost.py` does the math.
 
 `Pricing` is a small tagged interface (`ReportedCost` | `RateTable` | `Free`) with one method:
-`cost(usage_metadata, model_spec) -> float | None`. Price is **per-model**, so `RateTable` holds a
-`{model_name: {input, output, cache_read}}` map keyed by the bare model (the part after the prefix),
-not a scalar on the provider. `cost()` **raises loudly** when a `RateTable` provider is asked to
-price a model absent from its table — never returns `0` silently (§6 caveat). `ReportedCost` returns
-the in-band figure; `Free` returns `0`.
+`cost(usage_metadata, model_spec) -> float | None`. Price is **per-model**, keyed by the bare model
+(the part after the prefix). `cost()` **raises loudly** when a `RateTable` provider is asked to
+price a model whose TOML has no `[pricing]` table — never returns `0` silently (§6 caveat).
+`ReportedCost` returns the in-band figure; `Free` returns `0`.
 
-Rates are a dated snapshot: stamp the registry (or a sidecar) with a `priced_as_of` date and warn
-when stale. `prices.json` is dropped; if a per-deployment override is ever wanted it can return as
-an *optional* file that patches the registry, but it is not the source of truth.
+Rates are a dated snapshot: the per-model `priced_as_of` stamps the age and the harness warns when
+stale. `prices.json` is dropped; the model TOMLs are the source of truth.
 
 ### 2.3 New module: `harness/cost.py`
 
@@ -144,7 +149,10 @@ middleware-enabled flag if you want literally zero residue — a 1-line conditio
 | File | Change |
 |------|--------|
 | `project/harness/cost.py` | **new** — `Pricing` types, `cost()` dispatch, `UsageAccumulator`, `CostTrackerMiddleware`, `BudgetExceeded`, `format_line` |
-| `project/harness/providers.py` | add `pricing: Pricing` to `Provider`; populate per provider (native → `RateTable` with dated per-model rates, openrouter → `ReportedCost`, ollama/lmstudio → `Free`) |
+| `project/providers/<provider>/provider.toml` | add `pricing = "rate_table"|"reported"|"free"` (default `free`) |
+| `project/providers/<provider>/models/<model>.toml` | add `[pricing]` table (`input`/`output`/`cache_read` + `priced_as_of`) for `rate_table` providers |
+| `project/harness/providers.py` | read the `pricing` strategy + per-model `[pricing]` from TOML in `_load_provider`; add `pricing: Pricing` to `Provider`; build it from the loaded data (native → `RateTable`, openrouter → `ReportedCost`, ollama/lmstudio → `Free`) |
+| `project/harness/sync_models.py` | (already pulls pricing where the API returns it) ensure it writes the `[pricing]` table + `priced_as_of` |
 | `project/harness/cli.py` | conditional middleware append in `main`; `except BudgetExceeded` + session total in `run_repl`; budget args in `parse_args` |
 | `project/.env.example` | document `DEEPAGENTS_MAX_COST` / `DEEPAGENTS_MAX_TOKENS` |
 | `deepagent-image/CLAUDE.md` | document the pricing strategies in the registry, budget env vars, the usage line, and the "tracker is removable" contract |
@@ -179,8 +187,10 @@ These are a Docker boundary control, not a sandbox — do not describe them as s
 
 1. `cost.py`: `Pricing` types (`ReportedCost` / `RateTable` / `Free`), `cost()` dispatch,
    `UsageAccumulator`, with unit coverage for per-model lookup and loud-fail-on-missing-rate.
-2. Add `pricing` to `Provider` in `providers.py`; populate each provider (native `RateTable` with a
-   dated rate map, openrouter `ReportedCost`, local `Free`).
+2. Declare `pricing` strategy in each `provider.toml` and per-model `[pricing]` tables in
+   `models/*.toml` (native `rate_table` with dated rates, openrouter `reported`, local `free`);
+   read them in `_load_provider` and add the `pricing: Pricing` field to `Provider` built from that
+   TOML data.
 3. `CostTrackerMiddleware` + conditional append in `cli.py` (per-turn line + session total),
    no budget yet. Verify token counts against a real provider turn (resolve the per-call
    attribution caveat, §2.1). Confirm OpenRouter's in-band cost field and that LangChain surfaces

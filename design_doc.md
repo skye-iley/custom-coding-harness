@@ -22,8 +22,9 @@
 
 **Built today (the MVP):** a single Docker image (`deepagent-harness`: Ubuntu 24.04 + uv venv +
 Miniforge) that runs **one** `create_deep_agent` against a bind-mounted workspace. Model selection
-is the `PROVIDERS` registry in `project/main.py` (explicit, or auto-selected by which API key is set
-— **there is no classifier**). It loads MCP tools (`.mcp.json`), runs lifecycle shell hooks
+is the `PROVIDERS` registry in `project/harness/providers.py`, loaded at import time from the
+on-disk `project/providers/` TOML registry (explicit, or auto-selected by which API key is set —
+**there is no classifier**). It loads MCP tools (`.mcp.json`), runs lifecycle shell hooks
 (`hooks.json`), persists conversation state to a per-workspace SqliteSaver checkpoint (keyed by
 thread id), isolates workspace dependencies in a workspace-local conda env, and receives secrets via
 `--env-file` at run time. That is roughly the §1/§4 provider layer + the built parts of §2/§3.
@@ -31,6 +32,8 @@ thread id), isolates workspace dependencies in a workspace-local conda env, and 
 | § | Capability | Status | Notes |
 |---|------------|--------|-------|
 | 1, 4 | Provider-agnostic model interface | ✅ Built | `PROVIDERS` registry; native openai/anthropic/google/deepseek + OpenAI-compatible cursor/openrouter/lmstudio |
+| 1, 4 | On-disk provider/model registry (`providers/` TOML) | ✅ Built | `PROVIDERS` loaded from `project/providers/<provider>/provider.toml` + `models/*.toml` at import; add/change via TOML, no Python edit. `DEEPAGENTS_PROVIDERS_DIR` overrides (tests) |
+| 1, 4 | `sync-models` registry refresh | ✅ Built | `python3 -m harness sync-models` (`harness/sync_models.py`, `scripts/sync-models.{sh,ps1}`) regenerates `models/*.toml` from provider list-models endpoints. **Dev-time only** (needs keys + network); never edits `provider.toml` |
 | 1, 4 | FSM classifier routing (local↔cloud) | 🔬 Research | No classifier exists; routing is explicit or auto-by-API-key. >95% accuracy target has no baseline |
 | 2 | Single container (uv venv + conda) | ✅ Built | `Dockerfile` |
 | 2 | Workspace conda env isolation | ✅ Built | workspace-local `.conda/env`, `run-in-env.sh` |
@@ -46,7 +49,7 @@ thread id), isolates workspace dependencies in a workspace-local conda env, and 
 | — | MCP tool loading (`.mcp.json`) | ✅ Built | `load_mcp_tools` (not a separate doc section) |
 | 3 | Git branch/commit/push/PR lifecycle | ⬜ Planned | No git automation in `main.py` |
 | 5 | Multi-agent funnel (classifier→orchestrator→worker) | ⬜ Planned | Single `create_deep_agent` today |
-| 6 | Token/cost tracker + `prices.json` | ⬜ Planned | `TokenCostTracker` is a stub |
+| 6 | Token/cost tracker | ⬜ Planned (Milestone 1) | `TokenCostTracker` is a stub; pricing planned in the `providers/` TOML registry, not a `prices.json` — see `design_doc_milestone1.md` |
 | 7 | Headroom / Caveman / caching pipeline | ⬜ Planned | Nothing integrated |
 | 8 | Observability, telemetry, telemetry-to-PR | ⬜ Planned | No trace/metrics files written |
 | 9 | In-container interactive REPL (multi-turn session) | 🟡 MVP | Persistent `docker run -it` prompt loop in `harness/cli.py`: multi-turn on one `thread_id`, deterministic `/exit`, stage output — see `design_doc_mvp.md` §1a |
@@ -262,6 +265,12 @@ API keys and tokens must reach the orchestrator without leaking to the agent or 
 *   **Provider Config**:
     *   Model-specific configurations defined via the `model` parameter in `create_deep_agent` (e.g., `model="gpt-4#agent-tag"`).
     *   Backend environments are inherited through `LocalShellBackend` configuration, ensuring consistent execution context.
+    *   **Built today:** the provider/model set is the on-disk `project/providers/` TOML registry
+        (`<provider>/provider.toml` + `models/<model>.toml`), loaded into `PROVIDERS` by
+        `harness/providers.py` at import. Per-model metadata (context window, output limit, and —
+        for some providers — pricing) is pulled by the dev-time `sync-models` command into the model
+        TOMLs; the loader ignores unknown keys, so new metadata is non-breaking. See
+        `project/providers/README.md`.
 
 
 ---

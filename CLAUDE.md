@@ -7,8 +7,10 @@ secret-safe containers.
 - `design_doc.md` — full target vision (multi-agent, FSM routing, bubblewrap jail, telemetry-to-PR).
 - `design_doc_mvp.md` — **the current build target.** When the two disagree, the MVP doc wins for
   "what we are building now."
+- `design_doc_milestone1.md` — the planned successor to the MVP (cost/token visibility + resource
+  caps). Wins over `design_doc.md` for "what we build next."
 - `deepagent-image/` — the actual harness (Dockerfile, `project/main.py`, `scripts/`). It has its
-  own `.claude/CLAUDE.md` with detailed guidance — **read it before editing anything under
+  own `CLAUDE.md` with detailed guidance — **read it before editing anything under
   `deepagent-image/`.** Do not duplicate that content here.
 
 ## Session lifecycle — git branch + PR (required)
