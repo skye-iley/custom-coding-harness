@@ -18,11 +18,69 @@ the host or the harness runtime.
 **The MVP is viable when** a user can:
 1. Copy `.env.example` → `.env`, set one provider API key.
 2. `build` the image once.
-3. `run-docker "<task>"` against any host directory and get the agent's result on stdout.
-4. Re-run with the same thread id and have the agent remember the prior conversation.
+3. `run-docker` against any host directory to open a **persistent interactive session**: the
+   container starts once, the agent answers, and a prompt stays open for the next message —
+   multi-turn, with the agent reading/editing the workspace, without restarting the container
+   between turns.
+4. End the session deterministically with an explicit exit command (e.g. `/exit`); within a
+   session the agent remembers earlier turns, and re-opening with the same thread id resumes prior
+   state across sessions.
 5. Trust that their `.env` secrets are never written into the image or the workspace.
 
-That is the entire bar. No web UI, no PR automation, no cost dashboard, no classifier.
+That is the entire bar. No web UI, no PR automation, no cost dashboard, no classifier, and no
+host-side `harness` CLI/TUI (the interactive loop runs *inside* the container — see §1a).
+
+---
+
+## 1a. True-MVP Increment: Interactive Multi-Turn Session
+
+The first MVP ran **one task per container start** (`run-docker "<task>"` → answer → exit). The
+"true MVP" keeps everything above and makes the session **interactive and persistent**: the
+container comes up once and the user converses with the agent over many turns until they explicitly
+close it. This is the in-container conversation loop only — **not** the host-side Typer/Rich
+`harness` CLI/TUI of `design_doc.md` §9, which stays out of scope.
+
+### New requirements
+
+| # | Requirement | Design decision (MVP) |
+|---|-------------|-----------------------|
+| 1 | Container stays open until the user explicitly closes it | The harness runs a REPL loop; container lifetime = loop lifetime. `--rm` still applies, so the container is removed *after* the user exits, not after one answer. |
+| 2 | Multi-turn conversation without closing/reopening between turns | One agent built once; each turn is another `invoke` on the **same `thread_id`** in the same process — no per-turn container restart, no re-resolving the model. In-session history is carried by the live agent/process; the SqliteSaver checkpointer is what *persists* it for cross-session resume (next row), not what makes in-session memory work. |
+| 3 | Read and edit files in `project/workspace` | Unchanged from the MVP — `LocalShellBackend` rooted at the bind-mounted workspace already gives read/write. Listed here because it must keep working across every turn of a session. |
+| 4 | Keep a CLI input line open for the next prompt after each response, until closed | After printing the answer the loop blocks on a prompt (`input()`), reads the next message, and repeats. Requires an interactive TTY (`docker run -it`). |
+| 5 | A specific command that ends the session **deterministically, with no LLM interpreting it** | Exit lines (`/exit`, `/quit`) are matched in Python *before* the text is sent to the agent, so quitting never depends on the model choosing to call a tool. EOF (Ctrl-D) ends the session. Ctrl-C is two-stage: during a turn it cancels that turn and returns to the prompt; at an idle prompt (or a second consecutive Ctrl-C) it ends the session. |
+| 6 | Print stage output across the run | The harness prints lifecycle markers distinct from agent output — e.g. `container loading`, `building agent`, `thinking`, `reading prompt`, `session closed` — so the user can see where the loop is. |
+
+### Decisions & defaults (open to change)
+
+- **Exit tokens:** `/exit` and `/quit` (slash-prefixed so they cannot collide with a genuine
+  instruction the user wants to send to the agent). Matched in Python, never by the model —
+  satisfies requirement 5.
+- **Interrupt (Ctrl-C):** two-stage. A `KeyboardInterrupt` raised *during* a turn's `invoke` is
+  caught, the turn is abandoned, and the loop returns to the prompt with the session intact. A
+  Ctrl-C at an idle prompt — or a second consecutive Ctrl-C — ends the session like EOF. Stops one
+  fat-fingered Ctrl-C from killing a long session.
+- **Initial task still allowed:** `run-docker "<task>"` runs that task as the first turn, then drops
+  to the interactive prompt. With no task it goes straight to the prompt.
+- **Non-interactive fallback (CI / smoke / piped stdin):** when stdin is not a TTY, the loop runs the
+  initial task (or the default inspection task) for exactly one turn, then exits on EOF — so
+  automation and the existing `smoke`/`verify` flows keep working unchanged.
+- **Stage markers** are written with a distinct prefix (e.g. `[harness] …`) so they are easy to tell
+  apart from the agent's reply and easy to grep/suppress later.
+- **Session vs. cross-session memory:** in-session history lives in the running process + the
+  checkpointer; reusing `DEEPAGENTS_THREAD_ID` across separate sessions still resumes prior state
+  from the on-disk SqliteSaver, exactly as before.
+
+### Touch points (for planning — code lands in a later change)
+
+- `project/harness/cli.py` — replace the single `invoke` in `main()` with the REPL loop
+  (`run_repl` / `run_turn` helpers), the deterministic exit check, two-stage Ctrl-C handling
+  (cancel turn vs. end session), and stage prints.
+- `scripts/run-docker.ps1` / `scripts/run-docker.sh` — add `-it` so stdin/TTY is available for the
+  prompt loop (keep `--rm`, the `.env` guard, and the optional task arg; keep the `.ps1`/`.sh` pair
+  in sync).
+- Docs: update the run sections of `deepagent-image/CLAUDE.md` and root `CLAUDE.md` once the code
+  lands (they currently describe the single-shot flow).
 
 ---
 
@@ -37,7 +95,9 @@ Explicitly **not** in the MVP:
 - `HarnessProfile` dynamic per-agent bind mounts and the path-guard middleware.
 - Token/cost tracking, `prices.json`, Headroom/Caveman compression, prompt caching.
 - Observability: trace files, metrics files, telemetry-to-PR.
-- CLI frontend (Typer/Rich), TUI, HITL `.harness-config.yaml`.
+- Host-side CLI frontend (Typer/Rich), TUI, HITL `.harness-config.yaml`. (The MVP's interactivity is
+  the in-container REPL of §1a — a prompt loop inside the running container, not a host `harness`
+  command wrapping `docker exec`.)
 - Resource limits (`--cpus`, `--pids-limit`, memory caps).
 - Dual-container split.
 
@@ -62,9 +122,16 @@ project/.env  ──(--env-file)────────▶ env vars (secrets, m
                                         └─ create_deep_agent(model, LocalShellBackend, ...)
                                                  │
                                                  ▼
-                                        agent runs task in /project/workspace
+                                        REPL loop (run_repl), container stays up:
+                                          read prompt ─▶ invoke agent (same thread_id)
+                                          ─▶ print answer ─▶ repeat until /exit | EOF
+                                        each turn runs in /project/workspace
                                         (workspace-local conda env for the user's code)
 ```
+
+The agent is built **once** and reused for every turn; `/exit` (matched in Python, no model
+involvement) ends the loop, after which the `--rm` container is removed. A non-TTY stdin collapses
+the loop to a single turn (see §1a).
 
 **Two Python stacks, never mixed:**
 
@@ -80,8 +147,16 @@ thing that persists.
 
 ## 4. MVP Feature Set (What Is Built)
 
-These are implemented in `deepagent-image/project/main.py` and the `scripts/` wrappers:
+These are implemented in the `deepagent-image/project/harness/` package (entry shim `main.py`) and
+the `scripts/` wrappers:
 
+- **Interactive multi-turn session (§1a).** The harness runs a REPL loop: the agent is built once,
+  then a prompt → `invoke` (same `thread_id`) → answer cycle repeats until the user exits. The
+  container stays up for the whole session (`docker run -it`, still `--rm` on exit). A non-TTY stdin
+  degrades to a single turn for CI/smoke.
+- **Deterministic exit + stage output (§1a).** `/exit` and `/quit` end the session in Python without
+  the model interpreting them; lifecycle stage markers (`container loading`, `building agent`,
+  `thinking`, `reading prompt`, `session closed`) are printed distinctly from agent replies.
 - **Provider-agnostic model selection.** `PROVIDERS` is the single source of truth for
   `choose_model`, credential validation, and chat-model resolution. Native providers
   (openai / anthropic / google_genai / deepseek / ollama) pass through to `init_chat_model`;
@@ -140,12 +215,15 @@ copy project\.env.example project\.env      # then set ONE provider key
 .\scripts\build.ps1                          # docker build -t deepagent-harness
 .\scripts\verify.ps1                         # confirms harness venv + conda import OK
 
-# per task
-.\scripts\run-docker.ps1 "summarize this repo and list its entry points"
+# per session (interactive: container stays open, multi-turn, until you exit)
+.\scripts\run-docker.ps1                                  # opens straight to the prompt
+.\scripts\run-docker.ps1 "summarize this repo"           # runs that first, then prompts
 .\scripts\run-docker.ps1 -WorkspacePath C:\path\to\repo "add a test for foo()"
+# then type follow-ups at the  you>  prompt; type /exit (or /quit) to close the container
 ```
 
-`run-docker.ps1` refuses to start without `project\.env`, bind-mounts the workspace to
+`run-docker.ps1` refuses to start without `project\.env`, runs the container interactively
+(`docker run -it --rm`) so the prompt loop has a TTY, bind-mounts the workspace to
 `/project/workspace`, seeds a missing `environment.yml` / `.gitignore` / `run-in-env.sh`, and mounts
 `~/.gitconfig` read-only if present.
 
@@ -158,8 +236,9 @@ copy project\.env.example project\.env      # then set ONE provider key
 | Provider API key(s) | `project/.env` | At least one |
 | `DEEPAGENTS_MODEL` | `.env` or `--model` | Optional (else auto by key) |
 | `*_BASE_URL` | `.env` | Only for cursor/openrouter/lmstudio |
-| Task | CLI arg or `DEEPAGENTS_TASK` | Optional (falls back to default task) |
-| `DEEPAGENTS_THREAD_ID` | `.env` | Optional (`default`); reuse to resume memory |
+| Task (first turn) | CLI arg or `DEEPAGENTS_TASK` | Optional; runs as turn 1 then prompts. Empty + TTY → straight to prompt; empty + no TTY → default inspection task |
+| Exit command | typed at the `you>` prompt | `/exit` or `/quit` — matched in Python, no LLM; EOF/Ctrl-C also end the session |
+| `DEEPAGENTS_THREAD_ID` | `.env` | Optional (`default`); reuse to resume memory across sessions |
 | `AGENT_WORKSPACE` | `.env` | Fixed to `/project/workspace` for the standard mount |
 | MCP servers | `project/.mcp.json` | Optional |
 | Lifecycle hooks | `project/hooks.json` | Optional |
@@ -180,6 +259,16 @@ The MVP ships when these pass (the first two already exist as `verify` / `smoke`
 5. **Secret hygiene**: `docker history` / image inspection shows no `.env` contents; `.env` is
    gitignored.
 6. **Workspace isolation**: agent-installed packages land in `<workspace>/.conda`, not `/opt/venv`.
+7. **Interactive multi-turn**: in one `run-docker` (`-it`) session, send two related prompts without
+   restarting; the second answer reflects the first turn, and the container stays up between them.
+8. **Deterministic exit**: typing `/exit` ends the session and the container exits 0 with no
+   model/tool call interpreting the command; EOF (Ctrl-D) does the same. Ctrl-C *during* a turn
+   cancels that turn and returns to the prompt (session survives); Ctrl-C at the idle prompt (or a
+   second consecutive Ctrl-C) ends the session.
+9. **Stage output**: the run prints the lifecycle markers (container loading → building agent →
+   thinking → reading prompt → session closed) distinctly from the agent's replies.
+10. **Non-interactive fallback**: piping a task with no TTY runs exactly one turn and exits 0, so
+    `smoke`/CI behavior is unchanged.
 
 ---
 
@@ -188,7 +277,17 @@ The MVP ships when these pass (the first two already exist as `verify` / `smoke`
 - No in-container command sandbox beyond the Docker boundary (see §5).
 - No cost/token visibility; the user pays provider rates blind until §6/§7 of the full design lands.
 - No git automation; the user reviews and commits agent changes manually.
-- Single agent, single task per invocation; no parallelism or peer review.
+- Single agent; many turns per session but no parallelism or peer review.
+- Interactivity is a single-user, single-agent in-container REPL — no host-side `harness` CLI/TUI,
+  no concurrent sessions, no live cost/status panel (all `design_doc.md` §9).
+- The prompt loop needs a TTY (`-it`); without one it degrades to a single non-interactive turn.
+  TTY detection is host-dependent on Windows (native PowerShell vs. Git-Bash/MSYS vs. piped stdin),
+  so the interactive path must be verified on the PowerShell host, not only via a Bash shell.
+- No token streaming: each turn blocks on a single `invoke` and the whole answer prints at once
+  after the `thinking` marker. Incremental/streamed output is a full-design goal (`design_doc.md`
+  §9), not in the MVP.
+- No per-session turn or token ceiling: a persistent REPL can run — and spend provider credits —
+  indefinitely until the user exits (compounds the no-resource-limits note below).
 - No resource limits — a runaway agent can consume host CPU/memory up to Docker defaults.
 
 These are acceptable for an MVP whose purpose is to validate the core loop (provider routing →

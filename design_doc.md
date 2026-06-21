@@ -49,7 +49,8 @@ thread id), isolates workspace dependencies in a workspace-local conda env, and 
 | 6 | Token/cost tracker + `prices.json` | ⬜ Planned | `TokenCostTracker` is a stub |
 | 7 | Headroom / Caveman / caching pipeline | ⬜ Planned | Nothing integrated |
 | 8 | Observability, telemetry, telemetry-to-PR | ⬜ Planned | No trace/metrics files written |
-| 9 | CLI frontend (Typer/Rich) + TUI | ⬜ Planned | Only `argparse` `main.py` + `run-docker` scripts |
+| 9 | In-container interactive REPL (multi-turn session) | 🟡 MVP | Persistent `docker run -it` prompt loop in `harness/cli.py`: multi-turn on one `thread_id`, deterministic `/exit`, stage output — see `design_doc_mvp.md` §1a |
+| 9 | Host CLI frontend (Typer/Rich) + TUI | ⬜ Planned | No `harness` CLI/TUI; interactive use is the in-container REPL above |
 | 9 | HITL autonomy config (`.harness-config.yaml`) | ⬜ Planned | — |
 | 10 | Security verification test suite | ⬜ Planned | Risk analysis is design-only |
 | 11 | Future extensions & roadmap | 🔬 Research | By definition |
@@ -437,7 +438,23 @@ Local dictionary for calculating financial cost of session:
 ---
 
 ## 9. CLI Frontend & User Interface
-> **Status:** ⬜ Planned — current entry points are `argparse` `main.py` + the `run-docker` scripts; no Typer/Rich CLI, TUI, or `.harness-config.yaml` exists. See the status matrix above.
+> **Status:** 🟡 Partial — an **in-container interactive REPL** is now in MVP scope (persistent
+> `docker run -it` prompt loop in `harness/cli.py`: multi-turn on one `thread_id`, deterministic
+> `/exit`, lifecycle stage output — see `design_doc_mvp.md` §1a). The **host-side** Typer/Rich
+> `harness` CLI, the TUI, and `.harness-config.yaml` below remain ⬜ Planned. See the status matrix above.
+
+### MVP precursor: in-container interactive loop
+Before the host `harness` CLI exists, the MVP delivers a minimal version of `harness interact`
+**inside** the container: the entrypoint (`harness/cli.py`) runs a REPL that reads prompts, invokes
+the single agent on a persistent `thread_id`, prints stage markers, and exits on a deterministic
+`/exit`/`/quit` matched in Python (no model interpretation, addressing the §10 "CLI Input Injection"
+risk for the *exit path*). The `Typer`/`Rich` wrapper, the `docker exec` bridge, the live panels,
+and the HITL `.harness-config.yaml` below are the post-MVP evolution of this loop.
+
+**Token streaming** is part of that evolution: the MVP blocks on a single `invoke` per turn and
+prints the full reply at once after the `thinking` marker, whereas the host CLI/TUI should render the
+agent's reply incrementally (Deep Agents streaming events → Rich live region), tied into the
+Sandbox Stream and Cost Ticker panels below.
 
 ### Interface Architecture
 *   **Implementation Stack**: Python-based CLI using `Typer` (command structure) and `Rich` (terminal rendering).
