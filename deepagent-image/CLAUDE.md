@@ -38,7 +38,8 @@ on user code inside a separate **workspace** conda env. `project/main.py` is the
 - `project/.mcp.json`, `project/hooks.json` — optional MCP servers and lifecycle hooks.
 - `project/workspace/` — seed workspace (environment.yml, run-in-env.sh). Copied to
   `/project/workspace-seed/` in the image; the real workspace is bind-mounted at run time.
-- `scripts/` — `build`, `run-docker`, `verify`, `smoke` in both `.ps1` (Windows) and `.sh`.
+- `scripts/` — `build`, `run-docker`, `verify`, `smoke`, `sync-models` in both `.ps1` (Windows)
+  and `.sh`. `sync-models` is a dev-time registry refresh (see Model routing).
 
 ## Commands (PowerShell primary on this machine)
 
@@ -79,6 +80,13 @@ whose `default_model` is unset** (ollama, lmstudio, openrouter are intentionally
 explicitly with `DEEPAGENTS_MODEL=provider:model`. OpenAI-compatible providers (cursor, openrouter,
 lmstudio) route via `ChatOpenAI` and need their `*_BASE_URL`. `DEEPAGENTS_PROVIDERS_DIR` overrides
 the registry path (used by tests).
+
+`scripts/sync-models.{sh,ps1}` (= `python3 -m harness sync-models`, code in `harness/sync_models.py`)
+regenerates `models/*.toml` from each provider's live list-models endpoint. **Dev-time only** — it
+needs API keys + network (the sealed runtime has neither) and writes registry files you then commit.
+It never rewrites `provider.toml`, so `default_model` stays a human choice. Per-provider fetching
+splits into pure `parse_*` functions (response JSON → `ModelInfo`, unit-tested) and a thin urllib
+GET, so no new dependency.
 
 ## Gotchas
 

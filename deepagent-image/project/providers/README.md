@@ -40,3 +40,24 @@ pricing, etc.) — the loader ignores unknown keys, so new fields are non-breaki
 Local/keyless providers (ollama, lmstudio) and ones with no chosen default
 (openrouter) have no model files and no `default_model`; add a model file +
 `default_model` when you pin one.
+
+## Refreshing model files from provider APIs
+
+`models/*.toml` can be generated from each provider's live list-models endpoint
+instead of hand-written:
+
+```bash
+deepagent-image/scripts/sync-models.sh                 # all providers whose key is set
+deepagent-image/scripts/sync-models.sh --dry-run       # show changes, write nothing
+deepagent-image/scripts/sync-models.sh --only openai anthropic
+deepagent-image/scripts/sync-models.sh --prune         # delete models the API no longer lists
+```
+
+(`.ps1` equivalent for Windows; or `python3 -m harness sync-models ...` directly.)
+
+This is a **dev-time** step — it needs provider API keys (`project/.env`) and
+network, which the sealed agent runtime does not have. It writes the model files;
+commit the result. It never edits `provider.toml`, so `default_model` stays a
+human choice. Metadata richness varies by provider (most return only the id;
+google/openrouter/ollama add context window / pricing / family). See
+`harness/sync_models.py`.
