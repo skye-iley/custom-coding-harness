@@ -1,0 +1,4 @@
+name = "undi95/remm-slerp-l2-13b"
+context_window = 6144
+price_completion = "0.00000065"
+price_prompt = "0.00000045"

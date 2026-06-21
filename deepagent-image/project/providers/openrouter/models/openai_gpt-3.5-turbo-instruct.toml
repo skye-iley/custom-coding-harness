@@ -1,0 +1,4 @@
+name = "openai/gpt-3.5-turbo-instruct"
+context_window = 4095
+price_completion = "0.000002"
+price_prompt = "0.0000015"

@@ -1,0 +1,4 @@
+name = "mistralai/ministral-14b-2512"
+context_window = 262144
+price_completion = "0.0000002"
+price_prompt = "0.0000002"

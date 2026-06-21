@@ -1,0 +1,4 @@
+name = "anthracite-org/magnum-v4-72b"
+context_window = 32768
+price_completion = "0.000005"
+price_prompt = "0.000003"

@@ -1,0 +1,4 @@
+name = "inclusionai/ring-2.6-1t"
+context_window = 262144
+price_completion = "0.000000625"
+price_prompt = "0.000000075"

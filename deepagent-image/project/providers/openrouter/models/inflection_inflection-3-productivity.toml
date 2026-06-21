@@ -1,0 +1,4 @@
+name = "inflection/inflection-3-productivity"
+context_window = 8000
+price_completion = "0.00001"
+price_prompt = "0.0000025"

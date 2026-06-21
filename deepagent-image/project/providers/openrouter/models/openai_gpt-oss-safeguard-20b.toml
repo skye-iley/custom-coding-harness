@@ -1,0 +1,4 @@
+name = "openai/gpt-oss-safeguard-20b"
+context_window = 131072
+price_completion = "0.0000003"
+price_prompt = "0.000000075"

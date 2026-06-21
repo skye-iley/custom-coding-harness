@@ -1,0 +1,3 @@
+name = "gemini-2.0-flash"
+context_window = 1048576
+output_token_limit = 8192

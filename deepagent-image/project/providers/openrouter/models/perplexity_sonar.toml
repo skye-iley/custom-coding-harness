@@ -1,0 +1,4 @@
+name = "perplexity/sonar"
+context_window = 127072
+price_completion = "0.000001"
+price_prompt = "0.000001"

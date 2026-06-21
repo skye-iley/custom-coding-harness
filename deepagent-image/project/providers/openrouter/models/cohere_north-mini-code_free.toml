@@ -1,0 +1,4 @@
+name = "cohere/north-mini-code:free"
+context_window = 256000
+price_completion = "0"
+price_prompt = "0"

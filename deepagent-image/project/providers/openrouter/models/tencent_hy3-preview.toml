@@ -1,0 +1,4 @@
+name = "tencent/hy3-preview"
+context_window = 262144
+price_completion = "0.00000021"
+price_prompt = "0.000000063"

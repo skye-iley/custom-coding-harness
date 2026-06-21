@@ -1,0 +1,4 @@
+name = "google/gemini-3-pro-image"
+context_window = 65536
+price_completion = "0.000012"
+price_prompt = "0.000002"

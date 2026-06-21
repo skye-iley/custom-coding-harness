@@ -1,0 +1,4 @@
+name = "gryphe/mythomax-l2-13b"
+context_window = 4096
+price_completion = "0.00000006"
+price_prompt = "0.00000006"

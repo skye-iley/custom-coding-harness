@@ -1,0 +1,4 @@
+name = "google/gemma-2-27b-it"
+context_window = 8192
+price_completion = "0.00000065"
+price_prompt = "0.00000065"

@@ -1,0 +1,4 @@
+name = "microsoft/phi-4-mini-instruct"
+context_window = 131072
+price_completion = "0.00000035"
+price_prompt = "0.00000008"

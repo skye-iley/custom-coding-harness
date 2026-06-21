@@ -1,0 +1,4 @@
+name = "mistralai/devstral-2512"
+context_window = 262144
+price_completion = "0.000002"
+price_prompt = "0.0000004"

@@ -1,0 +1,4 @@
+name = "moonshotai/kimi-k2-thinking"
+context_window = 262144
+price_completion = "0.0000025"
+price_prompt = "0.0000006"

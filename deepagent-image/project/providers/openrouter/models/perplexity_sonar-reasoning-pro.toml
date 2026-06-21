@@ -1,0 +1,4 @@
+name = "perplexity/sonar-reasoning-pro"
+context_window = 128000
+price_completion = "0.000008"
+price_prompt = "0.000002"

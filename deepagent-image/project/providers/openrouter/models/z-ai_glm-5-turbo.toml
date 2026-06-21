@@ -1,0 +1,4 @@
+name = "z-ai/glm-5-turbo"
+context_window = 262144
+price_completion = "0.000004"
+price_prompt = "0.0000012"

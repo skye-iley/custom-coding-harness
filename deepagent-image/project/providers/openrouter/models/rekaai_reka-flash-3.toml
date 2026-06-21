@@ -1,0 +1,4 @@
+name = "rekaai/reka-flash-3"
+context_window = 65536
+price_completion = "0.0000002"
+price_prompt = "0.0000001"

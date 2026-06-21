@@ -1,0 +1,4 @@
+name = "openai/gpt-oss-120b"
+context_window = 131072
+price_completion = "0.00000018"
+price_prompt = "0.000000039"

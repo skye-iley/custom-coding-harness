@@ -1,0 +1,4 @@
+name = "anthropic/claude-opus-4.1"
+context_window = 200000
+price_completion = "0.000075"
+price_prompt = "0.000015"

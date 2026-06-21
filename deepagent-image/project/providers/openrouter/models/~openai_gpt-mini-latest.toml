@@ -1,0 +1,4 @@
+name = "~openai/gpt-mini-latest"
+context_window = 400000
+price_completion = "0.0000045"
+price_prompt = "0.00000075"

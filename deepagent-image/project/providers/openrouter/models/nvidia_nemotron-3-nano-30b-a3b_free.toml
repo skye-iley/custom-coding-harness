@@ -1,0 +1,4 @@
+name = "nvidia/nemotron-3-nano-30b-a3b:free"
+context_window = 256000
+price_completion = "0"
+price_prompt = "0"

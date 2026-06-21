@@ -1,0 +1,4 @@
+name = "stepfun/step-3.5-flash"
+context_window = 262144
+price_completion = "0.0000003"
+price_prompt = "0.00000009"

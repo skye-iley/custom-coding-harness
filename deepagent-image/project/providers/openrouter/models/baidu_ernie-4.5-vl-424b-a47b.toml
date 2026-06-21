@@ -1,0 +1,4 @@
+name = "baidu/ernie-4.5-vl-424b-a47b"
+context_window = 131072
+price_completion = "0.00000125"
+price_prompt = "0.00000042"

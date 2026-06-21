@@ -1,0 +1,4 @@
+name = "deepcogito/cogito-v2.1-671b"
+context_window = 128000
+price_completion = "0.00000125"
+price_prompt = "0.00000125"

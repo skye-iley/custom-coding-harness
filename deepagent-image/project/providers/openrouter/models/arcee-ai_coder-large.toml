@@ -1,0 +1,4 @@
+name = "arcee-ai/coder-large"
+context_window = 32768
+price_completion = "0.0000008"
+price_prompt = "0.0000005"

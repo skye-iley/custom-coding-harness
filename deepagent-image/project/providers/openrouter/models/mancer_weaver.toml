@@ -1,0 +1,4 @@
+name = "mancer/weaver"
+context_window = 8000
+price_completion = "0.000001"
+price_prompt = "0.00000075"

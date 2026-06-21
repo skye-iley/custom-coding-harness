@@ -1,0 +1,4 @@
+name = "openai/gpt-3.5-turbo"
+context_window = 16385
+price_completion = "0.0000015"
+price_prompt = "0.0000005"

@@ -1,0 +1,4 @@
+name = "qwen/qwen3-max-thinking"
+context_window = 262144
+price_completion = "0.0000039"
+price_prompt = "0.00000078"

@@ -1,0 +1,4 @@
+name = "bytedance-seed/seed-2.0-lite"
+context_window = 262144
+price_completion = "0.000002"
+price_prompt = "0.00000025"

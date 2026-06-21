@@ -1,0 +1,4 @@
+name = "z-ai/glm-4.7"
+context_window = 202752
+price_completion = "0.00000175"
+price_prompt = "0.0000004"

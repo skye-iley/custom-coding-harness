@@ -1,0 +1,4 @@
+name = "qwen/qwen3.5-9b"
+context_window = 262144
+price_completion = "0.00000015"
+price_prompt = "0.0000001"

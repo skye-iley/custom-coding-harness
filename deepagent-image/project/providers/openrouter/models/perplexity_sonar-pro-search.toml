@@ -1,0 +1,4 @@
+name = "perplexity/sonar-pro-search"
+context_window = 200000
+price_completion = "0.000015"
+price_prompt = "0.000003"

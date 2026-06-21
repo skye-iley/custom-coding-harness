@@ -1,0 +1,4 @@
+name = "thedrummer/unslopnemo-12b"
+context_window = 32768
+price_completion = "0.0000004"
+price_prompt = "0.0000004"

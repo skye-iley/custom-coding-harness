@@ -1,0 +1,4 @@
+name = "openai/o1"
+context_window = 200000
+price_completion = "0.00006"
+price_prompt = "0.000015"

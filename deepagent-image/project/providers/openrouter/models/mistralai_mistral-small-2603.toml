@@ -1,0 +1,4 @@
+name = "mistralai/mistral-small-2603"
+context_window = 262144
+price_completion = "0.0000006"
+price_prompt = "0.00000015"

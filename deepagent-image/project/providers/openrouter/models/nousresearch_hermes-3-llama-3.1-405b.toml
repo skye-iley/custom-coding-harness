@@ -1,0 +1,4 @@
+name = "nousresearch/hermes-3-llama-3.1-405b"
+context_window = 131072
+price_completion = "0.000001"
+price_prompt = "0.000001"
