@@ -11,10 +11,36 @@ from deepagents.backends import LocalShellBackend
 from langchain.agents.middleware.types import AgentMiddleware
 
 from harness.loaders import _read_optional_text
+from harness.providers import PROVIDERS
 
 DEFAULT_TASK = (
     "inspect workspace, summarize structure."
 )
+
+# Suffixes that mark an env var as a credential the agent's shell must not see.
+# Provider key names come from the PROVIDERS registry (single source of truth);
+# these suffixes catch any other secret the harness env happens to carry.
+_SECRET_ENV_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD")
+
+
+def _agent_shell_env() -> dict[str, str]:
+    """Env handed to the agent's shell tool.
+
+    Starts from the harness process env so PATH/HOME/CONDA_*/GIT_* still work,
+    but strips provider credentials. The workspace is a host bind-mount, so a
+    prompt-injected agent that could read ANTHROPIC_API_KEY/OPENAI_API_KEY/etc.
+    via `printenv` could write them to host disk — scrub the keys before they
+    ever reach the shell (secrets hard-rule). This replaces inherit_env=True,
+    whose merge semantics would otherwise leak the whole environment.
+    """
+    provider_keys = {p.api_key_env for p in PROVIDERS}
+    env: dict[str, str] = {}
+    for key, value in os.environ.items():
+        if key in provider_keys or key.endswith(_SECRET_ENV_SUFFIXES):
+            continue
+        env[key] = value
+    env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
+    return env
 
 
 BASE_SYSTEM_PROMPT = """You are an expert coding assistant operating inside a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files."""
@@ -74,8 +100,8 @@ def build_agent(
     backend = LocalShellBackend(
         root_dir=str(workspace),
         virtual_mode=True,
-        inherit_env=True,
-        env={"PATH": os.getenv("PATH", "/usr/local/bin:/usr/bin:/bin")},
+        inherit_env=False,
+        env=_agent_shell_env(),
     )
 
     agents_md = _read_optional_text(Path.cwd() / "AGENTS.md")

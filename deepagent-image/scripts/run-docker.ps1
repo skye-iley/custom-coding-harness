@@ -44,6 +44,10 @@ function Seed-Workspace {
     if ((Test-Path $scriptSrc) -and -not (Test-Path $scriptDest)) {
         New-Item -ItemType Directory -Force -Path (Split-Path $scriptDest) | Out-Null
         Copy-Item $scriptSrc $scriptDest
+        # NB: run-docker.sh does `chmod +x` here; intentionally omitted on the
+        # PowerShell side. NTFS has no unix exec bit, and Docker Desktop's
+        # Windows bind mounts present files to the Linux container as executable
+        # (0755) regardless, so the agent can still run scripts/run-in-env.sh.
     }
 }
 
