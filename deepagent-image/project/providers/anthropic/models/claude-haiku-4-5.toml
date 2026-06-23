@@ -1,1 +1,15 @@
 name = "claude-haiku-4-5"
+
+# USD per million tokens. Snapshot — see priced_as_of; verify before trusting
+# the figures (follow-up.md: best-effort, not vendor-confirmed).
+[pricing]
+input = 1.0
+output = 5.0
+cache_read = 0.1      # cached-input read (caching not enabled yet; field recorded per M1 addendum)
+cache_write = 1.25    # cache-creation write
+priced_as_of = "2026-06-23"
+
+# Watt-hours per token, rough estimate (placeholder — see follow-up.md).
+[energy]
+per_input_token = 0.0002
+per_output_token = 0.0006

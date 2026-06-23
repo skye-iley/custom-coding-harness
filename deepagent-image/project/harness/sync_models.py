@@ -29,6 +29,7 @@ import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 from harness.providers import PROVIDERS, PROVIDERS_DIR, Provider
@@ -37,10 +38,13 @@ from harness.providers import PROVIDERS, PROVIDERS_DIR, Provider
 @dataclass
 class ModelInfo:
     """One model as returned by a provider. `name` is the real id sent to the
-    provider; `extra` is flat metadata (ints/strs/bools) written verbatim."""
+    provider; `extra` is flat metadata (ints/strs/bools) written verbatim;
+    `pricing` is the [pricing] table (USD per Mtok + priced_as_of) when the API
+    reports per-token prices (Milestone 1)."""
 
     name: str
     extra: dict[str, object] = field(default_factory=dict)
+    pricing: dict[str, object] | None = None
 
 
 # --- response parsers (pure: parsed-JSON -> [ModelInfo]) ---------------------
@@ -84,7 +88,16 @@ def parse_google(data: dict) -> list[ModelInfo]:
     return out
 
 
-def parse_openrouter(data: dict) -> list[ModelInfo]:
+def _per_mtok(raw: object) -> float | None:
+    """OpenRouter prices are USD per token (string); registry rates are per Mtok."""
+    try:
+        return round(float(raw) * 1_000_000, 6)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_openrouter(data: dict, *, as_of: str | None = None) -> list[ModelInfo]:
+    as_of = as_of or date.today().isoformat()
     out = []
     for m in data.get("data", []):
         if not m.get("id"):
@@ -92,12 +105,23 @@ def parse_openrouter(data: dict) -> list[ModelInfo]:
         extra: dict[str, object] = {}
         if m.get("context_length"):
             extra["context_window"] = int(m["context_length"])
-        pricing = m.get("pricing") or {}
-        if pricing.get("prompt"):
-            extra["price_prompt"] = str(pricing["prompt"])
-        if pricing.get("completion"):
-            extra["price_completion"] = str(pricing["completion"])
-        out.append(ModelInfo(m["id"], extra))
+        raw = m.get("pricing") or {}
+        # Emit a [pricing] table (per Mtok) so it loads as ModelRates like the
+        # native providers; cache_read maps to OpenRouter's input_cache_read
+        # when present. OpenRouter's strategy is `reported` (cost in-band), so
+        # this table is a fallback/reference, but keeping the shape uniform.
+        pricing: dict[str, object] = {}
+        if (v := _per_mtok(raw.get("prompt"))) is not None:
+            pricing["input"] = v
+        if (v := _per_mtok(raw.get("completion"))) is not None:
+            pricing["output"] = v
+        if (v := _per_mtok(raw.get("input_cache_read"))) is not None:
+            pricing["cache_read"] = v
+        if (v := _per_mtok(raw.get("input_cache_write"))) is not None:
+            pricing["cache_write"] = v
+        if pricing:
+            pricing["priced_as_of"] = as_of
+        out.append(ModelInfo(m["id"], extra, pricing or None))
     return out
 
 
@@ -223,10 +247,17 @@ def _toml_scalar(value: object) -> str:
 
 
 def render_model_toml(info: ModelInfo) -> str:
-    """Serialize a ModelInfo to a flat TOML doc. `name` first, extras sorted."""
+    """Serialize a ModelInfo to a TOML doc: `name`, sorted flat extras, then an
+    optional [pricing] table (priced_as_of last so the rate fields read first)."""
     lines = [f"name = {_toml_scalar(info.name)}"]
     for k in sorted(info.extra):
         lines.append(f"{k} = {_toml_scalar(info.extra[k])}")
+    if info.pricing:
+        lines.append("")
+        lines.append("[pricing]")
+        ordered = sorted(info.pricing, key=lambda k: (k == "priced_as_of", k))
+        for k in ordered:
+            lines.append(f"{k} = {_toml_scalar(info.pricing[k])}")
     return "\n".join(lines) + "\n"
 
 

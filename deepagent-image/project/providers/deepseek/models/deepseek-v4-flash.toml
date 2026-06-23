@@ -1,1 +1,13 @@
 name = "deepseek-v4-flash"
+
+# USD per million tokens. Snapshot — verify (follow-up.md: best-effort estimate).
+[pricing]
+input = 0.27
+output = 1.10
+cache_read = 0.07     # cached-input read (caching not enabled yet; field recorded per M1 addendum)
+priced_as_of = "2026-06-23"
+
+# Watt-hours per token, rough estimate (placeholder — see follow-up.md).
+[energy]
+per_input_token = 0.00015
+per_output_token = 0.00045

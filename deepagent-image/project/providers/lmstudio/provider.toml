@@ -1,5 +1,8 @@
 # LM Studio: OpenAI-compatible, local, keyless (needs LMSTUDIO_BASE_URL).
 # No default model pinned yet — set DEEPAGENTS_MODEL=lmstudio:<model> explicitly.
+# Local/self-hosted: no API charge (cost=0). Energy trackable per-model via an
+# [energy] table; measured device energy specced (not built) in ENERGY_SPEC.md.
+pricing = "free"
 api_key_env = "LMSTUDIO_API_KEY"
 requires_key = false
 priority = 6

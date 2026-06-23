@@ -1,4 +1,5 @@
 # Anthropic Claude via langchain-anthropic (native init_chat_model prefix).
+pricing = "rate_table"   # per-model [pricing] tables; cost from models/*.toml
 api_key_env = "ANTHROPIC_API_KEY"
 requires_key = true
 priority = 2
