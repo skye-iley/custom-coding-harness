@@ -250,7 +250,7 @@ every time:
 workflows/
   git-session-lifecycle/        # folder name == workflow name
     workflow.md                 # manifest: description + ordered plan (required)
-    trigger.sh                  # gate, fixed name, lives in the folder (required)
+    trigger.py                  # gate, fixed basename, lives in the folder (required)
     create-branch.sh            # a step script (optional, local)
     open-pr.sh                  # a step script (optional, local)
 ```
@@ -261,7 +261,7 @@ workflows/
     ---
     name: git-session-lifecycle     # must equal the folder name
     hook: session.start             # one of the 7 hook points above
-    gate: trigger.sh                # the fixed-name gate; always ./trigger.sh in this folder
+    gate: trigger.py                # fixed basename; always ./trigger.{py,sh} in this folder
     steps:                          # run in listed order, only if the gate passes
       - ./create-branch.sh          # relative path → resolved against the workflow folder
       - ./open-pr.sh
@@ -269,17 +269,25 @@ workflows/
     ---
     Branch at session start, open a PR at session end. Never auto-merges.
     ```
-*   **`trigger.sh` — the gate (required, standard name).** **Every** workflow folder has a gate file
-    with the *same fixed name* (`trigger.sh`), always resolved inside the folder — never elsewhere,
-    never renamed. The engine runs it on each fire of `hook` and reads its **exit code: `0` = run the
-    steps, non-zero = skip** (the one contract for both gate kinds — a deterministic predicate is a
-    few lines of shell; a classifier gate is `trigger.sh` shelling out to the classifier and exiting
-    on its verdict). A shebang lets it be any interpreter; the name stays `trigger.sh`.
+*   **`trigger` — the gate (required, fixed basename).** **Every** workflow folder has a gate file
+    with the *same fixed basename* `trigger`, always resolved inside the folder — never elsewhere,
+    never renamed. The extension picks the contract:
+    *   **`trigger.py` (canonical, in-process).** The harness is Python (Deep Agents), so the gate
+        runs **inside the harness process** — it can read the live prompt/context/state and call the
+        classifier **directly** (same interpreter, no subprocess marshaling), then return a verdict
+        (`bool`, or a richer decision once the control-flow / context-mutation tiers land). This is
+        the gate kind the planned action tiers need; it runs in the harness venv (`/opt/venv`), so it
+        is **engine code — stdlib + the engine API only, never workspace deps** (the two-stack rule).
+    *   **`trigger.sh` (allowed, subprocess).** A side-effect-free predicate over what a subprocess
+        can see — `git status`, a file check, an env var — signalling via **exit code: `0` = run the
+        steps, non-zero = skip**. Isolated and language-agnostic, but it cannot see live in-memory
+        state; reach for it only for pure file/git/env gates.
+    The engine resolves `trigger.py` first, then `trigger.sh`; exactly one must exist.
 *   **Steps — the action (ordered).** Listed in `steps:` and run top-to-bottom only after the gate
     passes. Each entry is a path: **relative paths resolve against the workflow folder** (the common
     case — keep step scripts beside `workflow.md`), **absolute paths run as-is** (share one script
     across workflows, or call into the harness). Steps may therefore live in the folder *or* anywhere
-    on disk; `trigger.sh` may not.
+    on disk; the `trigger` gate may not.
 
 This is the planned authoring format; today's `hooks.json` is the flat precursor (one event → one
 unconditional command, no folder, no gate). The git lifecycle below is the first workflow expressed
