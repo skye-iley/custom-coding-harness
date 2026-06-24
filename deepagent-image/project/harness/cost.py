@@ -74,7 +74,11 @@ class ModelRates:
 
     @property
     def has_price(self) -> bool:
-        return self.input is not None or self.output is not None
+        # Require BOTH input and output: a half-filled table (e.g. input set,
+        # output left as a `# output =` placeholder) is a data-entry gap, not a
+        # priceable rate. Returning False here routes it through the loud
+        # unpriced/floor path instead of silently billing the missing side at $0.
+        return self.input is not None and self.output is not None
 
     @property
     def has_energy(self) -> bool:
@@ -117,7 +121,7 @@ def rates_from_toml(pricing: dict | None, energy: dict | None) -> ModelRates:
     else:
         rate_table, source = pricing, None  # no price (e.g. an energy-only model)
 
-    priced = rate_table.get("input") is not None or rate_table.get("output") is not None
+    priced = rate_table.get("input") is not None and rate_table.get("output") is not None
 
     return ModelRates(
         input=num(rate_table, "input"),

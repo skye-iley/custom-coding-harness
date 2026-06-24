@@ -107,6 +107,17 @@ def test_rate_table_none_when_rates_empty():
     assert rt.cost(usage(100, 100), "m") is None
 
 
+def test_rate_table_partial_rates_are_unpriced_not_silent_zero():
+    # input set but output missing (a half-filled TOML) must NOT silently bill
+    # output at $0 — it routes through the unpriced/floor path instead.
+    rt = cost.RateTable({"m": cost.ModelRates(input=10.0)})  # output is None
+    assert not cost.ModelRates(input=10.0).has_price
+    assert rt.cost(usage(100, 100), "m") is None
+    # An explicit output=0.0 is a real (free-output) rate, still priced.
+    rt2 = cost.RateTable({"m": cost.ModelRates(input=10.0, output=0.0)})
+    assert rt2.cost(usage(100, 100), "m") is not None
+
+
 # --- Free / ReportedCost -----------------------------------------------------
 
 def test_free_is_zero():
