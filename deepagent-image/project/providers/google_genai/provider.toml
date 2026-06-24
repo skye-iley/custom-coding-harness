@@ -3,3 +3,6 @@ api_key_env = "GOOGLE_API_KEY"
 requires_key = true
 priority = 1
 default_model = "gemini-3.5-flash"
+# prefix =
+# base_url_env =
+pricing = "rate_table"   # per-model [pricing] tables; cost from models/*.toml

@@ -88,6 +88,54 @@ It never rewrites `provider.toml`, so `default_model` stays a human choice. Per-
 splits into pure `parse_*` functions (response JSON → `ModelInfo`, unit-tested) and a thin urllib
 GET, so no new dependency.
 
+## Cost / token / energy tracking (Milestone 1)
+
+A fully optional tracker reports per-turn and session token/cost/energy and can
+cap a session. It is one `AgentMiddleware` (`harness/cost.py:CostTrackerMiddleware`)
+appended in `cli.py:main` **only when there's something to track** — non-`free`
+pricing, an energy estimate, or a budget. Otherwise nothing is appended and the
+harness behaves byte-for-byte like the MVP (the "removable" contract,
+`design_doc_milestone1.md` §2.5). `harness/cost.py` holds the math only; it must
+never import `providers.py` (the import goes providers → cost, §2.4).
+
+- **Pricing lives in the registry, not Python.** `provider.toml` declares
+  `pricing = "rate_table" | "reported" | "free"`; `rate_table` models carry a
+  `[pricing]` table (USD per **million** tokens: `input`/`output`/`cache_read`/
+  `cache_write` + `priced_as_of`). See `providers/README.md`. `cache_*` are the
+  split cached-vs-fresh prices, recorded now though caching isn't enabled.
+- **Official vs. estimated prices are split.** Top-level `[pricing]` = official
+  (vendor-published, incl. sync-pulled API rates), shown plain. Nested
+  `[pricing.estimate]` = best-effort/hand-filled, shown with a `~` prefix and
+  `(est)` tag. Official wins when both present; an unmarked guess is read as
+  estimate, never official (`cost.py:rates_from_toml`, `ModelRates.pricing_source`).
+- **Missing rate is loud, not fatal.** A `rate_table` model with no pricing table
+  warns once, then runs with cost shown as a floor (unpriced calls excluded) —
+  never a silent `$0`. `DEEPAGENTS_PRICE_ESTIMATE` (USD/Mtok) estimates instead
+  (also marked `~`/`(est)`).
+- **Energy** is an optional per-model `[energy]` estimate (Wh/token), tracked for
+  any provider incl. local `free` ones; `DEEPAGENTS_ELECTRICITY_RATE` (USD/kWh)
+  turns it into an electricity cost. Measured local-device energy is **specified,
+  not built** — see `ENERGY_SPEC.md` and `cost.py:measure_local_energy_wh`.
+- **Budgets:** `--max-cost` / `--max-tokens` (or `DEEPAGENTS_MAX_COST` /
+  `DEEPAGENTS_MAX_TOKENS`) end the REPL with `[harness] budget exceeded` once a
+  cumulative total crosses, then print the session total — same deterministic
+  exit as `/exit`.
+- **Output:** per turn `[harness] usage: turn[...] session[...]` and at close
+  `[harness] session total: ...`, both on **stderr** (out of the agent's reply
+  stream, like the other stage markers).
+- **Tests:** `tests/test_cost.py` / `tests/test_sync_models.py` (pure math, no
+  keys/network) — run by `smoke`, or standalone (`python3 tests/test_cost.py`).
+
+## Resource caps (Milestone 1)
+
+`run-docker.{sh,ps1}` apply `--cpus` (2), `--memory` (4g), `--pids-limit` (512)
+by default — a Docker host-boundary control so a runaway agent can't exhaust the
+host or fork-bomb it. Override via env (`CPUS`/`MEMORY`/`PIDS_LIMIT`) in the `.sh`
+or params (`-Cpus`/`-Memory`/`-PidsLimit`) in the `.ps1`. This is **not** a
+sandbox — the trust boundary is still the container (`design_doc_mvp.md` §5);
+don't describe it as sandboxing. Verify with `docker inspect` (`NanoCpus`,
+`Memory`, `PidsLimit`).
+
 ## Gotchas
 
 - Secrets live in `project/.env` only. Don't commit them, don't `COPY` them into the image, don't

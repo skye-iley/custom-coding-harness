@@ -8,7 +8,14 @@
 param(
     [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
     [string[]]$TaskParts = @(),
-    [string]$WorkspacePath = ""
+    [string]$WorkspacePath = "",
+    # Resource caps (Milestone 1 §3): a Docker host-boundary control so a runaway
+    # agent can't exhaust the host CPU/RAM or fork-bomb it. NOT a sandbox (trust
+    # boundary is still the container; design_doc_mvp.md §5). Override e.g.
+    #   .\run-docker.ps1 -Cpus 4 -Memory 8g -PidsLimit 1024 "task"
+    [string]$Cpus = "2",
+    [string]$Memory = "4g",
+    [string]$PidsLimit = "512"
 )
 
 $ErrorActionPreference = "Stop"
@@ -65,6 +72,9 @@ if (-not [Console]::IsInputRedirected) {
 $dockerArgs = @(
     "run", "--rm"
 ) + $TtyFlags + @(
+    "--cpus", $Cpus,
+    "--memory", $Memory,
+    "--pids-limit", $PidsLimit,
     "--env-file", $EnvFile,
     "-e", "AGENT_WORKSPACE=/project/workspace",
     "-v", "${WorkspacePath}:/project/workspace"

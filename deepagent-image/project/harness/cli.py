@@ -17,9 +17,15 @@ from dotenv import load_dotenv
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from harness.agent import DEFAULT_TASK, build_agent, final_message_text, resolve_workspace
+from harness.cost import (
+    BudgetExceeded,
+    CostTrackerMiddleware,
+    Free,
+    format_session_total,
+)
 from harness.hooks import _run_hook_commands, build_hook_middleware
 from harness.loaders import load_hooks, load_mcp_tools
-from harness.providers import choose_model, resolve_chat_model, validate_credentials
+from harness.providers import choose_model, provider_for, resolve_chat_model, validate_credentials
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,7 +47,31 @@ def parse_args() -> argparse.Namespace:
         help="LangGraph checkpointer thread id.",
     )
     parser.add_argument("--stream", action="store_true", help="Print raw LangGraph stream events.")
+    # Cost/token tracker (Milestone 1). Budgets default unset = no ceiling; env
+    # fallbacks let the container be capped via --env-file without editing argv.
+    parser.add_argument(
+        "--max-cost",
+        type=float,
+        default=_env_float("DEEPAGENTS_MAX_COST"),
+        help="End the session once cumulative USD cost crosses this (also DEEPAGENTS_MAX_COST).",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=_env_int("DEEPAGENTS_MAX_TOKENS"),
+        help="End the session once cumulative tokens cross this (also DEEPAGENTS_MAX_TOKENS).",
+    )
     return parser.parse_args()
+
+
+def _env_float(name: str) -> float | None:
+    raw = os.getenv(name)
+    return float(raw) if raw else None
+
+
+def _env_int(name: str) -> int | None:
+    raw = os.getenv(name)
+    return int(raw) if raw else None
 
 
 EXIT_TOKENS = {"/exit", "/quit"}
@@ -60,6 +90,39 @@ def _is_exit_command(line: str) -> bool:
     return line.strip().lower() in EXIT_TOKENS
 
 
+def build_cost_tracker(
+    model: str, max_cost: float | None, max_tokens: int | None
+) -> CostTrackerMiddleware | None:
+    """The cost tracker, or None when there's nothing to track (null = MVP).
+
+    Built only when the resolved model can report a non-zero cost (non-Free
+    pricing), carries an energy estimate, or a budget ceiling is set. Otherwise
+    return None and main() appends no middleware — byte-for-byte MVP behavior
+    (design_doc_milestone1.md §2.5 "remove-without-functional-change").
+    """
+    provider = provider_for(model)
+    pricing = provider.pricing if provider else Free()
+    rates = provider.rates_for(model) if provider else None
+    has_energy = rates is not None and rates.has_energy
+    budgeted = max_cost is not None or max_tokens is not None
+
+    if isinstance(pricing, Free) and not has_energy and not budgeted:
+        return None
+
+    estimate = _env_float("DEEPAGENTS_PRICE_ESTIMATE")  # USD/Mtok for unpriced models
+    electricity_rate = _env_float("DEEPAGENTS_ELECTRICITY_RATE")  # USD/kWh
+    bare_model = model[len(provider.prefix):] if provider else model
+    return CostTrackerMiddleware(
+        pricing,
+        bare_model,
+        rates=rates,
+        max_cost=max_cost,
+        max_tokens=max_tokens,
+        estimate_per_mtok=estimate,
+        electricity_rate=electricity_rate,
+    )
+
+
 def run_turn(agent, text: str, config: dict, stream: bool = False) -> str | None:
     """One invoke on the given thread. Returns the answer text, or None when
     --stream already printed raw events instead of a final message."""
@@ -73,10 +136,30 @@ def run_turn(agent, text: str, config: dict, stream: bool = False) -> str | None
     return final_message_text(result)
 
 
-def run_repl(agent, config: dict, initial_task: str, stream: bool = False) -> int:
+def _print_session_total(tracker: CostTrackerMiddleware | None) -> None:
+    """End-of-session token/cost/energy total (§1 req 2). No-op without a tracker."""
+    if tracker is not None:
+        print(
+            format_session_total(tracker.session, electricity_rate=tracker._electricity_rate),
+            file=sys.stderr,
+        )
+
+
+def run_repl(
+    agent,
+    config: dict,
+    initial_task: str,
+    stream: bool = False,
+    tracker: CostTrackerMiddleware | None = None,
+) -> int:
     """Container-lifetime loop: build once (by the caller), then prompt -> invoke
     -> answer until /exit, /quit, or EOF. A non-TTY stdin collapses to the single
     initial turn (CI / smoke), matching MVP §1a's non-interactive fallback.
+
+    The optional `tracker` is the same CostTrackerMiddleware appended to the
+    agent: a crossed budget surfaces as BudgetExceeded out of invoke (raised in
+    its after_model), caught here to end the session deterministically like
+    /exit. When tracker is None the clause is inert (null = MVP, §2.5).
     """
     interactive = sys.stdin.isatty()
 
@@ -87,11 +170,17 @@ def run_repl(agent, config: dict, initial_task: str, stream: bool = False) -> in
             # Ctrl-C during a turn cancels that turn only; the session survives.
             print("\n[harness] turn cancelled")
             answer = None
+        except BudgetExceeded as exc:
+            _stage(f"budget exceeded: {exc}")
+            _print_session_total(tracker)
+            _stage("session closed")
+            return 0
         if answer is not None:
             print(answer)
             print()
 
     if not interactive:
+        _print_session_total(tracker)
         _stage("session closed")
         return 0
 
@@ -121,11 +210,16 @@ def run_repl(agent, config: dict, initial_task: str, stream: bool = False) -> in
             # history. Acceptable for the MVP; revisit if cancellation gets flaky.
             print("\n[harness] turn cancelled")
             continue
+        except BudgetExceeded as exc:
+            # Budget crossed mid-turn: end the session like /exit (§2.5).
+            _stage(f"budget exceeded: {exc}")
+            break
 
         if answer is not None:
             print(answer)
             print()
 
+    _print_session_total(tracker)
     _stage("session closed")
     return 0
 
@@ -170,14 +264,20 @@ def main() -> int:
         # inside the context manager, not just the first invoke.
         with SqliteSaver.from_conn_string(str(checkpoint_db)) as checkpointer:
             _stage("building agent")
+            # Cost tracker is one more middleware, appended only when there is
+            # something to track (§2.5). None => append nothing => MVP behavior.
+            tracker = build_cost_tracker(model, args.max_cost, args.max_tokens)
+            middleware = build_hook_middleware(hooks_by_event)
+            if tracker is not None:
+                middleware.append(tracker)
             agent = build_agent(
                 resolve_chat_model(model),
                 workspace,
                 tools=mcp_tools,
-                middleware=build_hook_middleware(hooks_by_event),
+                middleware=middleware,
                 checkpointer=checkpointer,
             )
-            return run_repl(agent, config, task, stream=args.stream)
+            return run_repl(agent, config, task, stream=args.stream, tracker=tracker)
     finally:
         _run_hook_commands(hooks_by_event.get("session.end", []))
 

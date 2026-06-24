@@ -6,6 +6,15 @@ ENV_FILE="$ROOT/project/.env"
 WORKSPACE="${WORKSPACE:-$ROOT/project/workspace}"
 SEED_SOURCE="$ROOT/project/workspace"
 
+# Resource caps (Milestone 1 §3): a Docker host-boundary control so a runaway
+# agent can't exhaust the host CPU/RAM or fork-bomb it. NOT a sandbox (the trust
+# boundary is still the container; see design_doc_mvp.md §5). Override via env:
+#   CPUS=4 MEMORY=8g PIDS_LIMIT=1024 ./run-docker.sh "task"
+CPUS="${CPUS:-2}"
+MEMORY="${MEMORY:-4g}"
+PIDS_LIMIT="${PIDS_LIMIT:-512}"
+CAP_FLAGS=(--cpus "$CPUS" --memory "$MEMORY" --pids-limit "$PIDS_LIMIT")
+
 seed_workspace() {
   local target="$1"
   local seed="$2"
@@ -49,6 +58,7 @@ fi
 
 if [[ $# -gt 0 ]]; then
 exec docker run --rm $TTY_FLAGS \
+  "${CAP_FLAGS[@]}" \
   --env-file "$ENV_FILE" \
   -e AGENT_WORKSPACE=/project/workspace \
   -v "$WORKSPACE:/project/workspace" \
@@ -58,6 +68,7 @@ exec docker run --rm $TTY_FLAGS \
 fi
 
 exec docker run --rm $TTY_FLAGS \
+  "${CAP_FLAGS[@]}" \
   --env-file "$ENV_FILE" \
   -e AGENT_WORKSPACE=/project/workspace \
   -v "$WORKSPACE:/project/workspace" \

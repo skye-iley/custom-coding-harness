@@ -1,0 +1,12 @@
+# Normalize all text to LF in the repo and on checkout, every OS.
+# Host = Windows, harness = Linux, Claude runs in both: LF everywhere
+# kills the CRLF<->LF churn. Modern Windows tools handle LF fine.
+* text=auto eol=lf
+
+# Shell scripts run on the Linux harness — must stay LF.
+*.sh   text eol=lf
+*.py   text eol=lf
+*.toml text eol=lf
+
+# PowerShell runs fine with LF in both Windows PowerShell and PS Core.
+*.ps1  text eol=lf

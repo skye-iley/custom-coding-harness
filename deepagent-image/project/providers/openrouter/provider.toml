@@ -1,6 +1,12 @@
 # OpenRouter: OpenAI-compatible, routed via ChatOpenAI (needs OPENROUTER_BASE_URL).
 # No default model pinned yet — set DEEPAGENTS_MODEL=openrouter:<model> explicitly.
+# OpenRouter returns dollar cost in-band; read it rather than keep a local rate
+# table (§2.1). Unconfirmed LangChain surfaces it — see follow-up.md / design §5:
+# if absent, calls read as unpriced (loud, not $0), never silently 0.
 api_key_env = "OPENROUTER_API_KEY"
 requires_key = true
 priority = 8
+# default_model =
+# prefix =
 base_url_env = "OPENROUTER_BASE_URL"
+pricing = "reported"

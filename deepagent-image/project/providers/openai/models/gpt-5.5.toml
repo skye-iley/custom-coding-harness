@@ -1,1 +1,29 @@
 name = "gpt-5.5"
+
+# Model metadata (commented = not recorded).
+# display_name =
+# context_window =
+
+# USD per million tokens. Top-level [pricing] = official (vendor-published
+# / sync-pulled). [pricing.estimate] = hand-filled, not vendor-confirmed
+# (shown ~/(est)). See providers/README.md.
+[pricing]
+# input =
+# output =
+# cache_read =
+# cache_write =
+# priced_as_of =
+
+[pricing.estimate]
+input = 1.25
+output = 10.0
+cache_read = 0.125
+# cache_write =
+priced_as_of = "2026-06-23"
+source = "hand-filled estimate"
+
+# Watt-hours per token (optional estimate; tracked even for free models).
+[energy]
+per_input_token = 0.0003
+per_output_token = 0.0009
+# source =

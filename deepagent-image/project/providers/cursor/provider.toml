@@ -1,6 +1,11 @@
 # Cursor: OpenAI-compatible, routed via ChatOpenAI (needs CURSOR_BASE_URL).
+# No per-token rate table declared (Cursor bills by subscription, not per-token);
+# left as free => its calls report tokens/energy but $0 (no false rate). Switch
+# to rate_table + a model [pricing] table if a per-token plan is used.
 api_key_env = "CURSOR_API_KEY"
 requires_key = true
 priority = 4
 default_model = "composer-2.5"
+# prefix =
 base_url_env = "CURSOR_BASE_URL"
+pricing = "free"

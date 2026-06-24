@@ -17,6 +17,17 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# cost.py holds the Pricing types + rate math. The import is one-directional
+# (providers -> cost) on purpose: cost.py must never import providers, so the
+# two don't form a cycle (design_doc_milestone1.md §2.4).
+from harness.cost import (
+    ModelRates,
+    Pricing,
+    Free,
+    pricing_from_strategy,
+    rates_from_toml,
+)
+
 # Registry root: <project>/providers/. providers.py lives at
 # <project>/harness/providers.py, so parent.parent is <project>. Holds in the
 # repo and in the container (harness at /project/harness, registry at
@@ -40,6 +51,16 @@ class Provider:
     base_url_env: str | None = None  # set => OpenAI-compatible, routed via ChatOpenAI
     priority: int = 1_000    # auto-selection order; lowest wins
     models: tuple[str, ...] = field(default_factory=tuple)  # known model specs
+    # Cost/energy tracker fields (Milestone 1). pricing is the per-provider
+    # strategy declared in provider.toml; model_rates maps the bare model id
+    # (spec minus prefix) to its TOML [pricing]/[energy] data. Both default to
+    # the MVP-equivalent null state (Free, no rates) so the tracker is opt-in.
+    pricing: Pricing = field(default_factory=Free)
+    model_rates: dict[str, ModelRates] = field(default_factory=dict)
+
+    def rates_for(self, model: str) -> ModelRates | None:
+        """ModelRates for a full model spec, keyed by the bare id after prefix."""
+        return self.model_rates.get(model[len(self.prefix):])
 
 
 def _load_provider(provider_dir: Path) -> Provider:
@@ -61,14 +82,26 @@ def _load_provider(provider_dir: Path) -> Provider:
         ) from exc
 
     # Collect known models from models/*.toml; each file's `name` (default: its
-    # stem) is appended to the prefix to form the full spec.
+    # stem) is appended to the prefix to form the full spec. Each file's
+    # optional [pricing]/[energy] tables become the model's ModelRates, keyed by
+    # the bare id so cost.py can price a turn (Milestone 1).
     models: list[str] = []
+    model_rates: dict[str, ModelRates] = {}
     models_dir = provider_dir / "models"
     if models_dir.is_dir():
         for model_path in sorted(models_dir.glob("*.toml")):
             with model_path.open("rb") as fh:
                 model_cfg = tomllib.load(fh)
-            models.append(prefix + model_cfg.get("name", model_path.stem))
+            bare = model_cfg.get("name", model_path.stem)
+            models.append(prefix + bare)
+            # Every model file now carries [pricing]/[energy] sections (commented
+            # placeholders when unfilled), so the tables parse as empty dicts.
+            # Treat empty == absent: only models with real rate/energy data get a
+            # ModelRates entry, keeping behavior identical to flat name-only files.
+            pricing_tbl = model_cfg.get("pricing")
+            energy_tbl = model_cfg.get("energy")
+            if pricing_tbl or energy_tbl:
+                model_rates[bare] = rates_from_toml(pricing_tbl, energy_tbl)
 
     # default_model is a model stem in provider.toml; expand to a full spec.
     default_stem = cfg.get("default_model")
@@ -79,6 +112,11 @@ def _load_provider(provider_dir: Path) -> Provider:
             f"models/{default_stem}.toml."
         )
 
+    # pricing strategy: provider.toml `pricing = "rate_table"|"reported"|"free"`
+    # (default free => behaves like the MVP). RateTable carries the per-model
+    # rates so cost.py can look them up.
+    pricing = pricing_from_strategy(cfg.get("pricing"), model_rates)
+
     return Provider(
         prefix=prefix,
         api_key_env=api_key_env,
@@ -87,6 +125,8 @@ def _load_provider(provider_dir: Path) -> Provider:
         base_url_env=cfg.get("base_url_env"),
         priority=priority,
         models=tuple(models),
+        pricing=pricing,
+        model_rates=model_rates,
     )
 
 
@@ -124,6 +164,15 @@ def _provider_for(model: str) -> Provider | None:
         if model.startswith(provider.prefix):
             return provider
     return None
+
+
+def provider_for(model: str) -> Provider | None:
+    """Public registry lookup by model spec (None if no prefix matches).
+
+    Used by the cost tracker wiring in cli.py to read the resolved model's
+    pricing strategy + rates. Thin wrapper over the internal _provider_for.
+    """
+    return _provider_for(model)
 
 
 def choose_model(explicit_model: str | None) -> str:

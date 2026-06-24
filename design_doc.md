@@ -44,12 +44,12 @@ thread id), isolates workspace dependencies in a workspace-local conda env, and 
 | 2 | Bubblewrap executor jail | 🟡 Partial | `scripts/sandbox-exec.sh` + `bwrap` installed in image, but **not wired into agent shell calls** and unverified at runtime (no `--security-opt` in `run-docker`) |
 | 2 | `HarnessProfile` dynamic bind mounts | ⬜ Planned | Fixed bind list; no per-agent profile |
 | 2 | Path Guard middleware (`validate_path`) | ⬜ Planned | Snippet only; not in `main.py` |
-| 2 | Resource limits (`--cpus`/`--pids-limit`/mem) | ⬜ Planned | Not set in `run-docker` |
+| 2 | Resource limits (`--cpus`/`--pids-limit`/mem) | ✅ Built | `run-docker.{sh,ps1}` set `--cpus`/`--memory`/`--pids-limit` (defaults 2/4g/512, overridable). Docker host-boundary control, not a sandbox |
 | 3 | Workflow lifecycle hooks (`hooks.json`) | ✅ Built | `ShellHooksMiddleware` (session/agent/model/tool events) |
 | — | MCP tool loading (`.mcp.json`) | ✅ Built | `load_mcp_tools` (not a separate doc section) |
 | 3 | Git branch/commit/push/PR lifecycle | ⬜ Planned | No git automation in `main.py` |
 | 5 | Multi-agent funnel (classifier→orchestrator→worker) | ⬜ Planned | Single `create_deep_agent` today |
-| 6 | Token/cost tracker | ⬜ Planned (Milestone 1) | `TokenCostTracker` is a stub; pricing planned in the `providers/` TOML registry, not a `prices.json` — see `design_doc_milestone1.md` |
+| 6 | Token/cost tracker | ✅ Built (Milestone 1) | `harness/cost.py` (`CostTrackerMiddleware`); pricing in the `providers/` TOML registry (`[pricing]` per model, strategy per provider), not a `prices.json`. Optional energy estimate + budgets. See `design_doc_milestone1.md` |
 | 7 | Headroom / Caveman / caching pipeline | ⬜ Planned | Nothing integrated |
 | 8 | Observability, telemetry, telemetry-to-PR | ⬜ Planned | No trace/metrics files written |
 | 9 | In-container interactive REPL (multi-turn session) | 🟡 MVP | Persistent `docker run -it` prompt loop in `harness/cli.py`: multi-turn on one `thread_id`, deterministic `/exit`, stage output — see `design_doc_mvp.md` §1a |
@@ -165,6 +165,10 @@ To ensure workspace and configuration persistence across container deployments:
 This guarantees agent session state, Git identity, and accumulated metrics survive container teardown.
 
 ### Resource Limits
+> **Status:** 🟡 Partial (Milestone 1) — CPU / memory / PID caps are **built**:
+> `run-docker.{sh,ps1}` pass `--cpus`/`--memory`/`--pids-limit` (defaults
+> 2/4g/512, overridable). Disk quota and wall-clock timeouts below remain
+> **planned**. Docker host-boundary control, not a sandbox (`design_doc_mvp.md` §5).
 
 Isolation is not just filesystem/network — an agent loop can also exhaust host resources. Apply
 hard caps at container start (independent of bubblewrap):
@@ -309,7 +313,13 @@ API keys and tokens must reach the orchestrator without leaking to the agent or 
 ---
 
 ## 6. Token Usage & Cost Tracker
-> **Status:** ⬜ Planned — `TokenCostTracker` is a stub; no `prices.json` or cost accounting is wired in. See the status matrix above.
+> **Status:** ✅ Built (Milestone 1) — `harness/cost.py` (`CostTrackerMiddleware`)
+> reports per-turn + session tokens/cost/energy and enforces optional budgets.
+> Pricing lives in the `providers/` TOML registry (per-provider strategy +
+> per-model `[pricing]` table incl. split cache prices), not a `prices.json`. A
+> priced model with no rate is loud (warn-once + floor), never silent `$0`. An
+> optional per-model energy estimate is tracked (measured local-device energy is
+> specified, not built — see `ENERGY_SPEC.md`). See `design_doc_milestone1.md`.
 
 ### Callback Implementation
 Deep Agents provides hooks to monitor execution streams:

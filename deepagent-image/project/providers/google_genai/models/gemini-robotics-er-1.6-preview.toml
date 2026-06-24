@@ -1,3 +1,22 @@
 name = "gemini-robotics-er-1.6-preview"
+
+# Model metadata (commented = not recorded).
+# display_name =
 context_window = 131072
 output_token_limit = 65536
+
+# USD per million tokens. Top-level [pricing] = official (vendor-published
+# / sync-pulled). [pricing.estimate] = hand-filled, not vendor-confirmed
+# (shown ~/(est)). See providers/README.md.
+[pricing]
+# input =
+# output =
+# cache_read =
+# cache_write =
+# priced_as_of =
+
+# Watt-hours per token (optional estimate; tracked even for free models).
+[energy]
+# per_input_token =
+# per_output_token =
+# source =

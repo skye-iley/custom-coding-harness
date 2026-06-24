@@ -24,9 +24,24 @@ providers/
 | `default_model`| str    | no       | model stem auto-selected for this provider; omit => never auto |
 | `prefix`       | str    | no       | model spec prefix; defaults to `"<dirname>:"`                  |
 | `base_url_env` | str    | no       | set => OpenAI-compatible, routed via `ChatOpenAI`             |
+| `pricing`      | str    | no       | cost strategy: `rate_table` \| `reported` \| `free` (default) |
 
 `default_model` is a model file stem (e.g. `gemini-3.5-flash`), not a full spec.
 The full spec handed to langchain is `prefix + stem`.
+
+### `pricing` strategy (Milestone 1)
+
+How the cost tracker derives dollars for this provider's models:
+
+- `rate_table` — native providers (anthropic/openai/google/deepseek). Cost comes
+  from each model's `[pricing]` (official) or `[pricing.estimate]` (best-effort)
+  table — see "Official vs. estimated prices" below. A priced model with **no**
+  pricing table is not fatal: it warns once, then runs with cost shown as a
+  floor (set `DEEPAGENTS_PRICE_ESTIMATE` to estimate it) — never a silent `$0`.
+- `reported` — the provider returns dollar cost in-band (openrouter). The tracker
+  reads it off the response; the model `[pricing]` table (if any) is reference.
+- `free` (default, omit) — local/self-hosted (ollama/lmstudio) or
+  subscription-billed (cursor): API cost is `0`. Energy is still tracked.
 
 ## models/<model>.toml fields
 
@@ -36,6 +51,107 @@ The full spec handed to langchain is `prefix + stem`.
 
 Add per-model metadata here as it becomes needed (context window, aliases,
 pricing, etc.) — the loader ignores unknown keys, so new fields are non-breaking.
+
+### Canonical layout (consistent across every model file)
+
+Every `models/*.toml` follows the same shape, whether hand-written or emitted by
+`sync-models`: `name`, a metadata block, an official `[pricing]` table, and an
+`[energy]` table. A hand-filled `[pricing.estimate]` sub-table is added only when
+present. **A field with no value is written as a commented placeholder
+(`# field =`), not omitted** — so each file shows exactly what can be filled, and
+all files read the same. An all-commented (empty) table means "no data recorded"
+and is treated exactly like an absent table by the loader (no rates, no energy).
+Files are written with **LF** line endings on every platform.
+
+`sync-models` **merges, never clobbers**: a refresh overlays freshly-fetched
+official rates and provider metadata onto the existing file but preserves the
+hand-filled `[pricing.estimate]` and `[energy]` tables (no API returns those).
+
+```toml
+name = "example-model"
+
+# Model metadata (commented = not recorded).
+# display_name =
+context_window = 200000
+
+# USD per million tokens. Top-level [pricing] = official (vendor-published
+# / sync-pulled). [pricing.estimate] = hand-filled, not vendor-confirmed
+# (shown ~/(est)). See providers/README.md.
+[pricing]
+input = 0.8
+output = 4.0
+# cache_read =
+# cache_write =
+priced_as_of = "2026-06-24"
+
+# Watt-hours per token (optional estimate; tracked even for free models).
+[energy]
+# per_input_token =
+# per_output_token =
+# source =
+```
+
+### `[pricing]` table (for `rate_table` providers)
+
+USD **per million tokens**, a dated snapshot:
+
+```toml
+[pricing]
+input = 1.0          # fresh (non-cached) input
+output = 5.0
+cache_read = 0.1     # cached-input read   } recorded now even though caching
+cache_write = 1.25   # cache-creation write } isn't enabled yet (split prices)
+priced_as_of = "2026-06-23"   # staleness stamp
+```
+
+Only `input`/`output` are needed to price a model; the `cache_*` fields are the
+split (cached-vs-fresh) prices, priced only when the provider reports cached
+tokens (caching is accounted-for, not enabled, in M1). A bucket with no rate
+falls back to the `input` rate, so cached tokens are never silently dropped.
+
+#### Official vs. estimated prices
+
+A rate is one of two provenances, and the harness **marks which** so a shown
+dollar figure never hides that it rests on a guess:
+
+- **`[pricing]`** (top-level) = **official** — vendor-published. Rates
+  `sync-models` pulls from a provider API count as official too. Shown plain:
+  `cost=$0.0450`.
+- **`[pricing.estimate]`** (nested sub-table) = **best-effort** — hand-filled,
+  not vendor-confirmed. Same fields, plus an optional `source` note. Shown with a
+  `~` prefix and an `(est)` tag: `cost=~$0.0123 (est)`.
+
+```toml
+[pricing.estimate]
+input = 0.9
+output = 4.5
+priced_as_of = "2026-05-01"
+source = "hand-filled estimate"   # optional: where the guess came from
+```
+
+**Official wins** when both tables are present. A table with no official
+top-level rates is read as the estimate — we never present an unmarked guess as
+confirmed. Promote a model from `[pricing.estimate]` to `[pricing]` once its
+figures are vendor-confirmed. The runtime `DEEPAGENTS_PRICE_ESTIMATE` knob is a
+third, transient kind of estimate (no registry edit) and is marked the same way.
+
+### `[energy]` table (optional, any provider)
+
+Watt-hours **per token** — an opt-in estimate, works even for `free` local
+models:
+
+```toml
+[energy]
+per_input_token = 0.0002
+per_output_token = 0.0006
+# or one blended figure (the split pair wins when both present):
+# per_token = 0.0004
+source = "estimate"   # or a local-device backend name; see ENERGY_SPEC.md
+```
+
+The committed estimates are placeholders. For locally-hosted models, `source`
+names the (specified, not-yet-built) device-measurement backend — see
+`../../ENERGY_SPEC.md`.
 
 Local/keyless providers (ollama, lmstudio) and ones with no chosen default
 (openrouter) have no model files and no `default_model`; add a model file +
