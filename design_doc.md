@@ -240,6 +240,51 @@ first-party workflows on this one engine. A workflow is fully described by three
 > the gate layer (predicate + classifier) and the context-mutation / control-flow action tiers — the
 > work that turns "run a command on an event" into "run a *workflow*."
 
+### Workflow format (on disk)
+Each workflow is a **self-contained folder named after the workflow**, discovered under a
+`workflows/` root (sibling to skills/agents; `project/workflows/<name>/` in the harness, overridable
+via `DEEPAGENTS_WORKFLOWS_DIR`). The folder is the unit you copy, version, and share — same shape
+every time:
+
+```
+workflows/
+  git-session-lifecycle/        # folder name == workflow name
+    workflow.md                 # manifest: description + ordered plan (required)
+    trigger.sh                  # gate, fixed name, lives in the folder (required)
+    create-branch.sh            # a step script (optional, local)
+    open-pr.sh                  # a step script (optional, local)
+```
+
+*   **`workflow.md` — the manifest (required).** A short prose description, plus frontmatter that
+    *is* the trigger × hook × action triple made concrete:
+    ```markdown
+    ---
+    name: git-session-lifecycle     # must equal the folder name
+    hook: session.start             # one of the 7 hook points above
+    gate: trigger.sh                # the fixed-name gate; always ./trigger.sh in this folder
+    steps:                          # run in listed order, only if the gate passes
+      - ./create-branch.sh          # relative path → resolved against the workflow folder
+      - ./open-pr.sh
+      - /opt/harness/git/notify.sh  # absolute path → run as-is
+    ---
+    Branch at session start, open a PR at session end. Never auto-merges.
+    ```
+*   **`trigger.sh` — the gate (required, standard name).** **Every** workflow folder has a gate file
+    with the *same fixed name* (`trigger.sh`), always resolved inside the folder — never elsewhere,
+    never renamed. The engine runs it on each fire of `hook` and reads its **exit code: `0` = run the
+    steps, non-zero = skip** (the one contract for both gate kinds — a deterministic predicate is a
+    few lines of shell; a classifier gate is `trigger.sh` shelling out to the classifier and exiting
+    on its verdict). A shebang lets it be any interpreter; the name stays `trigger.sh`.
+*   **Steps — the action (ordered).** Listed in `steps:` and run top-to-bottom only after the gate
+    passes. Each entry is a path: **relative paths resolve against the workflow folder** (the common
+    case — keep step scripts beside `workflow.md`), **absolute paths run as-is** (share one script
+    across workflows, or call into the harness). Steps may therefore live in the folder *or* anywhere
+    on disk; `trigger.sh` may not.
+
+This is the planned authoring format; today's `hooks.json` is the flat precursor (one event → one
+unconditional command, no folder, no gate). The git lifecycle below is the first workflow expressed
+this way.
+
 ### Canonical workflow: Git session lifecycle
 A deterministic, `session.start`/`session.end` workflow whose body is git side-effects — the
 worked example the engine above generalizes.
