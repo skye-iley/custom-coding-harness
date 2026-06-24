@@ -26,6 +26,7 @@ import argparse
 import json
 import os
 import sys
+import tomllib
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -37,24 +38,43 @@ from harness.providers import PROVIDERS, PROVIDERS_DIR, Provider
 
 @dataclass
 class ModelInfo:
-    """One model as returned by a provider. `name` is the real id sent to the
-    provider; `extra` is flat metadata (ints/strs/bools) written verbatim;
-    `pricing` is the rate table (USD per Mtok + priced_as_of) when known;
-    `pricing_estimate` flips the rendered table to [pricing.estimate] (hand-filled,
-    not vendor-confirmed) instead of the official top-level [pricing]; `energy` is
-    the [energy] table (Wh per token) when known (Milestone 1).
+    """One model as returned by a provider, or parsed back from a model file.
+
+    `name` is the real id sent to the provider; `extra` is flat metadata
+    (ints/strs/bools) written verbatim. The three rate tables are kept separate
+    so they survive a merge (`merge_preserving`):
+      - `pricing`  — official top-level [pricing] (vendor-published / sync-pulled).
+      - `estimate` — hand-filled [pricing.estimate] (not vendor-confirmed; ~/(est)).
+      - `energy`   — [energy] (Wh per token).
+    API fetches set only `pricing`/`extra`; `estimate` and `energy` are
+    hand-filled and never returned by an API, so a refresh must preserve them.
 
     Every model file is rendered to the SAME canonical layout (see
     `render_model_toml`): a missing field is written as a commented placeholder
     (`# field =`) rather than omitted, so a file always shows which fields exist
-    to fill. API fetches set only the values the provider reports; the rest stay
-    commented."""
+    to fill."""
 
     name: str
     extra: dict[str, object] = field(default_factory=dict)
     pricing: dict[str, object] | None = None
-    pricing_estimate: bool = False
+    estimate: dict[str, object] | None = None
     energy: dict[str, object] | None = None
+
+    def merge_preserving(self, old: "ModelInfo | None") -> "ModelInfo":
+        """Overlay this freshly-fetched info onto an existing on-disk `old`,
+        keeping hand-filled data an API never returns. Fetched values win for
+        official pricing + metadata the provider reports; the disk copy's
+        `estimate` and `energy` tables (and any extra fields the API dropped)
+        are retained. Returns a new ModelInfo; `self`/`old` are untouched."""
+        if old is None:
+            return self
+        return ModelInfo(
+            name=self.name,
+            extra={**old.extra, **self.extra},      # API metadata wins, disk fills gaps
+            pricing=self.pricing or old.pricing,    # fetched official rates win
+            estimate=old.estimate,                  # hand-filled — always preserved
+            energy=old.energy,                       # hand-filled — always preserved
+        )
 
 
 # --- response parsers (pure: parsed-JSON -> [ModelInfo]) ---------------------
@@ -262,6 +282,8 @@ def _toml_scalar(value: object) -> str:
 # reports beyond these are appended (sorted) as real values.
 CANONICAL_META = ("display_name", "context_window")
 CANONICAL_PRICING = ("input", "output", "cache_read", "cache_write", "priced_as_of")
+# estimate tables additionally carry a `source` note (provenance of the guess).
+CANONICAL_ESTIMATE = CANONICAL_PRICING + ("source",)
 CANONICAL_ENERGY = ("per_input_token", "per_output_token", "source")
 
 
@@ -296,8 +318,16 @@ def render_model_toml(info: ModelInfo) -> str:
     lines.append("# USD per million tokens. Top-level [pricing] = official (vendor-published")
     lines.append("# / sync-pulled). [pricing.estimate] = hand-filled, not vendor-confirmed")
     lines.append("# (shown ~/(est)). See providers/README.md.")
-    lines.append("[pricing.estimate]" if info.pricing_estimate else "[pricing]")
+    lines.append("[pricing]")
     _section(lines, CANONICAL_PRICING, dict(info.pricing or {}))
+
+    # The estimate sub-table is hand-filled, so it is only emitted when it
+    # carries data (a refresh preserves it via merge_preserving). Official
+    # [pricing] above always appears as the promote-to target.
+    if info.estimate:
+        lines.append("")
+        lines.append("[pricing.estimate]")
+        _section(lines, CANONICAL_ESTIMATE, dict(info.estimate))
 
     lines.append("")
     lines.append("# Watt-hours per token (optional estimate; tracked even for free models).")
@@ -305,6 +335,33 @@ def render_model_toml(info: ModelInfo) -> str:
     _section(lines, CANONICAL_ENERGY, dict(info.energy or {}))
 
     return "\n".join(lines) + "\n"
+
+
+def parse_model_toml(text: str, stem: str = "") -> ModelInfo:
+    """Inverse of render: parse a model file back into a ModelInfo, splitting the
+    official [pricing] from the hand-filled [pricing.estimate]. Used to merge an
+    on-disk file with a fresh fetch (`ModelInfo.merge_preserving`) so estimates
+    and energy survive a sync. Legacy flat `price_prompt`/`price_completion`
+    strings (older sync output) are folded into the official [pricing]."""
+    data = tomllib.loads(text)
+    name = data.get("name", stem)
+    pricing_tbl = data.get("pricing") or {}
+    estimate = pricing_tbl.get("estimate") or None
+    official = {k: v for k, v in pricing_tbl.items() if k != "estimate"} or None
+    energy = data.get("energy") or None
+    extra = {k: v for k, v in data.items() if k not in ("name", "pricing", "energy")}
+
+    pp = extra.pop("price_prompt", None)
+    pc = extra.pop("price_completion", None)
+    if pp is not None or pc is not None:
+        official = dict(official or {})
+        if (v := _per_mtok(pp)) is not None:
+            official["input"] = v
+        if (v := _per_mtok(pc)) is not None:
+            official["output"] = v
+        official.setdefault("priced_as_of", date.today().isoformat())
+
+    return ModelInfo(name, extra, official or None, estimate, energy)
 
 
 def model_filename(model_id: str) -> str:
@@ -338,19 +395,21 @@ def sync_provider(
     for info in models:
         fname = model_filename(info.name)
         wanted.add(fname)
-        body = render_model_toml(info)
         target = models_dir / fname
-        if not dry_run:
-            # Compare and write as bytes so the on-disk newline is always LF
-            # (render joins with "\n"): write_text() would translate to CRLF on
-            # Windows, and read_text() would mask CRLF drift on a re-read. Bytes
-            # make the LF decision explicit and rewrite any stale CRLF file.
-            new_bytes = body.encode("utf-8")
-            old_bytes = target.read_bytes() if target.exists() else None
-            if old_bytes != new_bytes:
+        # Merge onto the existing file so hand-filled [pricing.estimate] / [energy]
+        # (which no API returns) survive the refresh; fetched official rates +
+        # provider metadata still win. See ModelInfo.merge_preserving.
+        old_bytes = target.read_bytes() if target.exists() else None
+        old_info = parse_model_toml(old_bytes.decode("utf-8"), target.stem) if old_bytes else None
+        body = render_model_toml(info.merge_preserving(old_info))
+        # Compare and write as bytes so the on-disk newline is always LF
+        # (render joins with "\n"): write_text() would translate to CRLF on
+        # Windows, and read_text() would mask CRLF drift on a re-read. Bytes
+        # make the LF decision explicit and rewrite any stale CRLF file.
+        new_bytes = body.encode("utf-8")
+        if old_bytes != new_bytes:
+            if not dry_run:
                 target.write_bytes(new_bytes)
-                written += 1
-        else:
             written += 1
     log(f"  {provider.prefix} {len(models)} models ({written} new/changed)")
 

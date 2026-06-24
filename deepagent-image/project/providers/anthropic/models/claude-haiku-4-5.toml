@@ -7,6 +7,13 @@ name = "claude-haiku-4-5"
 # USD per million tokens. Top-level [pricing] = official (vendor-published
 # / sync-pulled). [pricing.estimate] = hand-filled, not vendor-confirmed
 # (shown ~/(est)). See providers/README.md.
+[pricing]
+# input =
+# output =
+# cache_read =
+# cache_write =
+# priced_as_of =
+
 [pricing.estimate]
 input = 1.0
 output = 5.0

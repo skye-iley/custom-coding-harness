@@ -55,12 +55,17 @@ pricing, etc.) — the loader ignores unknown keys, so new fields are non-breaki
 ### Canonical layout (consistent across every model file)
 
 Every `models/*.toml` follows the same shape, whether hand-written or emitted by
-`sync-models`: `name`, a metadata block, a `[pricing]` table, and an `[energy]`
-table. **A field with no value is written as a commented placeholder (`# field =`),
-not omitted** — so each file shows exactly what can be filled, and all files read
-the same. An all-commented (empty) table means "no data recorded" and is treated
-exactly like an absent table by the loader (no rates, no energy). Files are
-written with **LF** line endings on every platform.
+`sync-models`: `name`, a metadata block, an official `[pricing]` table, and an
+`[energy]` table. A hand-filled `[pricing.estimate]` sub-table is added only when
+present. **A field with no value is written as a commented placeholder
+(`# field =`), not omitted** — so each file shows exactly what can be filled, and
+all files read the same. An all-commented (empty) table means "no data recorded"
+and is treated exactly like an absent table by the loader (no rates, no energy).
+Files are written with **LF** line endings on every platform.
+
+`sync-models` **merges, never clobbers**: a refresh overlays freshly-fetched
+official rates and provider metadata onto the existing file but preserves the
+hand-filled `[pricing.estimate]` and `[energy]` tables (no API returns those).
 
 ```toml
 name = "example-model"

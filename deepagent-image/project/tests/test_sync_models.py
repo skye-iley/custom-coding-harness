@@ -77,15 +77,63 @@ def test_render_no_pricing_emits_commented_template():
 def test_render_estimate_uses_estimate_subtable():
     info = sm.ModelInfo(
         "guess",
-        pricing={"input": 1.0, "output": 5.0, "priced_as_of": "2026-06-23",
-                 "source": "hand-filled estimate"},
-        pricing_estimate=True,
+        estimate={"input": 1.0, "output": 5.0, "priced_as_of": "2026-06-23",
+                  "source": "hand-filled estimate"},
     )
     text = sm.render_model_toml(info)
-    assert "[pricing.estimate]" in text and "\n[pricing]\n" not in text
+    # both the official target table and the estimate sub-table appear (match the
+    # header lines, not the explanatory comment that also names the tables)
+    assert "\n[pricing.estimate]\n" in text and "\n[pricing]\n" in text
     parsed = tomllib.loads(text)
     rates = cost.rates_from_toml(parsed.get("pricing"), parsed.get("energy"))
     assert rates.input == 1.0 and rates.pricing_source == "estimate"
+
+
+def test_no_estimate_omits_estimate_subtable():
+    text = sm.render_model_toml(sm.ModelInfo("m", pricing={"input": 1.0}))
+    assert "\n[pricing.estimate]\n" not in text
+
+
+def test_parse_render_roundtrip_is_idempotent():
+    src = sm.ModelInfo(
+        "m", extra={"context_window": 100},
+        pricing={"input": 1.0, "priced_as_of": "2026-06-24"},
+        estimate={"output": 2.0, "source": "guess"},
+        energy={"per_token": 0.0003},
+    )
+    text = sm.render_model_toml(src)
+    back = sm.parse_model_toml(text)
+    assert sm.render_model_toml(back) == text
+
+
+def test_parse_folds_legacy_flat_prices():
+    info = sm.parse_model_toml('name = "m"\nprice_prompt = "0.0000008"\nprice_completion = "0.000004"\n')
+    assert info.pricing["input"] == 0.8 and info.pricing["output"] == 4.0
+    assert "price_prompt" not in info.extra
+
+
+def test_merge_preserving_keeps_estimate_and_energy():
+    disk = sm.parse_model_toml(sm.render_model_toml(sm.ModelInfo(
+        "m",
+        estimate={"input": 1.0, "output": 5.0, "priced_as_of": "2026-01-01"},
+        energy={"per_input_token": 0.0002},
+    )))
+    fresh = sm.ModelInfo(
+        "m", extra={"context_window": 1000},
+        pricing={"input": 2.0, "output": 6.0, "priced_as_of": "2026-06-24"},
+    )
+    merged = fresh.merge_preserving(disk)
+    assert merged.pricing["input"] == 2.0           # fetched official wins
+    assert merged.estimate["input"] == 1.0          # hand-filled estimate kept
+    assert merged.energy["per_input_token"] == 0.0002  # hand-filled energy kept
+    assert merged.extra["context_window"] == 1000
+    text = sm.render_model_toml(merged)
+    assert "\n[pricing]\n" in text and "\n[pricing.estimate]\n" in text and "\n[energy]\n" in text
+
+
+def test_merge_preserving_no_old_is_identity():
+    fresh = sm.ModelInfo("m", pricing={"input": 1.0})
+    assert fresh.merge_preserving(None) is fresh
 
 
 def test_render_present_fields_uncommented_missing_commented():
