@@ -39,12 +39,22 @@ from harness.providers import PROVIDERS, PROVIDERS_DIR, Provider
 class ModelInfo:
     """One model as returned by a provider. `name` is the real id sent to the
     provider; `extra` is flat metadata (ints/strs/bools) written verbatim;
-    `pricing` is the [pricing] table (USD per Mtok + priced_as_of) when the API
-    reports per-token prices (Milestone 1)."""
+    `pricing` is the rate table (USD per Mtok + priced_as_of) when known;
+    `pricing_estimate` flips the rendered table to [pricing.estimate] (hand-filled,
+    not vendor-confirmed) instead of the official top-level [pricing]; `energy` is
+    the [energy] table (Wh per token) when known (Milestone 1).
+
+    Every model file is rendered to the SAME canonical layout (see
+    `render_model_toml`): a missing field is written as a commented placeholder
+    (`# field =`) rather than omitted, so a file always shows which fields exist
+    to fill. API fetches set only the values the provider reports; the rest stay
+    commented."""
 
     name: str
     extra: dict[str, object] = field(default_factory=dict)
     pricing: dict[str, object] | None = None
+    pricing_estimate: bool = False
+    energy: dict[str, object] | None = None
 
 
 # --- response parsers (pure: parsed-JSON -> [ModelInfo]) ---------------------
@@ -246,18 +256,54 @@ def _toml_scalar(value: object) -> str:
     return f'"{s}"'
 
 
+# Canonical field order per section. Every model file renders these in this
+# order; a field with no value is written as a `# field =` placeholder (not
+# omitted) so the file is a self-documenting template. Extra fields a provider
+# reports beyond these are appended (sorted) as real values.
+CANONICAL_META = ("display_name", "context_window")
+CANONICAL_PRICING = ("input", "output", "cache_read", "cache_write", "priced_as_of")
+CANONICAL_ENERGY = ("per_input_token", "per_output_token", "source")
+
+
+def _field_line(key: str, value: object) -> str:
+    """`key = value` when a value is recorded, else a commented `# key =` placeholder."""
+    if value is None:
+        return f"# {key} ="
+    return f"{key} = {_toml_scalar(value)}"
+
+
+def _section(lines: list[str], canonical: tuple[str, ...], data: dict[str, object]) -> None:
+    """Emit `canonical` keys in order (commented if absent), then any leftover
+    real fields sorted. Mutates `data` (pops the canonical keys)."""
+    rest = dict(data)
+    for key in canonical:
+        lines.append(_field_line(key, rest.pop(key, None)))
+    for key in sorted(rest):
+        lines.append(_field_line(key, rest[key]))
+
+
 def render_model_toml(info: ModelInfo) -> str:
-    """Serialize a ModelInfo to a TOML doc: `name`, sorted flat extras, then an
-    optional [pricing] table (priced_as_of last so the rate fields read first)."""
-    lines = [f"name = {_toml_scalar(info.name)}"]
-    for k in sorted(info.extra):
-        lines.append(f"{k} = {_toml_scalar(info.extra[k])}")
-    if info.pricing:
-        lines.append("")
-        lines.append("[pricing]")
-        ordered = sorted(info.pricing, key=lambda k: (k == "priced_as_of", k))
-        for k in ordered:
-            lines.append(f"{k} = {_toml_scalar(info.pricing[k])}")
+    """Serialize a ModelInfo to the canonical TOML layout shared by every model
+    file: `name`, a metadata block, a [pricing] (or [pricing.estimate]) table, and
+    an [energy] table. Fields with no value are emitted as commented placeholders
+    so the format is identical across files and self-documents what can be filled."""
+    lines = [f"name = {_toml_scalar(info.name)}", ""]
+
+    lines.append("# Model metadata (commented = not recorded).")
+    _section(lines, CANONICAL_META, dict(info.extra))
+
+    lines.append("")
+    lines.append("# USD per million tokens. Top-level [pricing] = official (vendor-published")
+    lines.append("# / sync-pulled). [pricing.estimate] = hand-filled, not vendor-confirmed")
+    lines.append("# (shown ~/(est)). See providers/README.md.")
+    lines.append("[pricing.estimate]" if info.pricing_estimate else "[pricing]")
+    _section(lines, CANONICAL_PRICING, dict(info.pricing or {}))
+
+    lines.append("")
+    lines.append("# Watt-hours per token (optional estimate; tracked even for free models).")
+    lines.append("[energy]")
+    _section(lines, CANONICAL_ENERGY, dict(info.energy or {}))
+
     return "\n".join(lines) + "\n"
 
 
@@ -295,9 +341,14 @@ def sync_provider(
         body = render_model_toml(info)
         target = models_dir / fname
         if not dry_run:
-            old = target.read_text() if target.exists() else None
-            if old != body:
-                target.write_text(body)
+            # Compare and write as bytes so the on-disk newline is always LF
+            # (render joins with "\n"): write_text() would translate to CRLF on
+            # Windows, and read_text() would mask CRLF drift on a re-read. Bytes
+            # make the LF decision explicit and rewrite any stale CRLF file.
+            new_bytes = body.encode("utf-8")
+            old_bytes = target.read_bytes() if target.exists() else None
+            if old_bytes != new_bytes:
+                target.write_bytes(new_bytes)
                 written += 1
         else:
             written += 1

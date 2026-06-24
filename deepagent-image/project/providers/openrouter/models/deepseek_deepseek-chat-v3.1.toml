@@ -1,8 +1,21 @@
 name = "deepseek/deepseek-chat-v3.1"
+
+# Model metadata (commented = not recorded).
+# display_name =
 context_window = 163840
 
+# USD per million tokens. Top-level [pricing] = official (vendor-published
+# / sync-pulled). [pricing.estimate] = hand-filled, not vendor-confirmed
+# (shown ~/(est)). See providers/README.md.
 [pricing]
-cache_read = 0.13
 input = 0.21
 output = 0.79
+cache_read = 0.13
+# cache_write =
 priced_as_of = "2026-06-24"
+
+# Watt-hours per token (optional estimate; tracked even for free models).
+[energy]
+# per_input_token =
+# per_output_token =
+# source =

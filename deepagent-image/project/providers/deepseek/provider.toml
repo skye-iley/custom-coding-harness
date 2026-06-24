@@ -1,6 +1,8 @@
 # DeepSeek via langchain-deepseek (native init_chat_model prefix).
-pricing = "rate_table"   # per-model [pricing] tables; cost from models/*.toml
 api_key_env = "DEEPSEEK_API_KEY"
 requires_key = true
 priority = 7
 default_model = "deepseek-v4-flash"
+# prefix =
+# base_url_env =
+pricing = "rate_table"   # per-model [pricing] tables; cost from models/*.toml

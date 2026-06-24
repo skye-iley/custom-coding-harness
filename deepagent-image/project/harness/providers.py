@@ -94,10 +94,14 @@ def _load_provider(provider_dir: Path) -> Provider:
                 model_cfg = tomllib.load(fh)
             bare = model_cfg.get("name", model_path.stem)
             models.append(prefix + bare)
-            if "pricing" in model_cfg or "energy" in model_cfg:
-                model_rates[bare] = rates_from_toml(
-                    model_cfg.get("pricing"), model_cfg.get("energy")
-                )
+            # Every model file now carries [pricing]/[energy] sections (commented
+            # placeholders when unfilled), so the tables parse as empty dicts.
+            # Treat empty == absent: only models with real rate/energy data get a
+            # ModelRates entry, keeping behavior identical to flat name-only files.
+            pricing_tbl = model_cfg.get("pricing")
+            energy_tbl = model_cfg.get("energy")
+            if pricing_tbl or energy_tbl:
+                model_rates[bare] = rates_from_toml(pricing_tbl, energy_tbl)
 
     # default_model is a model stem in provider.toml; expand to a full spec.
     default_stem = cfg.get("default_model")

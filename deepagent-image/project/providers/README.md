@@ -52,6 +52,40 @@ How the cost tracker derives dollars for this provider's models:
 Add per-model metadata here as it becomes needed (context window, aliases,
 pricing, etc.) — the loader ignores unknown keys, so new fields are non-breaking.
 
+### Canonical layout (consistent across every model file)
+
+Every `models/*.toml` follows the same shape, whether hand-written or emitted by
+`sync-models`: `name`, a metadata block, a `[pricing]` table, and an `[energy]`
+table. **A field with no value is written as a commented placeholder (`# field =`),
+not omitted** — so each file shows exactly what can be filled, and all files read
+the same. An all-commented (empty) table means "no data recorded" and is treated
+exactly like an absent table by the loader (no rates, no energy). Files are
+written with **LF** line endings on every platform.
+
+```toml
+name = "example-model"
+
+# Model metadata (commented = not recorded).
+# display_name =
+context_window = 200000
+
+# USD per million tokens. Top-level [pricing] = official (vendor-published
+# / sync-pulled). [pricing.estimate] = hand-filled, not vendor-confirmed
+# (shown ~/(est)). See providers/README.md.
+[pricing]
+input = 0.8
+output = 4.0
+# cache_read =
+# cache_write =
+priced_as_of = "2026-06-24"
+
+# Watt-hours per token (optional estimate; tracked even for free models).
+[energy]
+# per_input_token =
+# per_output_token =
+# source =
+```
+
 ### `[pricing]` table (for `rate_table` providers)
 
 USD **per million tokens**, a dated snapshot:

@@ -1,3 +1,22 @@
 name = "gemma-4-26b-a4b-it"
+
+# Model metadata (commented = not recorded).
+# display_name =
 context_window = 262144
 output_token_limit = 32768
+
+# USD per million tokens. Top-level [pricing] = official (vendor-published
+# / sync-pulled). [pricing.estimate] = hand-filled, not vendor-confirmed
+# (shown ~/(est)). See providers/README.md.
+[pricing]
+# input =
+# output =
+# cache_read =
+# cache_write =
+# priced_as_of =
+
+# Watt-hours per token (optional estimate; tracked even for free models).
+[energy]
+# per_input_token =
+# per_output_token =
+# source =

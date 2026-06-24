@@ -58,9 +58,51 @@ def test_render_emits_pricing_table_that_reloads():
     assert rates.input == 3.0 and rates.output == 4.0 and rates.priced_as_of == "2026-06-23"
 
 
-def test_render_no_pricing_stays_flat():
+def test_render_no_pricing_emits_commented_template():
+    """A model with no metadata still renders the full canonical layout: name,
+    a [pricing] and an [energy] section, every field a commented placeholder."""
     text = sm.render_model_toml(sm.ModelInfo("plain"))
-    assert "[pricing]" not in text and 'name = "plain"' in text
+    assert 'name = "plain"' in text
+    assert "[pricing]" in text and "[energy]" in text
+    # missing fields are commented placeholders, not omitted
+    for ph in ("# input =", "# output =", "# priced_as_of =",
+               "# per_input_token =", "# context_window ="):
+        assert ph in text, ph
+    parsed = tomllib.loads(text)               # valid TOML
+    assert parsed == {"name": "plain", "pricing": {}, "energy": {}}
+    rates = cost.rates_from_toml(parsed.get("pricing"), parsed.get("energy"))
+    assert rates.input is None and rates.pricing_source is None
+
+
+def test_render_estimate_uses_estimate_subtable():
+    info = sm.ModelInfo(
+        "guess",
+        pricing={"input": 1.0, "output": 5.0, "priced_as_of": "2026-06-23",
+                 "source": "hand-filled estimate"},
+        pricing_estimate=True,
+    )
+    text = sm.render_model_toml(info)
+    assert "[pricing.estimate]" in text and "\n[pricing]\n" not in text
+    parsed = tomllib.loads(text)
+    rates = cost.rates_from_toml(parsed.get("pricing"), parsed.get("energy"))
+    assert rates.input == 1.0 and rates.pricing_source == "estimate"
+
+
+def test_render_present_fields_uncommented_missing_commented():
+    info = sm.ModelInfo(
+        "m", extra={"context_window": 1000},
+        pricing={"input": 2.0, "priced_as_of": "2026-06-23"},
+    )
+    text = sm.render_model_toml(info)
+    assert "context_window = 1000" in text and "# display_name =" in text
+    assert "input = 2.0" in text and "# output =" in text and "# cache_read =" in text
+
+
+def test_render_uses_lf_newlines_only():
+    text = sm.render_model_toml(
+        sm.ModelInfo("m", pricing={"input": 1.0, "priced_as_of": "2026-06-23"})
+    )
+    assert "\r" not in text and text.endswith("\n")
 
 
 if __name__ == "__main__":

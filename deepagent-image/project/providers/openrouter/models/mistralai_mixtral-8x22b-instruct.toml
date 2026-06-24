@@ -1,8 +1,21 @@
 name = "mistralai/mixtral-8x22b-instruct"
+
+# Model metadata (commented = not recorded).
+# display_name =
 context_window = 65536
 
+# USD per million tokens. Top-level [pricing] = official (vendor-published
+# / sync-pulled). [pricing.estimate] = hand-filled, not vendor-confirmed
+# (shown ~/(est)). See providers/README.md.
 [pricing]
-cache_read = 0.2
 input = 2.0
 output = 6.0
+cache_read = 0.2
+# cache_write =
 priced_as_of = "2026-06-24"
+
+# Watt-hours per token (optional estimate; tracked even for free models).
+[energy]
+# per_input_token =
+# per_output_token =
+# source =

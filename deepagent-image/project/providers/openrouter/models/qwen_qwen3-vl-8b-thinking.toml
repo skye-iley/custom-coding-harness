@@ -1,7 +1,21 @@
 name = "qwen/qwen3-vl-8b-thinking"
+
+# Model metadata (commented = not recorded).
+# display_name =
 context_window = 256000
 
+# USD per million tokens. Top-level [pricing] = official (vendor-published
+# / sync-pulled). [pricing.estimate] = hand-filled, not vendor-confirmed
+# (shown ~/(est)). See providers/README.md.
 [pricing]
 input = 0.117
 output = 1.365
+# cache_read =
+# cache_write =
 priced_as_of = "2026-06-24"
+
+# Watt-hours per token (optional estimate; tracked even for free models).
+[energy]
+# per_input_token =
+# per_output_token =
+# source =

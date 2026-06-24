@@ -1,7 +1,21 @@
 name = "qwen/qwen3.5-flash-02-23"
+
+# Model metadata (commented = not recorded).
+# display_name =
 context_window = 1000000
 
+# USD per million tokens. Top-level [pricing] = official (vendor-published
+# / sync-pulled). [pricing.estimate] = hand-filled, not vendor-confirmed
+# (shown ~/(est)). See providers/README.md.
 [pricing]
 input = 0.065
 output = 0.26
+# cache_read =
+# cache_write =
 priced_as_of = "2026-06-24"
+
+# Watt-hours per token (optional estimate; tracked even for free models).
+[energy]
+# per_input_token =
+# per_output_token =
+# source =

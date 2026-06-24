@@ -1,8 +1,21 @@
 name = "z-ai/glm-4.7-flash"
+
+# Model metadata (commented = not recorded).
+# display_name =
 context_window = 202752
 
+# USD per million tokens. Top-level [pricing] = official (vendor-published
+# / sync-pulled). [pricing.estimate] = hand-filled, not vendor-confirmed
+# (shown ~/(est)). See providers/README.md.
 [pricing]
-cache_read = 0.01
 input = 0.06
 output = 0.4
+cache_read = 0.01
+# cache_write =
 priced_as_of = "2026-06-24"
+
+# Watt-hours per token (optional estimate; tracked even for free models).
+[energy]
+# per_input_token =
+# per_output_token =
+# source =
