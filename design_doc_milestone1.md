@@ -100,6 +100,22 @@ price a model whose TOML has no `[pricing]` table — never returns `0` silently
 Rates are a dated snapshot: the per-model `priced_as_of` stamps the age and the harness warns when
 stale. `prices.json` is dropped; the model TOMLs are the source of truth.
 
+**Addendum — official vs. estimated rates (split provenance).** A rate snapshot carries its
+*provenance* so a displayed dollar figure never silently passes a guess off as a confirmed price:
+
+- **Top-level `[pricing]` = official** — vendor-published. Rates `sync-models` pulls from a provider
+  API count as official (the provider/aggregator publishes them). Shown plain: `cost=$0.0450`.
+- **Nested `[pricing.estimate]` = best-effort** — hand-filled, not vendor-confirmed; same fields plus
+  an optional `source` note. Shown with a `~` prefix and `(est)` tag: `cost=~$0.0123 (est)`.
+
+`rates_from_toml` resolves them: **official wins** when both are present; with no official rates it
+falls back to the estimate sub-table and records `ModelRates.pricing_source` (`"official"` |
+`"estimate"` | `None`). An unmarked table is read as an estimate — we never promote a guess to
+official. The accumulator bumps `estimated_calls` (which already drives the `~`/`(est)` marking for
+the runtime `DEEPAGENTS_PRICE_ESTIMATE` knob) when a `RateTable` price comes from an estimate table;
+a `ReportedCost` in-band figure is the real bill and is never tagged. Migrating an estimate to
+official is a one-line registry edit: move `[pricing.estimate]` → `[pricing]` once confirmed.
+
 ### 2.3 New module: `harness/cost.py`
 
 Holds the *math and plumbing only* — the rate data lives in the registry (§2.2).

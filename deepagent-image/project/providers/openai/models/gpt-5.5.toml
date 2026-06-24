@@ -1,11 +1,14 @@
 name = "gpt-5.5"
 
-# USD per million tokens. Snapshot — verify (follow-up.md: best-effort estimate).
-[pricing]
+# USD per million tokens. BEST-EFFORT, not vendor-confirmed — so it lives under
+# [pricing.estimate], not [pricing]. The harness marks costs derived from it with
+# ~/(est). Promote to a top-level [pricing] table once figures are vendor-confirmed.
+[pricing.estimate]
 input = 1.25
 output = 10.0
 cache_read = 0.125    # cached-input read (caching not enabled yet; field recorded per M1 addendum)
 priced_as_of = "2026-06-23"
+source = "hand-filled estimate"
 
 # Watt-hours per token, rough estimate (placeholder — see follow-up.md).
 [energy]

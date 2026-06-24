@@ -34,8 +34,9 @@ The full spec handed to langchain is `prefix + stem`.
 How the cost tracker derives dollars for this provider's models:
 
 - `rate_table` — native providers (anthropic/openai/google/deepseek). Cost comes
-  from each model's `[pricing]` table (below). A priced model with **no**
-  `[pricing]` table is not fatal: it warns once, then runs with cost shown as a
+  from each model's `[pricing]` (official) or `[pricing.estimate]` (best-effort)
+  table — see "Official vs. estimated prices" below. A priced model with **no**
+  pricing table is not fatal: it warns once, then runs with cost shown as a
   floor (set `DEEPAGENTS_PRICE_ESTIMATE` to estimate it) — never a silent `$0`.
 - `reported` — the provider returns dollar cost in-band (openrouter). The tracker
   reads it off the response; the model `[pricing]` table (if any) is reference.
@@ -68,6 +69,32 @@ Only `input`/`output` are needed to price a model; the `cache_*` fields are the
 split (cached-vs-fresh) prices, priced only when the provider reports cached
 tokens (caching is accounted-for, not enabled, in M1). A bucket with no rate
 falls back to the `input` rate, so cached tokens are never silently dropped.
+
+#### Official vs. estimated prices
+
+A rate is one of two provenances, and the harness **marks which** so a shown
+dollar figure never hides that it rests on a guess:
+
+- **`[pricing]`** (top-level) = **official** — vendor-published. Rates
+  `sync-models` pulls from a provider API count as official too. Shown plain:
+  `cost=$0.0450`.
+- **`[pricing.estimate]`** (nested sub-table) = **best-effort** — hand-filled,
+  not vendor-confirmed. Same fields, plus an optional `source` note. Shown with a
+  `~` prefix and an `(est)` tag: `cost=~$0.0123 (est)`.
+
+```toml
+[pricing.estimate]
+input = 0.9
+output = 4.5
+priced_as_of = "2026-05-01"
+source = "hand-filled estimate"   # optional: where the guess came from
+```
+
+**Official wins** when both tables are present. A table with no official
+top-level rates is read as the estimate — we never present an unmarked guess as
+confirmed. Promote a model from `[pricing.estimate]` to `[pricing]` once its
+figures are vendor-confirmed. The runtime `DEEPAGENTS_PRICE_ESTIMATE` knob is a
+third, transient kind of estimate (no registry edit) and is marked the same way.
 
 ### `[energy]` table (optional, any provider)
 

@@ -48,6 +48,12 @@ class ModelRates:
     though the harness does not *enable* caching yet — if the provider reports
     cached tokens we price them, otherwise they stay 0 (§2.1, §5).
 
+    ``pricing_source`` records the *provenance* of the rates above: ``"official"``
+    (vendor-published — incl. rates sync-pulled from a provider API) vs.
+    ``"estimate"`` (best-effort, hand-filled, not vendor-confirmed). It drives the
+    ``~``/``(est)`` marking on the usage line so a shown dollar figure never hides
+    that it rests on a guess. ``None`` => the model carries no price at all.
+
     Energy fields are watt-hours PER TOKEN (optional, best-effort estimates).
     ``energy_per_token`` is a single blended figure; the per-input/per-output
     pair, when set, wins over it. ``energy_source`` names the (not-yet-built)
@@ -59,6 +65,7 @@ class ModelRates:
     cache_read: float | None = None     # USD / Mtok, cached-input read
     cache_write: float | None = None    # USD / Mtok, cache-creation write
     priced_as_of: str | None = None     # ISO date; staleness stamp (§2.2)
+    pricing_source: str | None = None   # "official" | "estimate" | None (no price)
 
     energy_per_token: float | None = None         # Wh / token, blended
     energy_per_input_token: float | None = None   # Wh / input token
@@ -86,6 +93,13 @@ def rates_from_toml(pricing: dict | None, energy: dict | None) -> ModelRates:
 
     Both tables are optional and any field may be absent; unknown keys are
     ignored so the registry stays forward-compatible (providers/README.md).
+
+    Provenance split: a top-level ``[pricing]`` table is OFFICIAL (vendor-published,
+    including rates sync-pulled from a provider API); a nested ``[pricing.estimate]``
+    (tomllib parses it as ``pricing["estimate"]``) is BEST-EFFORT. Official wins when
+    both are present; with no official rates we fall back to the estimate and tag it
+    so the usage line can mark it — we never present a guess as confirmed (§ pricing
+    provenance; providers/README.md).
     """
     pricing = pricing or {}
     energy = energy or {}
@@ -94,12 +108,24 @@ def rates_from_toml(pricing: dict | None, energy: dict | None) -> ModelRates:
         val = table.get(key)
         return float(val) if isinstance(val, (int, float)) else None
 
+    estimate = pricing.get("estimate") if isinstance(pricing.get("estimate"), dict) else None
+    official_present = pricing.get("input") is not None or pricing.get("output") is not None
+    if official_present:
+        rate_table, source = pricing, "official"
+    elif estimate is not None:
+        rate_table, source = estimate, "estimate"
+    else:
+        rate_table, source = pricing, None  # no price (e.g. an energy-only model)
+
+    priced = rate_table.get("input") is not None or rate_table.get("output") is not None
+
     return ModelRates(
-        input=num(pricing, "input"),
-        output=num(pricing, "output"),
-        cache_read=num(pricing, "cache_read"),
-        cache_write=num(pricing, "cache_write"),
-        priced_as_of=(str(pricing["priced_as_of"]) if pricing.get("priced_as_of") else None),
+        input=num(rate_table, "input"),
+        output=num(rate_table, "output"),
+        cache_read=num(rate_table, "cache_read"),
+        cache_write=num(rate_table, "cache_write"),
+        priced_as_of=(str(rate_table["priced_as_of"]) if rate_table.get("priced_as_of") else None),
+        pricing_source=(source if priced else None),
         energy_per_token=num(energy, "per_token"),
         energy_per_input_token=num(energy, "per_input_token"),
         energy_per_output_token=num(energy, "per_output_token"),
@@ -265,7 +291,9 @@ class UsageAccumulator:
     cost: float = 0.0
     energy_wh: float = 0.0
     unpriced_calls: int = 0
-    estimated_calls: int = 0  # priced via the user-supplied estimate, not a real rate
+    estimated_calls: int = 0  # priced via a best-effort rate: the user-supplied
+    #                           DEEPAGENTS_PRICE_ESTIMATE *or* a registry
+    #                           [pricing.estimate] table — not a vendor-confirmed rate
 
     @property
     def total_tokens(self) -> int:
@@ -297,6 +325,11 @@ class UsageAccumulator:
                 self.unpriced_calls += 1
         else:
             self.cost += price
+            # A real rate produced this price; mark it estimated only when that
+            # rate came from a registry [pricing.estimate] table (RateTable only —
+            # a ReportedCost in-band dollar figure is the actual bill, never a guess).
+            if isinstance(pricing, RateTable) and rates is not None and rates.pricing_source == "estimate":
+                self.estimated_calls += 1
 
         energy = estimate_energy_wh(usage, rates)
         if energy is not None:
@@ -321,7 +354,7 @@ def format_line(turn: UsageAccumulator, session: UsageAccumulator, *, electricit
         if acc.unpriced_calls:
             cost += f" (+{acc.unpriced_calls} unpriced)"
         elif acc.estimated_calls:
-            cost += " (est)"
+            cost = "~" + cost + " (est)"
         parts.append(f"cost={cost}")
         if acc.energy_wh:
             parts.append(f"energy={acc.energy_wh:.3f}Wh")
@@ -344,7 +377,7 @@ def format_session_total(session: UsageAccumulator, *, electricity_rate: float |
     if session.unpriced_calls:
         cost += f" (+{session.unpriced_calls} unpriced calls — floor only)"
     elif session.estimated_calls:
-        cost += " (estimated)"
+        cost = "~" + cost + " (estimated)"
     parts.append(f"cost={cost}")
     if session.energy_wh:
         parts.append(f"energy={session.energy_wh:.3f}Wh")
@@ -413,7 +446,8 @@ class CostTrackerMiddleware(AgentMiddleware):
                 f"[harness] WARNING: no pricing for model '{self._bare_model}'. "
                 "Cost shown is a floor (unpriced calls excluded). Set "
                 "DEEPAGENTS_PRICE_ESTIMATE=<USD per Mtok> to estimate, or add a "
-                "[pricing] table to its model TOML. (This warning shows once.)",
+                "[pricing] / [pricing.estimate] table to its model TOML. "
+                "(This warning shows once.)",
                 file=sys.stderr,
             )
         self._enforce_budget()

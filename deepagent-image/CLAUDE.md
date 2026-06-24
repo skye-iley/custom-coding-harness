@@ -103,9 +103,15 @@ never import `providers.py` (the import goes providers → cost, §2.4).
   `[pricing]` table (USD per **million** tokens: `input`/`output`/`cache_read`/
   `cache_write` + `priced_as_of`). See `providers/README.md`. `cache_*` are the
   split cached-vs-fresh prices, recorded now though caching isn't enabled.
-- **Missing rate is loud, not fatal.** A `rate_table` model with no `[pricing]`
+- **Official vs. estimated prices are split.** Top-level `[pricing]` = official
+  (vendor-published, incl. sync-pulled API rates), shown plain. Nested
+  `[pricing.estimate]` = best-effort/hand-filled, shown with a `~` prefix and
+  `(est)` tag. Official wins when both present; an unmarked guess is read as
+  estimate, never official (`cost.py:rates_from_toml`, `ModelRates.pricing_source`).
+- **Missing rate is loud, not fatal.** A `rate_table` model with no pricing table
   warns once, then runs with cost shown as a floor (unpriced calls excluded) —
-  never a silent `$0`. `DEEPAGENTS_PRICE_ESTIMATE` (USD/Mtok) estimates instead.
+  never a silent `$0`. `DEEPAGENTS_PRICE_ESTIMATE` (USD/Mtok) estimates instead
+  (also marked `~`/`(est)`).
 - **Energy** is an optional per-model `[energy]` estimate (Wh/token), tracked for
   any provider incl. local `free` ones; `DEEPAGENTS_ELECTRICITY_RATE` (USD/kWh)
   turns it into an electricity cost. Measured local-device energy is **specified,

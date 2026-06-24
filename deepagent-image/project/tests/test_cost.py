@@ -175,6 +175,31 @@ def test_rates_from_toml_parses_both_tables():
     assert r.has_price and r.has_energy
 
 
+def test_rates_from_toml_top_level_is_official():
+    r = cost.rates_from_toml({"input": 1.0, "output": 2.0}, None)
+    assert r.has_price and r.pricing_source == "official"
+
+
+def test_rates_from_toml_nested_estimate_is_tagged():
+    r = cost.rates_from_toml(
+        {"estimate": {"input": 0.9, "output": 4.5, "priced_as_of": "2026-05-01"}}, None
+    )
+    assert r.input == 0.9 and r.output == 4.5 and r.priced_as_of == "2026-05-01"
+    assert r.has_price and r.pricing_source == "estimate"
+
+
+def test_rates_from_toml_official_wins_over_estimate():
+    r = cost.rates_from_toml(
+        {"input": 1.0, "output": 2.0, "estimate": {"input": 99.0, "output": 99.0}}, None
+    )
+    assert r.input == 1.0 and r.output == 2.0 and r.pricing_source == "official"
+
+
+def test_rates_from_toml_energy_only_has_no_pricing_source():
+    r = cost.rates_from_toml(None, {"per_token": 0.001})
+    assert not r.has_price and r.pricing_source is None and r.has_energy
+
+
 # --- UsageAccumulator --------------------------------------------------------
 
 def test_accumulator_priced_call():
@@ -197,6 +222,32 @@ def test_accumulator_estimate_fallback():
     acc.add(usage(1_000_000, 0), cost.RateTable({}), "m", estimate_per_mtok=2.0)
     assert acc.estimated_calls == 1 and acc.unpriced_calls == 0
     assert abs(acc.cost - 2.0) < 1e-9
+
+
+def test_accumulator_registry_estimate_rate_tags_call():
+    # A real rate from a [pricing.estimate] table prices the call but is flagged
+    # estimated (so the usage line shows ~/(est)), not treated as a confirmed cost.
+    r = cost.ModelRates(input=1.0, output=2.0, pricing_source="estimate")
+    acc = cost.UsageAccumulator()
+    acc.add(usage(1_000_000, 1_000_000), cost.RateTable({"m": r}), "m", rates=r)
+    assert abs(acc.cost - 3.0) < 1e-9
+    assert acc.estimated_calls == 1 and acc.unpriced_calls == 0
+
+
+def test_accumulator_official_rate_not_tagged():
+    r = cost.ModelRates(input=1.0, output=2.0, pricing_source="official")
+    acc = cost.UsageAccumulator()
+    acc.add(usage(1_000_000, 0), cost.RateTable({"m": r}), "m", rates=r)
+    assert acc.cost == 1.0 and acc.estimated_calls == 0
+
+
+def test_accumulator_reported_cost_not_tagged_even_with_estimate_rates():
+    # ReportedCost returns the actual in-band bill; estimate-sourced reference
+    # rates on the same model must not taint it as estimated.
+    r = cost.ModelRates(input=1.0, output=2.0, pricing_source="estimate")
+    acc = cost.UsageAccumulator()
+    acc.add(usage(100, 100), cost.ReportedCost(), "m", rates=r, response_metadata={"cost": 0.5})
+    assert abs(acc.cost - 0.5) < 1e-9 and acc.estimated_calls == 0
 
 
 def test_accumulator_energy_and_cache_split():
@@ -227,6 +278,18 @@ def test_format_line_electricity_when_rate_set():
 def test_format_line_flags_unpriced():
     acc = cost.UsageAccumulator(input=10, unpriced_calls=2)
     assert "unpriced" in cost.format_line(acc, acc)
+
+
+def test_format_line_marks_estimated():
+    acc = cost.UsageAccumulator(input=10, cost=0.0123, estimated_calls=1)
+    line = cost.format_line(acc, acc)
+    assert "cost=~$0.0123 (est)" in line
+
+
+def test_format_session_total_marks_estimated():
+    s = cost.UsageAccumulator(input=10, output=5, cost=0.05, estimated_calls=2)
+    total = cost.format_session_total(s)
+    assert "cost=~$0.0500 (estimated)" in total
 
 
 # --- CostTrackerMiddleware ---------------------------------------------------
@@ -290,6 +353,11 @@ def test_providers_load_pricing_from_registry():
     p = priced[0]
     rates = next(iter(p.model_rates.values()))
     assert rates.has_price
+    # Every priced model carries a provenance tag — never an unmarked price.
+    for prov in priced:
+        for r in prov.model_rates.values():
+            if r.has_price:
+                assert r.pricing_source in ("official", "estimate")
 
 
 # --- standalone runner -------------------------------------------------------
