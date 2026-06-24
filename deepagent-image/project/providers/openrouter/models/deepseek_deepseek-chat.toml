@@ -1,4 +1,7 @@
 name = "deepseek/deepseek-chat"
 context_window = 131072
-price_completion = "0.0000008001"
-price_prompt = "0.0000002002"
+
+[pricing]
+input = 0.2002
+output = 0.8001
+priced_as_of = "2026-06-24"

@@ -1,4 +1,8 @@
 name = "qwen/qwen2.5-vl-72b-instruct"
 context_window = 131072
-price_completion = "0.000001"
-price_prompt = "0.0000008"
+
+[pricing]
+cache_read = 0.4
+input = 0.8
+output = 1.0
+priced_as_of = "2026-06-24"

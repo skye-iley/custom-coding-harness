@@ -1,4 +1,7 @@
 name = "openai/gpt-audio-mini"
 context_window = 128000
-price_completion = "0.0000024"
-price_prompt = "0.0000006"
+
+[pricing]
+input = 0.6
+output = 2.4
+priced_as_of = "2026-06-24"

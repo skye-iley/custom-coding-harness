@@ -1,0 +1,8 @@
+name = "z-ai/glm-5v-turbo"
+context_window = 202752
+
+[pricing]
+cache_read = 0.24
+input = 1.2
+output = 4.0
+priced_as_of = "2026-06-24"

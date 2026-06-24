@@ -1,4 +1,7 @@
 name = "qwen/qwen3.5-122b-a10b"
 context_window = 262144
-price_completion = "0.00000208"
-price_prompt = "0.00000026"
+
+[pricing]
+input = 0.26
+output = 2.08
+priced_as_of = "2026-06-24"

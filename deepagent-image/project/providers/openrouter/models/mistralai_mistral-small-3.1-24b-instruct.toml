@@ -1,4 +1,7 @@
 name = "mistralai/mistral-small-3.1-24b-instruct"
 context_window = 128000
-price_completion = "0.000000555"
-price_prompt = "0.000000351"
+
+[pricing]
+input = 0.351
+output = 0.555
+priced_as_of = "2026-06-24"

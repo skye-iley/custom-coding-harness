@@ -1,0 +1,8 @@
+name = "nex-agi/nex-n2-pro"
+context_window = 262144
+
+[pricing]
+cache_read = 0.025
+input = 0.25
+output = 1.0
+priced_as_of = "2026-06-24"

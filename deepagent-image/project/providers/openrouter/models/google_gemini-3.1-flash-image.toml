@@ -1,4 +1,7 @@
 name = "google/gemini-3.1-flash-image"
 context_window = 131072
-price_completion = "0.000003"
-price_prompt = "0.0000005"
+
+[pricing]
+input = 0.5
+output = 3.0
+priced_as_of = "2026-06-24"

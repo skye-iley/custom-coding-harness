@@ -1,4 +1,7 @@
 name = "cohere/command-r7b-12-2024"
 context_window = 128000
-price_completion = "0.00000015"
-price_prompt = "0.0000000375"
+
+[pricing]
+input = 0.0375
+output = 0.15
+priced_as_of = "2026-06-24"

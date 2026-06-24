@@ -1,4 +1,7 @@
 name = "openrouter/fusion"
 context_window = 1000000
-price_completion = "-1"
-price_prompt = "-1"
+
+[pricing]
+input = -1000000.0
+output = -1000000.0
+priced_as_of = "2026-06-24"

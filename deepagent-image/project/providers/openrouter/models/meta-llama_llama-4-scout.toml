@@ -1,4 +1,7 @@
 name = "meta-llama/llama-4-scout"
 context_window = 10000000
-price_completion = "0.0000003"
-price_prompt = "0.0000001"
+
+[pricing]
+input = 0.1
+output = 0.3
+priced_as_of = "2026-06-24"

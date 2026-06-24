@@ -1,4 +1,7 @@
 name = "meta-llama/llama-3.3-70b-instruct"
 context_window = 131072
-price_completion = "0.00000032"
-price_prompt = "0.0000001"
+
+[pricing]
+input = 0.1
+output = 0.32
+priced_as_of = "2026-06-24"

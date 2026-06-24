@@ -1,13 +1,1 @@
 name = "deepseek-v4-pro"
-
-# USD per million tokens. Snapshot — verify (follow-up.md: best-effort estimate).
-[pricing]
-input = 0.55
-output = 2.19
-cache_read = 0.14     # cached-input read (caching not enabled yet; field recorded per M1 addendum)
-priced_as_of = "2026-06-23"
-
-# Watt-hours per token, rough estimate (placeholder — see follow-up.md).
-[energy]
-per_input_token = 0.0002
-per_output_token = 0.0006

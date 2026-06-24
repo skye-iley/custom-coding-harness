@@ -1,4 +1,7 @@
 name = "perplexity/sonar-pro"
 context_window = 200000
-price_completion = "0.000015"
-price_prompt = "0.000003"
+
+[pricing]
+input = 3.0
+output = 15.0
+priced_as_of = "2026-06-24"

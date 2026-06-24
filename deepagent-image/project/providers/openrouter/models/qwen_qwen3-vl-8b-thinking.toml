@@ -1,4 +1,7 @@
 name = "qwen/qwen3-vl-8b-thinking"
 context_window = 256000
-price_completion = "0.000001365"
-price_prompt = "0.000000117"
+
+[pricing]
+input = 0.117
+output = 1.365
+priced_as_of = "2026-06-24"

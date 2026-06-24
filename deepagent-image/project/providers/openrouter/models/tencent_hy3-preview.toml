@@ -1,4 +1,8 @@
 name = "tencent/hy3-preview"
 context_window = 262144
-price_completion = "0.00000021"
-price_prompt = "0.000000063"
+
+[pricing]
+cache_read = 0.021
+input = 0.063
+output = 0.21
+priced_as_of = "2026-06-24"

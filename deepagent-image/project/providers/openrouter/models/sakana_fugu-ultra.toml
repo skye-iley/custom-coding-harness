@@ -1,0 +1,8 @@
+name = "sakana/fugu-ultra"
+context_window = 1000000
+
+[pricing]
+cache_read = 0.5
+input = 5.0
+output = 30.0
+priced_as_of = "2026-06-24"

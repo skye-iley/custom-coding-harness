@@ -1,4 +1,9 @@
 name = "google/gemini-3.1-flash-lite-preview"
 context_window = 1048576
-price_completion = "0.0000015"
-price_prompt = "0.00000025"
+
+[pricing]
+cache_read = 0.025
+cache_write = 0.083333
+input = 0.25
+output = 1.5
+priced_as_of = "2026-06-24"

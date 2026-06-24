@@ -1,4 +1,8 @@
 name = "mistralai/mistral-large-2407"
 context_window = 131072
-price_completion = "0.000006"
-price_prompt = "0.000002"
+
+[pricing]
+cache_read = 0.2
+input = 2.0
+output = 6.0
+priced_as_of = "2026-06-24"

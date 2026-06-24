@@ -1,4 +1,9 @@
 name = "anthropic/claude-fable-5"
 context_window = 1000000
-price_completion = "0.00005"
-price_prompt = "0.00001"
+
+[pricing]
+cache_read = 1.0
+cache_write = 12.5
+input = 10.0
+output = 50.0
+priced_as_of = "2026-06-24"

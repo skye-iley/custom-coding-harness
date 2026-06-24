@@ -1,4 +1,7 @@
 name = "meta-llama/llama-guard-4-12b"
 context_window = 163840
-price_completion = "0.00000018"
-price_prompt = "0.00000018"
+
+[pricing]
+input = 0.18
+output = 0.18
+priced_as_of = "2026-06-24"

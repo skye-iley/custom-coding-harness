@@ -1,4 +1,9 @@
 name = "anthropic/claude-opus-4.7"
 context_window = 1000000
-price_completion = "0.000025"
-price_prompt = "0.000005"
+
+[pricing]
+cache_read = 0.5
+cache_write = 6.25
+input = 5.0
+output = 25.0
+priced_as_of = "2026-06-24"

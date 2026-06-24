@@ -1,4 +1,7 @@
 name = "qwen/qwen3.5-flash-02-23"
 context_window = 1000000
-price_completion = "0.00000026"
-price_prompt = "0.000000065"
+
+[pricing]
+input = 0.065
+output = 0.26
+priced_as_of = "2026-06-24"
