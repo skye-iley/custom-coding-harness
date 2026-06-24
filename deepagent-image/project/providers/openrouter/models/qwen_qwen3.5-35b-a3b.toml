@@ -10,7 +10,7 @@ context_window = 262144
 [pricing]
 input = 0.14
 output = 1.0
-# cache_read =
+cache_read = 0.05
 # cache_write =
 priced_as_of = "2026-06-24"
 
