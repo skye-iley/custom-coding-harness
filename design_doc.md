@@ -6,7 +6,8 @@
 *   **Core Capabilities**:
     *   **Intelligent Routing**: Local FSM-constrained classifier routing to local or cloud expert orchestrators.
     *   **Dynamic Sandboxing**: Per-agent restricted file access via `bubblewrap` and `HarnessProfile` scoping.
-    *   **Git Automation**: Deterministic branch lifecycle with mandatory human pre-review for PRs (no auto-merge).
+    *   **Custom Workflows**: User-defined deterministic (or lightweight-classifier-gated) units that run scripts/tools and read or mutate prompt/context/state, bound to chosen points in the session lifecycle (see §3). Git automation and model routing are both instances of this engine.
+    *   **Git Automation**: Deterministic branch lifecycle with mandatory human pre-review for PRs (no auto-merge) — a built-in workflow on the §3 engine.
     *   **Token Optimization**: Multi-layer compression pipeline utilizing `Headroom` (CCR), `Caveman` (Terseness), and Prompt Caching.
     *   **Provider Agnostic**: Unified model interface supporting local (Ollama/LMStudio) and cloud (Claude/GPT) providers.
     *   **Observability**: Full telemetry for token usage, financial cost, routing accuracy, and session effectiveness.
@@ -45,7 +46,8 @@ thread id), isolates workspace dependencies in a workspace-local conda env, and 
 | 2 | `HarnessProfile` dynamic bind mounts | ⬜ Planned | Fixed bind list; no per-agent profile |
 | 2 | Path Guard middleware (`validate_path`) | ⬜ Planned | Snippet only; not in `main.py` |
 | 2 | Resource limits (`--cpus`/`--pids-limit`/mem) | ✅ Built | `run-docker.{sh,ps1}` set `--cpus`/`--memory`/`--pids-limit` (defaults 2/4g/512, overridable). Docker host-boundary control, not a sandbox |
-| 3 | Workflow lifecycle hooks (`hooks.json`) | ✅ Built | `ShellHooksMiddleware` (session/agent/model/tool events) |
+| 3 | Workflow lifecycle hooks (`hooks.json`) | ✅ Built | `ShellHooksMiddleware` (session/agent/model/tool events) — fire-and-forget shell side-effects, output/return ignored |
+| 3 | Conditional / classifier-gated triggers + context mutation | ⬜ Planned | Hooks fire unconditionally today; no per-event predicate, no classifier gate, no prompt/context rewrite from a workflow |
 | — | MCP tool loading (`.mcp.json`) | ✅ Built | `load_mcp_tools` (not a separate doc section) |
 | 3 | Git branch/commit/push/PR lifecycle | ⬜ Planned | No git automation in `main.py` |
 | 5 | Multi-agent funnel (classifier→orchestrator→worker) | ⬜ Planned | Single `create_deep_agent` today |
@@ -194,8 +196,53 @@ API keys and tokens must reach the orchestrator without leaking to the agent or 
 
 ---
 
-## 3. Git Session Lifecycle & Integration
-> **Status:** ⬜ Planned — workflow lifecycle hooks (`hooks.json`) are built; the git branch/commit/push/PR automation described below is **not** built. See the status matrix above.
+## 3. Custom Deterministic Workflows & Git Lifecycle
+> **Status:** 🟡 Partial — the shell lifecycle hook engine (`hooks.json` → `ShellHooksMiddleware`) is
+> built, but only as fire-and-forget side-effects fired unconditionally on every event. Conditional /
+> classifier-gated triggers and workflow-driven context mutation are **planned**; the git
+> branch/commit/push/PR automation below (the canonical workflow) is **not** built. See the status
+> matrix above.
+
+### Workflow Engine (the general abstraction)
+A **custom workflow** is a user-defined unit that runs at a chosen point in the session lifecycle.
+Git automation (below) and model routing (§4) are not bespoke subsystems — they are the two
+first-party workflows on this one engine. A workflow is fully described by three things:
+
+1.  **Trigger — *when* it may run.** Bound to one lifecycle event (the *hook point*, below). On that
+    event the engine evaluates a user-set **gate** before running the body:
+    *   **Deterministic predicate** — a condition over available state: a prompt regex/keyword, a
+        file or `git status` check, an env var, a turn/cost counter, or `always`. Pure, no model call.
+    *   **Classifier gate** — a lightweight, constrained-output agent (the §4 traffic classifier is
+        the reference case) emitting one token from a fixed set; the workflow runs only on a matching
+        verdict. Used when the decision needs intent/complexity judgement a predicate can't express.
+    A workflow with `always` + a shell body is exactly today's `hooks.json` entry.
+
+2.  **Hook point — *where* in the lifecycle it binds.** The same events `ShellHooksMiddleware`
+    already exposes, named by intent:
+    *   `session.start` / `session.end` — once around the whole run (fire in `cli.main()`).
+    *   `agent.start` / `agent.end` — once per user input (per `.invoke`).
+    *   `model.start` — **before the prompt/context is sent to the model** (the injection/rewrite and
+        routing point); `model.end` — after each LLM call (every reasoning step).
+    *   `tool.start` / `tool.end` — around each tool execution.
+    "Between turns" = `agent.end` of turn *N* into `agent.start` of *N+1*; "before context is sent"
+    = `model.start`.
+
+3.  **Action — *what* it does.** In capability order:
+    *   **Side-effect** *(built)* — run a shell command, script, or tool; result discarded
+        (`subprocess.run(..., check=False)`). This is the whole of `hooks.json` today.
+    *   **Context mutation** *(planned)* — read and rewrite the outgoing prompt/context or shared
+        state (inject a system note, redact, compact, attach retrieved files) before it reaches the
+        model. Requires hooks to *return* a value the middleware applies, not just fire.
+    *   **Control-flow** *(planned)* — alter dispatch: select/swap the model (model routing),
+        short-circuit a turn, or veto a tool call.
+
+> **Built vs. planned.** Today: unconditional shell side-effects on the seven events above. Planned:
+> the gate layer (predicate + classifier) and the context-mutation / control-flow action tiers — the
+> work that turns "run a command on an event" into "run a *workflow*."
+
+### Canonical workflow: Git session lifecycle
+A deterministic, `session.start`/`session.end` workflow whose body is git side-effects — the
+worked example the engine above generalizes.
 
 ### Deterministic Branching
 *   **Naming Pattern**: `agent/{provider}/{session-id}`
@@ -205,7 +252,7 @@ API keys and tokens must reach the orchestrator without leaking to the agent or 
         must reuse the stored value, not recompute it — otherwise the pushed branch name won't match
         the one created at start.
 
-### Workflow Hooks
+### Git Lifecycle Flow
 
 ```
 [Start Session] ──> Fetch origin/main ──> Create branch agent/cloud/fe89a2
@@ -238,6 +285,10 @@ API keys and tokens must reach the orchestrator without leaking to the agent or 
 
 ## 4. Model Routing & Provider Abstraction
 > **Status:** 🟡 Partial — the `PROVIDERS` provider abstraction is built; the FSM traffic classifier and local/cloud orchestrator split are **planned/research** (see the MVP-framing note below). See the status matrix above.
+
+> **As a workflow.** Routing is the reference **classifier-gated, control-flow** workflow on the §3
+> engine: bound at `session.start` / `model.start`, gated by the traffic classifier below, acting by
+> selecting the model. The pipeline here is the concrete instance; §3 is the general shape.
 
 ### Router Architecture
 *   **Deep Agents API**: Utilizes `create_deep_agent` from the `deepagents` package to initialize agents with defined backends, profiles, and middleware.
