@@ -115,7 +115,7 @@ never import `providers.py` (the import goes providers → cost, §2.4).
 - **Energy** is an optional per-model `[energy]` estimate (Wh/token), tracked for
   any provider incl. local `free` ones; `DEEPAGENTS_ELECTRICITY_RATE` (USD/kWh)
   turns it into an electricity cost. Measured local-device energy is **specified,
-  not built** — see `ENERGY_SPEC.md` and `cost.py:measure_local_energy_wh`.
+  not built** — see `../ENERGY_SPEC.md` and `cost.py:measure_local_energy_wh`.
 - **Budgets:** `--max-cost` / `--max-tokens` (or `DEEPAGENTS_MAX_COST` /
   `DEEPAGENTS_MAX_TOKENS`) end the REPL with `[harness] budget exceeded` once a
   cumulative total crosses, then print the session total — same deterministic

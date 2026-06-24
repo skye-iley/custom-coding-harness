@@ -151,7 +151,7 @@ source = "estimate"   # or a local-device backend name; see ENERGY_SPEC.md
 
 The committed estimates are placeholders. For locally-hosted models, `source`
 names the (specified, not-yet-built) device-measurement backend — see
-`../../ENERGY_SPEC.md`.
+`../../../ENERGY_SPEC.md`.
 
 Local/keyless providers (ollama, lmstudio) and ones with no chosen default
 (openrouter) have no model files and no `default_model`; add a model file +

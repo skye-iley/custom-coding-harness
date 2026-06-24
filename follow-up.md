@@ -55,7 +55,7 @@ info to revisit.
   (USD/kWh) converts energy → electricity cost on the usage line. Single blended
   `per_token` or a `per_input_token`/`per_output_token` split (split wins).
 - **Local-device measured energy is specified, not built** (per request): see
-  `deepagent-image/ENERGY_SPEC.md` and `cost.py:measure_local_energy_wh()` (raises
+  `ENERGY_SPEC.md` and `cost.py:measure_local_energy_wh()` (raises
   `NotImplementedError`). Spec covers the measurement window (the existing
   `before_model`/`after_model` bracket), backends keyed by `[energy] source`
   (`nvidia_smi`/`rapl`/`powermetrics`/`ipmi`), integration to Wh, and open issues
