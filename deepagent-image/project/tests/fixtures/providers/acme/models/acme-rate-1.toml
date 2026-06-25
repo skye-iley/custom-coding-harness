@@ -1,0 +1,19 @@
+name = "acme-rate-1"
+
+# Model metadata (commented = not recorded).
+# display_name =
+context_window = 200000
+
+# USD per million tokens. Top-level [pricing] = official (vendor-published
+# / sync-pulled). Deterministic fixture rates — never the live committed registry.
+[pricing]
+input = 1.0
+output = 2.0
+cache_read = 0.1
+cache_write = 1.25
+priced_as_of = "2026-06-25"
+
+# Watt-hours per token (optional estimate; tracked even for free models).
+[energy]
+per_input_token = 0.0002
+per_output_token = 0.0006

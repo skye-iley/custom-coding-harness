@@ -4,36 +4,13 @@ These cover the pure math (no langchain / no provider network), so they run on a
 bare interpreter. cost.py's AgentMiddleware import falls back to `object` when
 langchain is absent, so even CostTrackerMiddleware is constructible here.
 
-Run inside the image with pytest (`python3 -m pytest tests/`), or standalone on
-any box with `python3 tests/test_cost.py` (a built-in runner at the bottom calls
-every test_* with no extra dependency).
+Run with pytest: `python3 -m pytest tests/` (inside the test image, or any box
+with the harness deps). The shared lazy loader lives in `_bootstrap.py`.
 """
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-import types
-from pathlib import Path
-
-# --- bootstrap: import harness.cost / harness.providers WITHOUT triggering ---
-# harness/__init__.py (which pulls cli -> dotenv/langgraph/deepagents, none of
-# which are installed on a plain test host). We register a bare `harness`
-# package, then load the two modules we need by file path.
-_HARNESS = Path(__file__).resolve().parent.parent / "harness"
-
-
-def _load(modname: str) -> types.ModuleType:
-    if "harness" not in sys.modules:
-        pkg = types.ModuleType("harness")
-        pkg.__path__ = [str(_HARNESS)]  # mark as a package
-        sys.modules["harness"] = pkg
-    spec = importlib.util.spec_from_file_location(modname, _HARNESS / f"{modname.split('.')[-1]}.py")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[modname] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
+from _bootstrap import _load
 
 cost = _load("harness.cost")
 
@@ -356,9 +333,13 @@ def test_middleware_turn_resets_session_persists():
 
 # --- providers wiring (loads cost types from TOML) ---------------------------
 
-def test_providers_load_pricing_from_registry():
+def test_providers_load_pricing_from_registry(provider_registry):
+    # provider_registry points DEEPAGENTS_PROVIDERS_DIR at the committed fixture
+    # registry (tests/fixtures/providers/) BEFORE we import harness.providers, so
+    # this asserts against the fixture's deterministic rates, not the live
+    # committed registry under project/providers/.
     providers = _load("harness.providers")
-    # at least one rate_table provider with a priced model after we fill TOMLs
+    # at least one rate_table provider with a priced model (the fixture's acme).
     priced = [p for p in providers.PROVIDERS if isinstance(p.pricing, cost.RateTable) and p.model_rates]
     assert priced, "expected at least one rate_table provider with model rates"
     p = priced[0]
@@ -369,19 +350,3 @@ def test_providers_load_pricing_from_registry():
         for r in prov.model_rates.values():
             if r.has_price:
                 assert r.pricing_source in ("official", "estimate")
-
-
-# --- standalone runner -------------------------------------------------------
-
-if __name__ == "__main__":
-    fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
-    failed = 0
-    for name, fn in fns:
-        try:
-            fn()
-            print(f"  ok   {name}")
-        except Exception as exc:  # noqa: BLE001
-            failed += 1
-            print(f"  FAIL {name}: {exc!r}")
-    print(f"\n{len(fns) - failed}/{len(fns)} passed")
-    sys.exit(1 if failed else 0)

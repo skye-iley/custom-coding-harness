@@ -1,4 +1,6 @@
 # Run the harness container. Requires project\.env (copy from project\.env.example).
+# Consumes the `deepagent-harness` runtime image built by build.ps1
+# (`docker build --target runtime`) - no test code, no pytest.
 #
 # Usage:
 #   .\run-docker.ps1 "your task here"

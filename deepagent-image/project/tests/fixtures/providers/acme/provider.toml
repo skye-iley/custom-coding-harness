@@ -1,0 +1,8 @@
+# Fixture provider for the pricing-registry test. NOT a real provider — exists
+# only under tests/fixtures/ so test_providers_load_pricing_from_registry asserts
+# against a committed registry instead of the live committed rates.
+api_key_env = "ACME_API_KEY"
+requires_key = true
+priority = 1
+default_model = "acme-rate-1"
+pricing = "rate_table"   # per-model [pricing] tables; cost from models/*.toml
