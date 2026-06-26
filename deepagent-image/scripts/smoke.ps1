@@ -18,6 +18,8 @@ if ($LASTEXITCODE -ne 0) { throw "test image build failed" }
 docker run --rm deepagent-harness python3 -c "import deepagents, langgraph, langchain_openai; from harness.cli import main; from harness.cost import CostTrackerMiddleware; print('runtime import ok')"
 if ($LASTEXITCODE -ne 0) { throw "runtime import check failed" }
 
-# Full suite via pytest discovery on the test image (no per-file naming).
-docker run --rm deepagent-harness-test python3 -m pytest tests/
+# Full suite via pytest discovery on the test image. -v names every test case
+# (file::test PASSED/FAILED); -ra recaps non-passing tests at the end. Failures
+# print the failing test id, file:line, and asserted values by default.
+docker run --rm deepagent-harness-test python3 -m pytest tests/ -v -ra
 if ($LASTEXITCODE -ne 0) { throw "pytest suite failed" }
