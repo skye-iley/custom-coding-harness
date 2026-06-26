@@ -10,3 +10,5 @@ docker run --rm deepagent-harness python3 -c "import deepagents, langgraph, lang
 # runners baked into the test files, so no pytest dependency is needed.
 docker run --rm deepagent-harness python3 tests/test_cost.py
 docker run --rm deepagent-harness python3 tests/test_sync_models.py
+# Workflow-engine unit tests (pure; no keys/network).
+docker run --rm deepagent-harness python3 tests/test_workflows.py

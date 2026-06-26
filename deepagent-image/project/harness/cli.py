@@ -23,9 +23,16 @@ from harness.cost import (
     Free,
     format_session_total,
 )
-from harness.hooks import _run_hook_commands, build_hook_middleware
 from harness.loaders import load_hooks, load_mcp_tools
 from harness.providers import choose_model, provider_for, resolve_chat_model, validate_credentials
+from harness.workflows import (
+    GateContext,
+    build_workflow_middleware,
+    hooks_to_workflows,
+    load_workflows,
+    run_hook,
+    workflows_by_hook,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -240,7 +247,15 @@ def main() -> int:
         task = DEFAULT_TASK
 
     mcp_tools = load_mcp_tools(Path.cwd() / ".mcp.json")
-    hooks_by_event = load_hooks(Path.cwd() / "hooks.json")
+
+    # Workflows (§3): folder format under workflows/ (gated), plus the flat
+    # hooks.json precursor adapted into always-gate side-effect workflows. One
+    # execution path for both; grouped by hook point for dispatch.
+    workflows_dir = Path(os.getenv("DEEPAGENTS_WORKFLOWS_DIR", str(Path.cwd() / "workflows")))
+    all_workflows = load_workflows(workflows_dir) + hooks_to_workflows(
+        load_hooks(Path.cwd() / "hooks.json")
+    )
+    by_hook = workflows_by_hook(all_workflows)
 
     # Checkpointer DB lives under the workspace so it rides the same host mount
     # the workspace does: thread state (conversation memory) survives across
@@ -258,7 +273,9 @@ def main() -> int:
 
     # session.start / session.end bracket the whole run (process scope), so they
     # fire once even though the agent is invoked once per turn within the loop.
-    _run_hook_commands(hooks_by_event.get("session.start", []))
+    # These run gated, like every other workflow (the git-branch workflow lives
+    # on session.start; git-pr on session.end).
+    run_hook(by_hook.get("session.start", []), GateContext("session.start", workspace))
     try:
         # SqliteSaver holds an open connection, so the whole REPL must run
         # inside the context manager, not just the first invoke.
@@ -267,7 +284,7 @@ def main() -> int:
             # Cost tracker is one more middleware, appended only when there is
             # something to track (§2.5). None => append nothing => MVP behavior.
             tracker = build_cost_tracker(model, args.max_cost, args.max_tokens)
-            middleware = build_hook_middleware(hooks_by_event)
+            middleware = build_workflow_middleware(by_hook, workspace)
             if tracker is not None:
                 middleware.append(tracker)
             agent = build_agent(
@@ -279,7 +296,7 @@ def main() -> int:
             )
             return run_repl(agent, config, task, stream=args.stream, tracker=tracker)
     finally:
-        _run_hook_commands(hooks_by_event.get("session.end", []))
+        run_hook(by_hook.get("session.end", []), GateContext("session.end", workspace))
 
 
 if __name__ == "__main__":

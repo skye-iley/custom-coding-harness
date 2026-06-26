@@ -12,3 +12,7 @@ docker run --rm deepagent-harness python3 tests/test_cost.py
 if ($LASTEXITCODE -ne 0) { throw "test_cost.py failed" }
 docker run --rm deepagent-harness python3 tests/test_sync_models.py
 if ($LASTEXITCODE -ne 0) { throw "test_sync_models.py failed" }
+# Workflow-engine unit tests (pure; no keys/network). sh-dependent gate tests
+# self-skip if sh is absent, but the image has it so they run here.
+docker run --rm deepagent-harness python3 tests/test_workflows.py
+if ($LASTEXITCODE -ne 0) { throw "test_workflows.py failed" }
