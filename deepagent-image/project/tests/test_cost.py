@@ -117,6 +117,17 @@ def test_reported_cost_none_when_absent():
     assert cost.ReportedCost().cost(usage(1, 1), "m", {}) is None
 
 
+def test_reported_cost_malformed_is_unpriced_not_crash():
+    # A non-numeric in-band cost must read as unpriced (None), never raise.
+    assert cost.ReportedCost().cost({"cost": "free"}, "m") is None
+
+
+def test_reported_cost_skips_malformed_top_level_for_valid_nested():
+    # Malformed top-level cost shouldn't mask a valid nested figure.
+    out = cost.ReportedCost().cost({"cost": "n/a", "usage": {"cost": 0.3}}, "m")
+    assert out == 0.3
+
+
 # --- energy ------------------------------------------------------------------
 
 def test_energy_blended_per_token():

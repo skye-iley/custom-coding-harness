@@ -156,6 +156,13 @@ Conventions for new tests:
   diffs the `project/` tree and removes anything a test leaves behind, unless
   `DEEPAGENTS_KEEP_TEST_ARTIFACTS=1` is set (debug escape hatch). It's a backstop
   — write to `tmp_path` so it has nothing to do.
+- **Every bug fix ships with a regression test.** When you fix a bug, add a test
+  that fails on the old (buggy) code and passes on the fix, so the same bug — or
+  the same *class* of bug where the type generalizes — can't silently re-surface
+  later. Target the behavior, not the patch: assert the property that was wrong
+  (the corrected output, the raised error, the no-crash), not the internals of
+  the fix. Put it in the matching `tests/test_<module>.py` next to related cases.
+  No fix is "done" until its test exists and the suite is green.
 
 ## Resource caps (Milestone 1)
 

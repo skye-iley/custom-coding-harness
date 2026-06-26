@@ -127,6 +127,19 @@ def test_backend_strips_real_root_prefix_to_avoid_nesting(workspace_sandbox):
     assert nested == relative
 
 
+def test_backend_guards_upstream_resolve_path(workspace_sandbox):
+    # Regression sentinel: constructing the backend asserts the upstream parent
+    # still defines _resolve_path. If a deepagents upgrade drops/renames it, the
+    # de-nesting override goes dead — this construction must fail loud instead.
+    backend = agent._WorkspaceShellBackend(
+        root_dir=str(workspace_sandbox), virtual_mode=True, inherit_env=False, env={}
+    )
+    assert any(
+        "_resolve_path" in klass.__dict__
+        for klass in type(backend).__mro__[1:]  # excludes our override
+    )
+
+
 # --- build_agent prompt assembly (AGENTS.md append) ------------------------
 
 def test_build_agent_appends_agents_md(workspace_sandbox, monkeypatch):

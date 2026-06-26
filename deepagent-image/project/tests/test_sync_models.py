@@ -134,3 +134,17 @@ def test_render_uses_lf_newlines_only():
         sm.ModelInfo("m", pricing={"input": 1.0, "priced_as_of": "2026-06-23"})
     )
     assert "\r" not in text and text.endswith("\n")
+
+
+def test_redact_scrubs_query_key():
+    url = "https://api.example.com/models?key=SECRET123&alt=json"
+    out = sm._redact(f"HTTP Error 403: Forbidden for url: {url}")
+    assert "SECRET123" not in out
+    assert "key=REDACTED" in out
+    # non-key query params survive.
+    assert "alt=json" in out
+
+
+def test_redact_noop_without_key():
+    text = "HTTP Error 500: Internal Server Error"
+    assert sm._redact(text) == text

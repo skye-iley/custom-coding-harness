@@ -92,6 +92,36 @@ def test_env_int_present_and_absent(monkeypatch):
     assert cli._env_int("N") is None
 
 
+def test_env_float_malformed_raises_systemexit(monkeypatch):
+    monkeypatch.setenv("X", "abc")
+    with pytest.raises(SystemExit):
+        cli._env_float("X")
+
+
+def test_env_int_malformed_raises_systemexit(monkeypatch):
+    monkeypatch.setenv("N", "1.5")
+    with pytest.raises(SystemExit):
+        cli._env_int("N")
+
+
+# --- dispatch (shared entry for main.py and -m harness) --------------------
+
+def test_dispatch_default_runs_agent(monkeypatch):
+    monkeypatch.setattr(cli, "main", lambda: 7)
+    assert cli.dispatch([]) == 7
+    assert cli.dispatch(["do", "a", "task"]) == 7
+
+
+def test_dispatch_routes_sync_models(monkeypatch):
+    import harness.sync_models as sm
+
+    seen = {}
+    monkeypatch.setattr(sm, "sync_models_main", lambda argv: seen.setdefault("argv", argv) or 0)
+    monkeypatch.setattr(cli, "main", lambda: pytest.fail("agent loop must not run for sync-models"))
+    assert cli.dispatch(["sync-models", "--dry-run"]) == 0
+    assert seen["argv"] == ["--dry-run"]
+
+
 # --- _is_exit_command ------------------------------------------------------
 
 @pytest.mark.parametrize("line", ["/exit", "/quit", " /EXIT ", "/Quit\n"])

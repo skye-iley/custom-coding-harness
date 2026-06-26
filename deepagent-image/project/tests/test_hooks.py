@@ -40,6 +40,35 @@ def test_run_hook_commands_empty_is_noop(monkeypatch):
     assert calls == []
 
 
+def test_run_hook_commands_passes_default_timeout(monkeypatch):
+    monkeypatch.delenv("DEEPAGENTS_HOOK_TIMEOUT", raising=False)
+    seen = []
+    monkeypatch.setattr(hooks.subprocess, "run", lambda cmd, **kw: seen.append(kw["timeout"]))
+    hooks._run_hook_commands(["one"])
+    assert seen == [hooks._DEFAULT_HOOK_TIMEOUT]
+
+
+def test_hook_timeout_env_override(monkeypatch):
+    monkeypatch.setenv("DEEPAGENTS_HOOK_TIMEOUT", "5")
+    assert hooks._hook_timeout() == 5.0
+    # <=0 disables the cap (None == no timeout).
+    monkeypatch.setenv("DEEPAGENTS_HOOK_TIMEOUT", "0")
+    assert hooks._hook_timeout() is None
+    # garbage falls back to the default rather than crashing.
+    monkeypatch.setenv("DEEPAGENTS_HOOK_TIMEOUT", "nope")
+    assert hooks._hook_timeout() == hooks._DEFAULT_HOOK_TIMEOUT
+
+
+def test_run_hook_commands_timeout_is_caught(monkeypatch, capsys):
+    def boom(cmd, **kw):
+        raise hooks.subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+
+    monkeypatch.setattr(hooks.subprocess, "run", boom)
+    # Must not propagate: a hung hook is killed, the session continues.
+    hooks._run_hook_commands(["sleep 999"])
+    assert "timed out" in capsys.readouterr().err
+
+
 # --- ShellHooksMiddleware event routing ------------------------------------
 
 @pytest.fixture
