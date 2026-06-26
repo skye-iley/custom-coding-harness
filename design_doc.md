@@ -46,10 +46,10 @@ thread id), isolates workspace dependencies in a workspace-local conda env, and 
 | 2 | `HarnessProfile` dynamic bind mounts | ⬜ Planned | Fixed bind list; no per-agent profile |
 | 2 | Path Guard middleware (`validate_path`) | ⬜ Planned | Snippet only; not in `main.py` |
 | 2 | Resource limits (`--cpus`/`--pids-limit`/mem) | ✅ Built | `run-docker.{sh,ps1}` set `--cpus`/`--memory`/`--pids-limit` (defaults 2/4g/512, overridable). Docker host-boundary control, not a sandbox |
-| 3 | Workflow lifecycle hooks (`hooks.json`) | ✅ Built | `ShellHooksMiddleware` (session/agent/model/tool events) — fire-and-forget shell side-effects, output/return ignored |
-| 3 | Conditional / classifier-gated triggers + context mutation | ⬜ Planned | Hooks fire unconditionally today; no per-event predicate, no classifier gate, no prompt/context rewrite from a workflow |
+| 3 | Workflow engine — folder format + deterministic gates + side-effect steps | ✅ Built | `harness/workflows.py`: `workflows/<name>/` folders (`workflow.md` + `trigger.py`/`trigger.sh` gate + ordered steps), `WorkflowMiddleware`. `hooks.json` is the flat always-gate precursor, adapted into the same path |
+| 3 | Classifier-gated triggers + context-mutation / control-flow action tiers | ⬜ Planned | Deterministic predicate gates + the side-effect action tier are built (above); the classifier gate and the context-rewrite / control-flow tiers are not |
 | — | MCP tool loading (`.mcp.json`) | ✅ Built | `load_mcp_tools` (not a separate doc section) |
-| 3 | Git branch/commit/push/PR lifecycle | ⬜ Planned | No git automation in `main.py` |
+| 3 | Git branch/commit/push/PR lifecycle | ✅ Built | `workflows/git-branch` (session.start) + `workflows/git-pr` (session.end): branch → persist session id → commit/push → `gh pr create`, never auto-merged. Safe no-op without a repo/remote/`GH_TOKEN` |
 | 5 | Multi-agent funnel (classifier→orchestrator→worker) | ⬜ Planned | Single `create_deep_agent` today |
 | 6 | Token/cost tracker | ✅ Built (Milestone 1) | `harness/cost.py` (`CostTrackerMiddleware`); pricing in the `providers/` TOML registry (`[pricing]` per model, strategy per provider), not a `prices.json`. Optional energy estimate + budgets. See `design_doc_milestone1.md` |
 | 7 | Headroom / Caveman / caching pipeline | ⬜ Planned | Nothing integrated |
@@ -197,11 +197,12 @@ API keys and tokens must reach the orchestrator without leaking to the agent or 
 ---
 
 ## 3. Custom Deterministic Workflows & Git Lifecycle
-> **Status:** 🟡 Partial — the shell lifecycle hook engine (`hooks.json` → `ShellHooksMiddleware`) is
-> built, but only as fire-and-forget side-effects fired unconditionally on every event. Conditional /
-> classifier-gated triggers and workflow-driven context mutation are **planned**; the git
-> branch/commit/push/PR automation below (the canonical workflow) is **not** built. See the status
-> matrix above.
+> **Status:** 🟡 Partial — the **deterministic slice** is built (`harness/workflows.py`): the
+> `workflows/<name>/` folder format, predicate gates (`trigger.py` in-process / `trigger.sh`
+> subprocess), the side-effect action tier, and the git branch/commit/push/PR lifecycle below (the
+> canonical workflow, shipped as the paired `git-branch` + `git-pr` folders). `hooks.json` survives as
+> the flat always-gate precursor, adapted into the same engine. Still **planned**: the classifier gate
+> and the context-mutation / control-flow action tiers. See the status matrix above.
 
 ### Workflow Engine (the general abstraction)
 A **custom workflow** is a user-defined unit that runs at a chosen point in the session lifecycle.
@@ -236,9 +237,11 @@ first-party workflows on this one engine. A workflow is fully described by three
     *   **Control-flow** *(planned)* — alter dispatch: select/swap the model (model routing),
         short-circuit a turn, or veto a tool call.
 
-> **Built vs. planned.** Today: unconditional shell side-effects on the seven events above. Planned:
-> the gate layer (predicate + classifier) and the context-mutation / control-flow action tiers — the
-> work that turns "run a command on an event" into "run a *workflow*."
+> **Built vs. planned.** Built: the folder format, the **deterministic** gate layer (predicate —
+> `trigger.py`/`trigger.sh`), and the **side-effect** action tier, on all seven events. Planned: the
+> **classifier** gate kind, and the **context-mutation / control-flow** action tiers — the work that
+> turns "run a command on an event" into a gate that *judges intent* and an action that *rewrites
+> context or alters dispatch*.
 
 ### Workflow format (on disk)
 Each workflow is a **self-contained folder named after the workflow**, discovered under a
@@ -289,13 +292,17 @@ workflows/
     across workflows, or call into the harness). Steps may therefore live in the folder *or* anywhere
     on disk; the `trigger` gate may not.
 
-This is the planned authoring format; today's `hooks.json` is the flat precursor (one event → one
-unconditional command, no folder, no gate). The git lifecycle below is the first workflow expressed
+This is the authoring format (built — `harness/workflows.py:load_workflows`); `hooks.json` is the
+flat precursor (one event → one unconditional command, no folder, no gate), adapted into a synthetic
+always-gate workflow so both run on one path. The git lifecycle below is the first workflow expressed
 this way.
 
 ### Canonical workflow: Git session lifecycle
-A deterministic, `session.start`/`session.end` workflow whose body is git side-effects — the
-worked example the engine above generalizes.
+A deterministic workflow whose body is git side-effects — the worked example the engine generalizes.
+Because a workflow binds to **one** hook point, it ships as a **paired set of two folders** that share
+state via `<workspace>/.deepagents/session.env` (written at start, reused at end):
+`git-branch` on `session.start` and `git-pr` on `session.end`. Each is a safe no-op without its
+prerequisites (a git repo / a clean tree / a remote / `gh` + `GH_TOKEN`).
 
 ### Deterministic Branching
 *   **Naming Pattern**: `agent/{provider}/{session-id}`

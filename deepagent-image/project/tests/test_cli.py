@@ -116,7 +116,9 @@ def test_dispatch_routes_sync_models(monkeypatch):
     import harness.sync_models as sm
 
     seen = {}
-    monkeypatch.setattr(sm, "sync_models_main", lambda argv: seen.setdefault("argv", argv) or 0)
+    # update() returns None so the lambda yields 0 (the success exit code);
+    # `setdefault(...) or 0` returned the truthy argv list instead of 0.
+    monkeypatch.setattr(sm, "sync_models_main", lambda argv: seen.update(argv=argv) or 0)
     monkeypatch.setattr(cli, "main", lambda: pytest.fail("agent loop must not run for sync-models"))
     assert cli.dispatch(["sync-models", "--dry-run"]) == 0
     assert seen["argv"] == ["--dry-run"]

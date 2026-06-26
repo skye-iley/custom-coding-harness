@@ -401,7 +401,7 @@ def format_session_total(session: UsageAccumulator, *, electricity_rate: float |
 class CostTrackerMiddleware(AgentMiddleware):
     """Accumulate usage after every model call; print per-turn + session totals.
 
-    Plugs in exactly like ShellHooksMiddleware — appended to the agent's
+    Plugs in exactly like WorkflowMiddleware — appended to the agent's
     middleware list, ``run_turn`` untouched (§2.5). Built only when there is
     something to report (non-Free pricing, a budget, or energy data); otherwise
     cli.py appends nothing and the harness behaves like the MVP.

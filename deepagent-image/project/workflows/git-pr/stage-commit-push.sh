@@ -1,0 +1,23 @@
+#!/bin/sh
+# git-pr step 1: stage, commit, push the session branch (§3 teardown).
+set -eu
+cd "${DEEPAGENTS_WORKSPACE:-.}"
+. ./.deepagents/session.env
+
+git add -A
+# Never commit harness state (checkpoints DB, session.env live under .deepagents)
+# or telemetry — §3 excludes these from the agent's mutations.
+git reset -q -- .deepagents .agent_telemetry 2>/dev/null || true
+
+if git diff --cached --quiet; then
+  echo "[workflow git-pr] no changes to commit" >&2
+  exit 0
+fi
+
+git commit -m "agent(session-${DEEPAGENTS_SESSION_ID}): automated codebase mutations" >&2
+
+if git push origin "$DEEPAGENTS_SESSION_BRANCH" >&2; then
+  echo "[workflow git-pr] pushed $DEEPAGENTS_SESSION_BRANCH" >&2
+else
+  echo "[workflow git-pr] push failed (no remote/creds?); branch kept locally" >&2
+fi

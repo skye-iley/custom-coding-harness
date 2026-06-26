@@ -25,7 +25,9 @@ on user code inside a separate **workspace** conda env. `project/main.py` is the
   - `providers.py` — `PROVIDERS` registry + `choose_model` / `validate_credentials` /
     `resolve_chat_model` (model routing; see "Model routing" below).
   - `loaders.py` — optional-file IO: `AGENTS.md` text, `.mcp.json` tools, `hooks.json`.
-  - `hooks.py` — `ShellHooksMiddleware` for per-event hooks; session hooks fire in `cli.py`.
+  - `workflows.py` — the §3 workflow engine: `workflows/` folder format, gates
+    (`trigger.py`/`trigger.sh`), side-effect steps, `WorkflowMiddleware`; the flat
+    `hooks.json` is adapted into always-gate workflows (see "Custom workflows" below).
   - `agent.py` — workspace resolution, system prompt, `build_agent`, result extraction.
   - `cli.py` — `parse_args` + `main()`: wires the above around the SqliteSaver checkpointer, builds
     the agent once, then hands off to `run_repl()` — the interactive multi-turn loop (see below).
@@ -36,6 +38,8 @@ on user code inside a separate **workspace** conda env. `project/main.py` is the
 - `project/providers/` — on-disk provider/model registry (`<provider>/provider.toml` +
   `<provider>/models/<model>.toml`). Loaded by `harness/providers.py`; see `providers/README.md`.
 - `project/.mcp.json`, `project/hooks.json` — optional MCP servers and lifecycle hooks.
+- `project/workflows/` — custom workflow folders (§3); ships `git-branch` +
+  `git-pr` (the git session lifecycle). See "Custom workflows" below.
 - `project/workspace/` — seed workspace (environment.yml, run-in-env.sh). Copied to
   `/project/workspace-seed/` in the image; the real workspace is bind-mounted at run time.
 - `scripts/` — `build`, `run-docker`, `verify`, `smoke`, `sync-models` in both `.ps1` (Windows)
@@ -87,6 +91,50 @@ needs API keys + network (the sealed runtime has neither) and writes registry fi
 It never rewrites `provider.toml`, so `default_model` stays a human choice. Per-provider fetching
 splits into pure `parse_*` functions (response JSON → `ModelInfo`, unit-tested) and a thin urllib
 GET, so no new dependency.
+
+## Custom workflows (`harness/workflows.py`, design_doc.md §3)
+
+A **workflow** = trigger (gate) × hook point × action (steps), discovered as a
+self-contained folder under `workflows/` (`DEEPAGENTS_WORKFLOWS_DIR` overrides
+the path). This is the **deterministic slice**: predicate gates + the
+side-effect action tier. The classifier gate and the context-mutation /
+control-flow action tiers are **planned, not built**.
+
+Folder format (`workflows/<name>/`):
+- `workflow.md` — manifest. YAML-ish frontmatter (parsed by a tiny stdlib
+  parser, no `pyyaml`): `name` (== folder name), `hook` (one of the 7 events),
+  `gate`, `steps` (ordered; **relative paths resolve against the folder**,
+  absolute paths run as-is). Body is prose.
+- `trigger.py` **or** `trigger.sh` (fixed basename, exactly one):
+  - `trigger.py` — canonical, **in-process** (`gate(ctx: GateContext) -> bool`);
+    runs in the harness venv, so **stdlib + engine API only** (two-stack rule).
+  - `trigger.sh` — subprocess predicate; **exit 0 = run, non-zero = skip**. Gets
+    `DEEPAGENTS_HOOK_EVENT` / `DEEPAGENTS_WORKSPACE` / `DEEPAGENTS_PROMPT` as env.
+- step scripts (side-effects; result discarded, `check=False`, like the old hooks).
+
+Hook points: `session.start`/`.end` (fire once in `cli.main()`), `agent.start`/
+`.end`, `model.start`/`.end`, `tool.start`/`.end` (per-event via
+`WorkflowMiddleware`, appended only when a non-session workflow exists). A bad
+manifest (name mismatch, unknown hook, missing/duplicate gate) fails loudly with
+`SystemExit`.
+
+`hooks.json` is the **flat precursor**: each entry is adapted into a synthetic
+`always`-gate (no trigger file) side-effect workflow, so both share one path.
+
+**Shipped workflows — git session lifecycle (a paired set; one hook each):**
+- `git-branch` (`session.start`) — gate: is-git-repo. Asserts a clean tree,
+  fetches `origin/main`, checks out `agent/<provider>/<session-id>`, persists
+  `session-id`/branch/base to `<workspace>/.deepagents/session.env`.
+- `git-pr` (`session.end`) — gate: `session.env` exists. Stages (excludes
+  `.deepagents`/`.agent_telemetry`), commits, pushes, and `gh pr create`s into
+  `main` — **never auto-merges** (§3 merge policy; human pre-review mandatory).
+
+Both are **safe no-ops** without their prerequisites: not a git repo / dirty tree
+→ git-branch skips; no remote → push skipped (branch kept local); no `gh` /
+`GH_TOKEN` → PR skipped. So a keyless smoke run still exits 0.
+
+Tests: `tests/test_workflows.py` (pure; `sh`-dependent gate tests self-skip
+without `sh`) — run by `smoke`, or standalone (`python3 tests/test_workflows.py`).
 
 ## Cost / token / energy tracking (Milestone 1)
 

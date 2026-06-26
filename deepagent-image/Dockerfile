@@ -62,6 +62,7 @@ COPY project/harness/ ./harness/
 COPY project/memories/ ./memories/
 COPY project/providers/ ./providers/
 COPY project/skills/ ./skills/
+COPY project/workflows/ ./workflows/
 COPY project/workspace/ ./workspace/
 COPY scripts/conda-init-workspace.sh /usr/local/bin/conda-init-workspace
 COPY scripts/sandbox-exec.sh /usr/local/bin/sandbox-exec
