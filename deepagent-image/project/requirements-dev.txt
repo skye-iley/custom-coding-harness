@@ -1,0 +1,4 @@
+# Test-stage-only dependencies (installed into /opt/venv by the Dockerfile's
+# `test` stage, never the shippable `runtime` stage). Keep runtime deps in
+# requirements.txt. pytest is the canonical test runner: `python3 -m pytest tests/`.
+pytest==8.3.5

@@ -179,11 +179,14 @@ class ReportedCost:
         for src in (usage, response_metadata or {}):
             if not isinstance(src, dict):
                 continue
-            if src.get("cost") is not None:
-                return float(src["cost"])
-            nested = src.get("usage")
-            if isinstance(nested, dict) and nested.get("cost") is not None:
-                return float(nested["cost"])
+            for candidate in (src, src.get("usage")):
+                if isinstance(candidate, dict) and candidate.get("cost") is not None:
+                    try:
+                        return float(candidate["cost"])
+                    except (TypeError, ValueError):
+                        # Malformed in-band cost: treat as absent (unpriced) and
+                        # keep probing rather than crash the turn.
+                        continue
         return None
 
 
@@ -206,6 +209,9 @@ class RateTable:
         fresh_in, out, cache_read, cache_write = _split_tokens(usage)
         # Fall back to the fresh-input rate for cached buckets when a split rate
         # is absent, so cached tokens are never dropped from the bill silently.
+        # Note this is a conservative *upper* bound for those buckets (real
+        # cache reads price below fresh input), unlike the session-level
+        # unpriced "floor" — here we'd sooner over-state than undercount.
         in_rate = r.input or 0.0
         out_rate = r.output if r.output is not None else 0.0
         read_rate = r.cache_read if r.cache_read is not None else in_rate
@@ -423,6 +429,11 @@ class CostTrackerMiddleware(AgentMiddleware):
         self.session = UsageAccumulator()
         self.turn = UsageAccumulator()
         self._warned_unpriced = False
+
+    @property
+    def electricity_rate(self) -> float | None:
+        """USD/kWh used to price energy in the session-total line (or None)."""
+        return self._electricity_rate
 
     def before_agent(self, state, runtime):
         # Reset the per-turn view; the session total carries across turns.

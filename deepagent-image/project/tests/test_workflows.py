@@ -1,64 +1,47 @@
-"""Unit tests for harness/workflows.py (the §3 deterministic workflow engine).
+"""Tests for harness/workflows.py (the §3 deterministic workflow engine).
 
-Pure: no langchain (workflows.py degrades AgentMiddleware to object when it is
-absent), no network. Gate-eval tests that need a POSIX `sh` skip themselves on a
-host without one; everything else runs anywhere.
+Pure: workflows.py degrades its AgentMiddleware base to `object` when langchain
+is absent, so the loader / parser / gate logic and the middleware routing all
+run on a bare host. Gate-eval tests that need a POSIX `sh` skip themselves
+without one. Filesystem writes go to pytest's `tmp_path` (never under the
+mounted project/), per the suite convention.
 
-Run inside the image with pytest (`python3 -m pytest tests/`), or standalone on
-any box with `python3 tests/test_workflows.py` (a built-in runner at the bottom
-calls every test_* with no extra dependency).
+Run with pytest: `python3 -m pytest tests/` (in the test image, or any box with
+a POSIX shell). The shared lazy loader lives in `_bootstrap.py`.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import shutil
-import sys
-import tempfile
-import types
-from pathlib import Path
+import subprocess
 
-# --- bootstrap: load harness.workflows WITHOUT triggering harness/__init__.py
-# (which pulls cli -> dotenv/langgraph/deepagents, none installed on a plain
-# test host). Mirror tests/test_cost.py.
-_HARNESS = Path(__file__).resolve().parent.parent / "harness"
+import pytest
 
-
-def _load(modname: str) -> types.ModuleType:
-    if "harness" not in sys.modules:
-        pkg = types.ModuleType("harness")
-        pkg.__path__ = [str(_HARNESS)]  # mark as a package
-        sys.modules["harness"] = pkg
-    spec = importlib.util.spec_from_file_location(
-        modname, _HARNESS / f"{modname.split('.')[-1]}.py"
-    )
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[modname] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
+from _bootstrap import _load
 
 wf = _load("harness.workflows")
 
 _HAS_SH = shutil.which("sh") is not None
+needs_sh = pytest.mark.skipif(not _HAS_SH, reason="needs a POSIX sh")
 
 
-def _make_workflow(
-    name: str = "demo",
-    hook: str = "session.start",
-    gate_name: str = "trigger.sh",
-    gate_body: str = "#!/bin/sh\nexit 0\n",
-    steps: list[str] | None = None,
-    extra_files: dict[str, str] | None = None,
-) -> Path:
-    """Write a workflow folder under a fresh temp dir; return the temp root
-    (the workflows/ root, with one <name>/ folder inside)."""
-    root = Path(tempfile.mkdtemp())
+def _write_workflow(
+    root,
+    name="demo",
+    hook="session.start",
+    gate_name="trigger.sh",
+    gate_body="#!/bin/sh\nexit 0\n",
+    steps=("./step.sh",),
+    extra_files=None,
+):
+    """Write a `<root>/<name>/` workflow folder; return `root` (a workflows/
+    root holding one workflow). `root` is a pytest tmp_path subdir."""
     folder = root / name
-    folder.mkdir()
-    steps = steps if steps is not None else ["./step.sh"]
+    folder.mkdir(parents=True)
     steps_block = "".join(f"  - {s}\n" for s in steps)
-    manifest = f"---\nname: {name}\nhook: {hook}\ngate: {gate_name}\nsteps:\n{steps_block}---\nbody\n"
+    manifest = (
+        f"---\nname: {name}\nhook: {hook}\ngate: {gate_name}\nsteps:\n{steps_block}---\nbody\n"
+    )
     (folder / "workflow.md").write_text(manifest, encoding="utf-8")
     if gate_name:
         (folder / gate_name).write_text(gate_body, encoding="utf-8")
@@ -69,9 +52,8 @@ def _make_workflow(
 
 # --- loading + validation ----------------------------------------------------
 
-
-def test_load_valid_workflow():
-    root = _make_workflow(name="demo", hook="agent.start", steps=["./a.sh", "/abs/b.sh"])
+def test_load_valid_workflow(tmp_path):
+    root = _write_workflow(tmp_path, name="demo", hook="agent.start", steps=["./a.sh", "/abs/b.sh"])
     workflows = wf.load_workflows(root)
     assert len(workflows) == 1
     w = workflows[0]
@@ -84,65 +66,57 @@ def test_load_valid_workflow():
     assert w.steps[1] == "/abs/b.sh"
 
 
-def test_folder_without_manifest_is_skipped():
-    root = Path(tempfile.mkdtemp())
-    (root / "not-a-workflow").mkdir()
-    assert wf.load_workflows(root) == []
+def test_folder_without_manifest_is_skipped(tmp_path):
+    (tmp_path / "not-a-workflow").mkdir()
+    assert wf.load_workflows(tmp_path) == []
 
 
-def test_missing_dir_is_empty():
-    assert wf.load_workflows(Path(tempfile.mkdtemp()) / "nope") == []
+def test_missing_dir_is_empty(tmp_path):
+    assert wf.load_workflows(tmp_path / "nope") == []
 
 
-def test_name_must_match_folder():
-    root = _make_workflow(name="demo")
-    # rewrite manifest with a mismatched name
+def test_name_must_match_folder(tmp_path):
+    root = _write_workflow(tmp_path, name="demo")
     (root / "demo" / "workflow.md").write_text(
         "---\nname: other\nhook: session.start\ngate: trigger.sh\nsteps:\n  - ./s.sh\n---\n",
         encoding="utf-8",
     )
-    _expect_systemexit(root)
+    with pytest.raises(SystemExit):
+        wf.load_workflows(root)
 
 
-def test_unknown_hook_rejected():
-    root = _make_workflow(name="demo", hook="not.a.hook")
-    _expect_systemexit(root)
+def test_unknown_hook_rejected(tmp_path):
+    root = _write_workflow(tmp_path, name="demo", hook="not.a.hook")
+    with pytest.raises(SystemExit):
+        wf.load_workflows(root)
 
 
-def test_missing_gate_rejected():
-    root = _make_workflow(name="demo", gate_name="")  # no gate file written
-    _expect_systemexit(root)
+def test_missing_gate_rejected(tmp_path):
+    root = _write_workflow(tmp_path, name="demo", gate_name="")  # no gate file
+    with pytest.raises(SystemExit):
+        wf.load_workflows(root)
 
 
-def test_both_gates_rejected():
-    root = _make_workflow(name="demo", gate_name="trigger.sh")
+def test_both_gates_rejected(tmp_path):
+    root = _write_workflow(tmp_path, name="demo", gate_name="trigger.sh")
     (root / "demo" / "trigger.py").write_text("def gate(ctx): return True\n", encoding="utf-8")
-    _expect_systemexit(root)
+    with pytest.raises(SystemExit):
+        wf.load_workflows(root)
 
 
-def test_missing_frontmatter_rejected():
-    root = Path(tempfile.mkdtemp())
-    folder = root / "demo"
+def test_missing_frontmatter_rejected(tmp_path):
+    folder = tmp_path / "demo"
     folder.mkdir()
     (folder / "workflow.md").write_text("no frontmatter here\n", encoding="utf-8")
     (folder / "trigger.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    _expect_systemexit(root)
-
-
-def _expect_systemexit(root: Path):
-    try:
-        wf.load_workflows(root)
-    except SystemExit:
-        return
-    raise AssertionError("expected SystemExit")
+    with pytest.raises(SystemExit):
+        wf.load_workflows(tmp_path)
 
 
 # --- frontmatter parsing -----------------------------------------------------
 
-
-def test_frontmatter_inline_comment_and_quotes():
-    root = Path(tempfile.mkdtemp())
-    folder = root / "demo"
+def test_frontmatter_inline_comment_and_quotes(tmp_path):
+    folder = tmp_path / "demo"
     folder.mkdir()
     (folder / "workflow.md").write_text(
         "---\n"
@@ -156,117 +130,131 @@ def test_frontmatter_inline_comment_and_quotes():
     )
     (folder / "trigger.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     (folder / "s.sh").write_text("#!/bin/sh\n", encoding="utf-8")
-    w = wf.load_workflows(root)[0]
+    w = wf.load_workflows(tmp_path)[0]
     assert w.name == "demo"
     assert w.hook == "session.end"
     assert w.steps[0].endswith("s.sh")
-    # inline comment must not leak into the resolved step path
-    assert "#" not in w.steps[0]
+    assert "#" not in w.steps[0]  # inline comment must not leak into the path
 
 
 # --- gate evaluation ---------------------------------------------------------
 
-
-def test_always_gate_when_none():
+def test_always_gate_when_none(tmp_path):
     w = wf.Workflow(name="x", hook="session.start", steps=())
-    ctx = wf.GateContext("session.start", Path("."))
-    assert wf.evaluate_gate(w, ctx) is True
+    assert wf.evaluate_gate(w, wf.GateContext("session.start", tmp_path)) is True
 
 
-def test_shell_gate_pass_and_fail():
-    if not _HAS_SH:
-        print("  skip test_shell_gate_pass_and_fail (no sh)")
-        return
-    root_pass = _make_workflow(name="p", gate_body="#!/bin/sh\nexit 0\n", steps=[])
-    root_fail = _make_workflow(name="f", gate_body="#!/bin/sh\nexit 1\n", steps=[])
-    ctx = wf.GateContext("session.start", Path("."))
+@needs_sh
+def test_shell_gate_pass_and_fail(tmp_path):
+    root_pass = _write_workflow(tmp_path / "p", name="p", gate_body="#!/bin/sh\nexit 0\n", steps=[])
+    root_fail = _write_workflow(tmp_path / "f", name="f", gate_body="#!/bin/sh\nexit 1\n", steps=[])
+    ctx = wf.GateContext("session.start", tmp_path)
     assert wf.evaluate_gate(wf.load_workflows(root_pass)[0], ctx) is True
     assert wf.evaluate_gate(wf.load_workflows(root_fail)[0], ctx) is False
 
 
-def test_shell_gate_reads_event_env():
-    if not _HAS_SH:
-        print("  skip test_shell_gate_reads_event_env (no sh)")
-        return
-    # gate passes only on session.end, proving DEEPAGENTS_HOOK_EVENT reaches it
+@needs_sh
+def test_shell_gate_reads_event_env(tmp_path):
     body = '#!/bin/sh\n[ "$DEEPAGENTS_HOOK_EVENT" = "session.end" ]\n'
-    root = _make_workflow(name="ev", gate_body=body, steps=[])
+    root = _write_workflow(tmp_path, name="ev", gate_body=body, steps=[])
     w = wf.load_workflows(root)[0]
-    assert wf.evaluate_gate(w, wf.GateContext("session.end", Path("."))) is True
-    assert wf.evaluate_gate(w, wf.GateContext("session.start", Path("."))) is False
+    assert wf.evaluate_gate(w, wf.GateContext("session.end", tmp_path)) is True
+    assert wf.evaluate_gate(w, wf.GateContext("session.start", tmp_path)) is False
 
 
-def test_python_gate():
+def test_python_gate(tmp_path):
     body = "def gate(ctx):\n    return ctx.event == 'agent.start'\n"
-    root = _make_workflow(name="py", hook="agent.start", gate_name="trigger.py", gate_body=body, steps=[])
-    w = wf.load_workflows(root)[0]
-    assert w.gate_is_python
-    assert wf.evaluate_gate(w, wf.GateContext("agent.start", Path("."))) is True
-    assert wf.evaluate_gate(w, wf.GateContext("model.start", Path("."))) is False
-
-
-def test_python_gate_missing_function_rejected():
-    root = _make_workflow(
-        name="py", gate_name="trigger.py", gate_body="x = 1\n", steps=[]
+    root = _write_workflow(
+        tmp_path, name="py", hook="agent.start", gate_name="trigger.py", gate_body=body, steps=[]
     )
     w = wf.load_workflows(root)[0]
-    try:
-        wf.evaluate_gate(w, wf.GateContext("session.start", Path(".")))
-    except SystemExit:
-        return
-    raise AssertionError("expected SystemExit for trigger.py with no gate()")
+    assert w.gate_is_python
+    assert wf.evaluate_gate(w, wf.GateContext("agent.start", tmp_path)) is True
+    assert wf.evaluate_gate(w, wf.GateContext("model.start", tmp_path)) is False
 
 
-def test_run_steps_runs_sh_without_exec_bit_and_passes_env():
-    if not _HAS_SH:
-        print("  skip test_run_steps_runs_sh_without_exec_bit_and_passes_env (no sh)")
-        return
-    out = Path(tempfile.mkdtemp()) / "out.txt"
+def test_python_gate_missing_function_rejected(tmp_path):
+    root = _write_workflow(tmp_path, name="py", gate_name="trigger.py", gate_body="x = 1\n", steps=[])
+    w = wf.load_workflows(root)[0]
+    with pytest.raises(SystemExit):
+        wf.evaluate_gate(w, wf.GateContext("session.start", tmp_path))
+
+
+# --- step execution ----------------------------------------------------------
+
+@needs_sh
+def test_run_steps_runs_sh_without_exec_bit_and_passes_env(tmp_path):
+    out = tmp_path / "out.txt"
     # Step writes the event + workspace it received; never marked executable.
     step_body = f'#!/bin/sh\necho "$DEEPAGENTS_HOOK_EVENT $DEEPAGENTS_WORKSPACE" > "{out}"\n'
-    root = _make_workflow(
-        name="w", gate_body="#!/bin/sh\nexit 0\n", steps=["./run.sh"],
+    root = _write_workflow(
+        tmp_path / "wf", name="w", gate_body="#!/bin/sh\nexit 0\n", steps=["./run.sh"],
         extra_files={"run.sh": step_body},
     )
     w = wf.load_workflows(root)[0]
-    ws = Path("/some/ws")
+    ws = tmp_path / "some-ws"
     wf.run_workflow(w, wf.GateContext("session.end", ws))
-    # str(ws) differs by host (POSIX vs Windows); compare to what as_env emits.
     assert out.read_text(encoding="utf-8").strip() == f"session.end {ws}"
 
 
-def test_run_steps_skipped_when_gate_fails():
-    if not _HAS_SH:
-        print("  skip test_run_steps_skipped_when_gate_fails (no sh)")
-        return
-    out = Path(tempfile.mkdtemp()) / "out.txt"
-    step_body = f'#!/bin/sh\necho ran > "{out}"\n'
-    root = _make_workflow(
-        name="w", gate_body="#!/bin/sh\nexit 1\n", steps=["./run.sh"],
-        extra_files={"run.sh": step_body},
+@needs_sh
+def test_run_steps_skipped_when_gate_fails(tmp_path):
+    out = tmp_path / "out.txt"
+    root = _write_workflow(
+        tmp_path / "wf", name="w", gate_body="#!/bin/sh\nexit 1\n", steps=["./run.sh"],
+        extra_files={"run.sh": f'#!/bin/sh\necho ran > "{out}"\n'},
     )
     w = wf.load_workflows(root)[0]
-    wf.run_workflow(w, wf.GateContext("session.start", Path(".")))
+    wf.run_workflow(w, wf.GateContext("session.start", tmp_path))
     assert not out.exists()  # gate failed -> step never ran
+
+
+# --- subprocess timeout (carried over from the hooks.json engine) ------------
+
+def test_hook_timeout_default_and_overrides(monkeypatch):
+    monkeypatch.delenv("DEEPAGENTS_HOOK_TIMEOUT", raising=False)
+    assert wf._hook_timeout() == wf._DEFAULT_HOOK_TIMEOUT
+    monkeypatch.setenv("DEEPAGENTS_HOOK_TIMEOUT", "5")
+    assert wf._hook_timeout() == 5.0
+    monkeypatch.setenv("DEEPAGENTS_HOOK_TIMEOUT", "0")  # <=0 disables the cap
+    assert wf._hook_timeout() is None
+    monkeypatch.setenv("DEEPAGENTS_HOOK_TIMEOUT", "nope")  # garbage -> default
+    assert wf._hook_timeout() == wf._DEFAULT_HOOK_TIMEOUT
+
+
+def test_step_timeout_is_caught_not_propagated(tmp_path, monkeypatch, capsys):
+    def boom(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+
+    monkeypatch.setattr(wf.subprocess, "run", boom)
+    w = wf.Workflow(name="t", hook="session.end", steps=("echo hi",))
+    wf.run_steps(w, wf.GateContext("session.end", tmp_path))  # must not raise
+    assert "timed out" in capsys.readouterr().err
+
+
+def test_gate_timeout_skips(tmp_path, monkeypatch):
+    def boom(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+
+    monkeypatch.setattr(wf.subprocess, "run", boom)
+    root = _write_workflow(tmp_path, name="g", steps=[])
+    w = wf.load_workflows(root)[0]
+    assert wf.evaluate_gate(w, wf.GateContext("session.start", tmp_path)) is False
 
 
 # --- hooks.json adapter + grouping -------------------------------------------
 
-
-def test_hooks_to_workflows_always_gate():
+def test_hooks_to_workflows_always_gate(tmp_path):
     workflows = wf.hooks_to_workflows({"session.end": ["echo hi"], "tool.start": ["echo t"]})
     assert {w.hook for w in workflows} == {"session.end", "tool.start"}
     for w in workflows:
         assert w.gate is None  # always
-        assert wf.evaluate_gate(w, wf.GateContext(w.hook, Path("."))) is True
+        assert wf.evaluate_gate(w, wf.GateContext(w.hook, tmp_path)) is True
 
 
 def test_hooks_to_workflows_unknown_event_rejected():
-    try:
+    with pytest.raises(SystemExit):
         wf.hooks_to_workflows({"bogus.event": ["echo x"]})
-    except SystemExit:
-        return
-    raise AssertionError("expected SystemExit for unknown hooks.json event")
 
 
 def test_workflows_by_hook_groups():
@@ -278,26 +266,93 @@ def test_workflows_by_hook_groups():
     assert [w.name for w in grouped["tool.end"]] == ["c"]
 
 
-def test_build_middleware_only_for_non_session_hooks():
-    # session-only -> no middleware appended (those fire in cli.main())
+def test_build_middleware_only_for_non_session_hooks(tmp_path):
     session_only = wf.workflows_by_hook([wf.Workflow(name="s", hook="session.start", steps=())])
-    assert wf.build_workflow_middleware(session_only, Path(".")) == []
-    # a per-turn hook -> one middleware
+    assert wf.build_workflow_middleware(session_only, tmp_path) == []
     with_turn = wf.workflows_by_hook([wf.Workflow(name="t", hook="agent.start", steps=())])
-    assert len(wf.build_workflow_middleware(with_turn, Path("."))) == 1
+    assert len(wf.build_workflow_middleware(with_turn, tmp_path)) == 1
 
 
-# --- standalone runner -------------------------------------------------------
+# --- WorkflowMiddleware event routing ----------------------------------------
 
-if __name__ == "__main__":
-    fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
-    failed = 0
-    for name, fn in fns:
-        try:
-            fn()
-            print(f"  ok   {name}")
-        except Exception as exc:  # noqa: BLE001
-            failed += 1
-            print(f"  FAIL {name}: {exc!r}")
-    print(f"\n{len(fns) - failed}/{len(fns)} passed")
-    sys.exit(1 if failed else 0)
+@pytest.fixture
+def routed(monkeypatch):
+    """Capture (event, [workflow names]) each middleware event dispatches,
+    without running real gates/steps."""
+    fired = []
+    monkeypatch.setattr(
+        wf, "run_hook", lambda workflows_for_hook, ctx: fired.append(
+            (ctx.event, [w.name for w in workflows_for_hook])
+        )
+    )
+    return fired
+
+
+def _mw(by_hook, workspace):
+    return wf.WorkflowMiddleware(by_hook, workspace)
+
+
+def test_before_agent_routes_to_agent_start(routed, tmp_path):
+    mw = _mw({"agent.start": [wf.Workflow(name="a", hook="agent.start", steps=())]}, tmp_path)
+    mw.before_agent({"messages": []}, None)
+    assert routed == [("agent.start", ["a"])]
+
+
+def test_model_events_route_to_their_hooks(routed, tmp_path):
+    mw = _mw(
+        {
+            "model.start": [wf.Workflow(name="s", hook="model.start", steps=())],
+            "model.end": [wf.Workflow(name="e", hook="model.end", steps=())],
+        },
+        tmp_path,
+    )
+    mw.before_model({"messages": []}, None)
+    mw.after_model({"messages": []}, None)
+    assert routed == [("model.start", ["s"]), ("model.end", ["e"])]
+
+
+def test_wrap_tool_call_brackets_handler_and_returns_result(routed, tmp_path):
+    mw = _mw(
+        {
+            "tool.start": [wf.Workflow(name="s", hook="tool.start", steps=())],
+            "tool.end": [wf.Workflow(name="e", hook="tool.end", steps=())],
+        },
+        tmp_path,
+    )
+    seen = []
+
+    def handler(req):
+        seen.append(req)
+        return "RESULT"
+
+    out = mw.wrap_tool_call("REQ", handler)
+    assert out == "RESULT"
+    assert [e for e, _ in routed] == ["tool.start", "tool.end"]
+    assert seen == ["REQ"]
+
+
+def test_wrap_tool_call_runs_tool_end_even_on_error(routed, tmp_path):
+    mw = _mw({"tool.start": [], "tool.end": []}, tmp_path)
+
+    def boom(req):
+        raise RuntimeError("kaboom")
+
+    with pytest.raises(RuntimeError):
+        mw.wrap_tool_call("REQ", boom)
+    assert [e for e, _ in routed] == ["tool.start", "tool.end"]  # tool.end via finally
+
+
+# --- latest-user-text helper -------------------------------------------------
+
+def test_latest_user_text_picks_last_human():
+    state = {"messages": [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "reply"},
+        {"role": "user", "content": "second"},
+    ]}
+    assert wf._latest_user_text(state) == "second"
+
+
+def test_latest_user_text_none_when_absent():
+    assert wf._latest_user_text({"messages": []}) is None
+    assert wf._latest_user_text({}) is None

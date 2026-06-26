@@ -172,7 +172,45 @@ never import `providers.py` (the import goes providers → cost, §2.4).
   `[harness] session total: ...`, both on **stderr** (out of the agent's reply
   stream, like the other stage markers).
 - **Tests:** `tests/test_cost.py` / `tests/test_sync_models.py` (pure math, no
-  keys/network) — run by `smoke`, or standalone (`python3 tests/test_cost.py`).
+  keys/network) — run by `smoke` via `python3 -m pytest tests/` (needs pytest +
+  harness deps; the `test` image stage has both).
+
+## Test suite layout & conventions
+
+`smoke` runs `python3 -m pytest tests/` in the `test` image stage. The suite is
+layered by dependency so most of it also runs on a bare host with just pytest:
+
+- **Host-runnable (stdlib + harness.cost only):** `test_cost`, `test_sync_models`,
+  `test_providers` (model routing), `test_loaders` (optional-config IO),
+  `test_import_isolation` (cost-↛-sibling acyclic guard). These import harness
+  submodules via `tests/_bootstrap._load` (by file path, skipping
+  `harness/__init__`) and never need keys, network, or the runtime stack.
+- **Image-only (need deepagents/langchain/langgraph):** `test_agent` (workspace
+  trust boundary, shell-env secret scrub, final-message extraction, AGENTS.md
+  append), `test_hooks` (lifecycle hook dispatch), `test_cli` (arg parsing,
+  budgets, the null=MVP cost-tracker contract). Each guards its module with
+  `pytest.importorskip(...)`, so on a bare host the module is reported skipped
+  instead of erroring; in the `test` image it runs.
+
+Conventions for new tests:
+
+- **No keys, no network, no real model calls.** Stub `create_deep_agent` /
+  `subprocess.run`, monkeypatch `providers.PROVIDERS`, build throwaway provider
+  registries under `tmp_path` via `providers._load_providers(dir)`.
+- **All filesystem writes go to `tmp_path`** (or the `workspace_sandbox` fixture,
+  which is a tmp workspace with CWD pointed at it). Nothing a test writes may
+  reach the repo or the host-mounted workspace.
+- A session-scoped autouse guard in `conftest.py` (`_clean_repo_artifacts`)
+  diffs the `project/` tree and removes anything a test leaves behind, unless
+  `DEEPAGENTS_KEEP_TEST_ARTIFACTS=1` is set (debug escape hatch). It's a backstop
+  — write to `tmp_path` so it has nothing to do.
+- **Every bug fix ships with a regression test.** When you fix a bug, add a test
+  that fails on the old (buggy) code and passes on the fix, so the same bug — or
+  the same *class* of bug where the type generalizes — can't silently re-surface
+  later. Target the behavior, not the patch: assert the property that was wrong
+  (the corrected output, the raised error, the no-crash), not the internals of
+  the fix. Put it in the matching `tests/test_<module>.py` next to related cases.
+  No fix is "done" until its test exists and the suite is green.
 
 ## Resource caps (Milestone 1)
 

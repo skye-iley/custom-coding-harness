@@ -6,7 +6,9 @@ Kept so `python3 main.py` (Dockerfile CMD, run-docker scripts) still works.
 
 import sys
 
-from harness.cli import main
+from harness.cli import dispatch
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # dispatch() also routes the `sync-models` dev subcommand, so
+    # `python3 main.py sync-models` behaves like `python3 -m harness sync-models`.
+    sys.exit(dispatch(sys.argv[1:]))

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Run the harness container. Requires project/.env (copy from project/.env.example).
+# Consumes the `deepagent-harness` runtime image built by build.sh
+# (`docker build --target runtime`) — no test code, no pytest.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="$ROOT/project/.env"

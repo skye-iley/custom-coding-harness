@@ -23,6 +23,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,6 +49,23 @@ SESSION_EVENTS = ("session.start", "session.end")
 
 GATE_BASENAME = "trigger"  # fixed; the gate is always ./trigger.{py,sh} in the folder
 MANIFEST_NAME = "workflow.md"
+
+# Per-subprocess wall-clock cap so a hung gate/step can't freeze the whole
+# session (the REPL is otherwise blocked in the synchronous middleware dispatch).
+# Overridable via env for slow but legitimate workflows; <=0 disables the cap.
+# Carried over from the old hooks.json engine (DEEPAGENTS_HOOK_TIMEOUT).
+_DEFAULT_HOOK_TIMEOUT = 30.0
+
+
+def _hook_timeout() -> float | None:
+    raw = os.getenv("DEEPAGENTS_HOOK_TIMEOUT")
+    if raw is None:
+        return _DEFAULT_HOOK_TIMEOUT
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DEFAULT_HOOK_TIMEOUT
+    return value if value > 0 else None
 
 
 @dataclass(frozen=True)
@@ -221,9 +239,21 @@ def evaluate_gate(wf: Workflow, ctx: GateContext) -> bool:
 def _run_shell_gate(wf: Workflow, ctx: GateContext) -> bool:
     # exit 0 = run, non-zero = skip (§3). Runs from the workflow folder so a
     # gate can reference sibling files; live in-memory state is not visible here.
-    result = subprocess.run(
-        ["sh", str(wf.gate)], cwd=str(wf.folder), env=ctx.as_env(), check=False
-    )
+    timeout = _hook_timeout()
+    try:
+        result = subprocess.run(
+            ["sh", str(wf.gate)], cwd=str(wf.folder), env=ctx.as_env(),
+            check=False, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        # A hung gate is killed and treated as "skip" (loud, non-fatal) rather
+        # than hanging the session.
+        print(
+            f"[harness] WARNING: workflow '{wf.name}' gate timed out after "
+            f"{timeout}s and was killed; skipping",
+            file=sys.stderr,
+        )
+        return False
     return result.returncode == 0
 
 
@@ -261,9 +291,22 @@ def run_steps(wf: Workflow, ctx: GateContext) -> None:
     # Folder workflows run from their folder (consistent with the gate); the
     # hooks.json precursor (folder is None) keeps the harness CWD as before.
     cwd = str(wf.folder) if wf.folder is not None else None
+    timeout = _hook_timeout()
     for step in wf.steps:
         cmd = _step_command(step)
-        subprocess.run(cmd, shell=isinstance(cmd, str), env=env, cwd=cwd, check=False)
+        try:
+            subprocess.run(
+                cmd, shell=isinstance(cmd, str), env=env, cwd=cwd,
+                check=False, timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            # Loud, non-fatal: a stuck step is killed and the session continues
+            # rather than hanging indefinitely (DEEPAGENTS_HOOK_TIMEOUT).
+            print(
+                f"[harness] WARNING: workflow '{wf.name}' step timed out after "
+                f"{timeout}s and was killed: {step!r}",
+                file=sys.stderr,
+            )
 
 
 def run_workflow(wf: Workflow, ctx: GateContext) -> None:

@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ideation: Test Suite Revamp — robust &amp; easily runnable</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#161a21; --panel2:#1c222b; --ink:#e6e9ef; --muted:#9aa4b2;
+    --line:#2a313c; --accent:#5db0ff; --accent2:#7ee0c0; --warn:#f0b860; --bad:#f08a8a;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+       line-height:1.55;font-size:15px}
+  .wrap{max-width:860px;margin:0 auto;padding:40px 22px 80px}
+  header.doc{border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:26px}
+  h1{font-size:1.7rem;line-height:1.2;margin:0 0 10px}
+  .meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}
+  .chip{font-family:var(--mono);font-size:.72rem;color:var(--muted);
+        border:1px solid var(--line);border-radius:999px;padding:3px 10px;background:var(--panel)}
+  h2{font-size:1.15rem;margin:34px 0 12px;padding-top:8px;border-top:1px solid var(--line)}
+  h2:first-of-type{border-top:none}
+  p{margin:.5em 0}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{font-family:var(--mono);font-size:.85em;background:var(--panel2);
+       padding:1px 5px;border-radius:4px;color:#cfe6ff}
+  .grounding,.axes{background:var(--panel);border:1px solid var(--line);
+       border-radius:10px;padding:14px 18px}
+  .grounding ul{margin:.3em 0 .3em 1.1em;padding:0}
+  .grounding li{margin:.25em 0}
+  ol.jump{margin:0 0 8px;padding-left:1.3em;columns:2;font-size:.9rem}
+  ol.jump li{margin:.15em 0}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+        padding:18px 20px;margin:16px 0}
+  .card h3{margin:0 0 4px;font-size:1.08rem}
+  .card .tags{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 12px}
+  .tag{font-family:var(--mono);font-size:.7rem;padding:2px 9px;border-radius:999px;
+       border:1px solid var(--line);background:var(--panel2);color:var(--muted)}
+  .tag.axis{color:var(--accent)}
+  .tag.conf{color:var(--accent2)}
+  .tag.cx{color:var(--warn)}
+  .field{margin:8px 0}
+  .field b{color:var(--muted);font-weight:600;font-size:.8rem;text-transform:uppercase;
+           letter-spacing:.04em;display:block;margin-bottom:1px}
+  .basis{border-left:3px solid var(--line);padding-left:12px}
+  .basis.direct{border-color:var(--accent)}
+  .basis.reasoned{border-color:var(--accent2)}
+  .basis.external{border-color:var(--warn)}
+  figure{margin:14px 0;background:var(--panel2);border:1px solid var(--line);
+         border-radius:8px;padding:12px;overflow-x:auto}
+  figcaption{color:var(--muted);font-size:.78rem;margin-top:6px}
+  svg{display:block;max-width:100%}
+  svg text{font-family:var(--sans);fill:var(--ink)}
+  table{width:100%;border-collapse:collapse;margin-top:10px;font-size:.9rem}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:.78rem;text-transform:uppercase;letter-spacing:.04em}
+  footer.composition-signal{margin-top:48px;padding-top:14px;border-top:1px solid var(--line);
+       color:var(--muted);font-size:.78rem;font-family:var(--mono)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="doc">
+  <h1>Ideation: Test Suite Revamp</h1>
+  <div class="meta">
+    <span class="chip">date: <time datetime="2026-06-25">2026-06-25</time></span>
+    <span class="chip">topic: test-suite-revamp</span>
+    <span class="chip">focus: more robust &amp; easily runnable</span>
+    <span class="chip">mode: repo-grounded</span>
+  </div>
+</header>
+
+<h2>Grounding Context</h2>
+<div class="grounding">
+  <p><b>Codebase Context.</b> Harness lives in <code>deepagent-image/project/</code>; tests in
+  <code>project/tests/</code>.</p>
+  <ul>
+    <li><b>Surface:</b> 2 files — <code>test_cost.py</code> (~39 tests), <code>test_sync_models.py</code>
+        (~16 tests). All pure-math, no network / no API keys; run on a bare interpreter.</li>
+    <li><b>Duplicated bootstrap:</b> identical hand-rolled <code>_load()</code> import shim in both
+        (<code>test_cost.py:26-35</code> ≡ <code>test_sync_models.py:18-27</code>), built to dodge
+        <code>harness/__init__.py:16</code> (<code>from harness.cli import main</code> → pulls
+        dotenv/langgraph/deepagents).</li>
+    <li><b>Duplicated runner:</b> hand-rolled <code>__main__</code> loop in each file
+        (bare <code>except Exception</code>, <code>repr(exc)</code> — no assert introspection).</li>
+    <li><b>Run path:</b> <code>smoke.{ps1,sh}</code> hardcode each test filename
+        (<code>smoke.ps1:11,13</code>) and run inside Docker; comment notes "no pytest dependency is
+        needed" — <code>requirements.txt</code> ships no pytest.</li>
+    <li><b>Coverage gaps:</b> <code>providers.py</code> routing, <code>loaders.py</code>,
+        <code>hooks.py</code>, <code>cli.py</code>/<code>run_repl</code>, <code>agent.py</code> untested.</li>
+    <li><b>No CI:</b> no <code>.github/</code> — nothing runs tests despite the CLAUDE.md-mandated
+        branch+PR flow.</li>
+  </ul>
+</div>
+
+<h2>Topic Axes</h2>
+<div class="axes">
+  <ol>
+    <li>Test runner &amp; discovery</li>
+    <li>Shared test infrastructure</li>
+    <li>Coverage breadth</li>
+    <li>CI / automation</li>
+    <li>Failure diagnostics &amp; determinism</li>
+  </ol>
+</div>
+
+<h2>Ranked Ideas</h2>
+<ol class="jump">
+  <li><a href="#r1">Adopt pytest as the one canonical runner</a></li>
+  <li><a href="#r2">Two-tier CI on every PR</a></li>
+  <li><a href="#r3">Single shared test-infra module (conftest + fixtures)</a></li>
+  <li><a href="#r4">Cover the untested core: model routing first</a></li>
+  <li><a href="#r5">Import-isolation guard test</a></li>
+  <li><a href="#r6">Coverage measurement with a floor</a></li>
+  <li><a href="#r7">Root-cause: make <code>harness</code> import side-effect-free</a></li>
+</ol>
+
+<!-- 1 -->
+<div class="card" id="r1">
+  <h3>R1. Adopt pytest as the one canonical runner</h3>
+  <div class="tags">
+    <span class="tag axis">axis: runner &amp; discovery</span>
+    <span class="tag conf">confidence: 85%</span>
+    <span class="tag cx">complexity: Medium</span>
+  </div>
+  <div class="field"><b>Description</b>
+    Make <code>pytest tests/</code> the single way to run tests everywhere. Add a
+    <code>pyproject.toml</code>/<code>pytest.ini</code> with <code>testpaths</code>, replace the two
+    hardcoded filenames in <code>smoke.{ps1,sh}</code> with a directory run, retire the per-file
+    hand-rolled <code>__main__</code> runners, and parametrize the table-driven cost cases so each
+    row reports independently.</div>
+  <figure>
+    <svg viewBox="0 0 620 150" role="img" aria-label="Before: smoke hardcodes two filenames. After: one glob run discovers all test files.">
+      <text x="10" y="20" font-size="12" fill="#9aa4b2">BEFORE — edit 2 scripts per new file</text>
+      <rect x="10" y="32" width="150" height="30" rx="5" fill="#1c222b" stroke="#2a313c"/>
+      <text x="20" y="51" font-size="11" font-family="monospace">smoke.ps1 + smoke.sh</text>
+      <line x1="160" y1="47" x2="200" y2="47" stroke="#f08a8a" stroke-width="1.5"/>
+      <rect x="200" y="34" width="120" height="12" rx="3" fill="#161a21" stroke="#2a313c"/>
+      <text x="206" y="44" font-size="9" font-family="monospace" fill="#f08a8a">test_cost.py</text>
+      <rect x="200" y="50" width="120" height="12" rx="3" fill="#161a21" stroke="#2a313c"/>
+      <text x="206" y="60" font-size="9" font-family="monospace" fill="#f08a8a">test_sync_models.py</text>
+      <text x="350" y="51" font-size="11" fill="#f08a8a">3rd file → silently unrun</text>
+
+      <text x="10" y="98" font-size="12" fill="#9aa4b2">AFTER — discovery, zero edits</text>
+      <rect x="10" y="110" width="150" height="30" rx="5" fill="#1c222b" stroke="#5db0ff"/>
+      <text x="20" y="129" font-size="11" font-family="monospace">pytest tests/</text>
+      <line x1="160" y1="125" x2="200" y2="125" stroke="#7ee0c0" stroke-width="1.5"/>
+      <rect x="200" y="112" width="240" height="26" rx="5" fill="#161a21" stroke="#7ee0c0"/>
+      <text x="210" y="129" font-size="10" font-family="monospace" fill="#7ee0c0">test_*.py  (all, auto-discovered)</text>
+    </svg>
+    <figcaption>The filename list moves from hand-maintained config into discovery.</figcaption>
+  </div>
+  <div class="field basis direct"><b>Basis — direct</b>
+    Files are already pytest-shaped (<code>test_*</code> functions, plain <code>assert</code>).
+    <code>smoke.ps1:11,13</code> and <code>smoke.sh:11-12</code> name each file literally; both the
+    <code>.ps1</code> and <code>.sh</code> twin must change to add one test file.</div>
+  <div class="field"><b>Rationale</b>
+    "Easily runnable" hinges on one obvious command. Discovery removes the 2-script edit tax (and the
+    silent-skip risk it creates), and pytest's assert rewriting turns
+    <code>repr(exc)</code> into a real diff on failure.</div>
+  <div class="field"><b>Downsides</b>
+    The in-image path currently runs dependency-free on purpose (<code>smoke.sh:9</code>;
+    <code>requirements.txt</code> has no pytest). Going pytest-canonical means adding pytest to the
+    image — or splitting: pytest on the host, keep the standalone runners only for the sealed
+    container. Decide that explicitly rather than by accident.</div>
+</div>
+
+<!-- 2 -->
+<div class="card" id="r2">
+  <h3>R2. Two-tier CI on every PR</h3>
+  <div class="tags">
+    <span class="tag axis">axis: CI / automation</span>
+    <span class="tag conf">confidence: 90%</span>
+    <span class="tag cx">complexity: Low</span>
+  </div>
+  <div class="field"><b>Description</b>
+    Add a GitHub Actions workflow. Tier 1: a fast keyless job that runs the pure-math tests on a plain
+    Python (seconds, no Docker, no secrets) — gates every PR. Tier 2: a slower job that builds the
+    image and runs <code>smoke.sh</code> end-to-end, catching import-cycle / package-split breaks.</div>
+  <figure>
+    <svg viewBox="0 0 620 140" role="img" aria-label="PR triggers two CI jobs: fast keyless unit tests, and a slower image build plus smoke.">
+      <rect x="10" y="55" width="110" height="32" rx="6" fill="#1c222b" stroke="#5db0ff"/>
+      <text x="30" y="75" font-size="11">push / PR</text>
+      <line x1="120" y1="71" x2="170" y2="40" stroke="#7ee0c0" stroke-width="1.5"/>
+      <line x1="120" y1="71" x2="170" y2="102" stroke="#9aa4b2" stroke-width="1.5"/>
+      <rect x="170" y="22" width="280" height="36" rx="6" fill="#161a21" stroke="#7ee0c0"/>
+      <text x="182" y="38" font-size="11" fill="#7ee0c0">Tier 1 — keyless unit tests</text>
+      <text x="182" y="52" font-size="9" font-family="monospace" fill="#9aa4b2">python + pytest tests/ · ~seconds · gates PR</text>
+      <rect x="170" y="86" width="280" height="36" rx="6" fill="#161a21" stroke="#2a313c"/>
+      <text x="182" y="102" font-size="11">Tier 2 — image build + smoke</text>
+      <text x="182" y="116" font-size="9" font-family="monospace" fill="#9aa4b2">docker build · smoke.sh · catches import cycles</text>
+    </svg>
+    <figcaption>Fast feedback gates the PR; the heavy container check runs alongside.</figcaption>
+  </div>
+  <div class="field basis direct"><b>Basis — direct</b>
+    No <code>.github/</code> exists. Root <code>CLAUDE.md</code> mandates a branch+PR-per-session
+    workflow, yet nothing runs the tests on those PRs. The tests need no keys/network
+    (<code>test_cost.py:1-10</code>), so tier 1 is trivially CI-able.</div>
+  <div class="field"><b>Rationale</b>
+    A mandated PR flow with no automated gate means "robust" depends on every human remembering to run
+    <code>smoke</code> locally. CI makes the green check the contract. Highest leverage-per-effort here.</div>
+  <div class="field"><b>Downsides</b>
+    Tier 2 spends CI minutes on a Docker build; keep it required-but-parallel, or PR-only, to avoid
+    slowing the fast signal.</div>
+</div>
+
+<!-- 3 -->
+<div class="card" id="r3">
+  <h3>R3. Single shared test-infra module (conftest + fixtures)</h3>
+  <div class="tags">
+    <span class="tag axis">axis: shared infrastructure</span>
+    <span class="tag conf">confidence: 88%</span>
+    <span class="tag cx">complexity: Low</span>
+  </div>
+  <div class="field"><b>Description</b>
+    Lift the duplicated <code>_load()</code> bootstrap into one place — a <code>tests/conftest.py</code>
+    or shared helper — so both files import it instead of copying it. Fold in registry isolation: a
+    fixture that points <code>DEEPAGENTS_PROVIDERS_DIR</code> at a checked-in fixture registry, so
+    pricing tests don't depend on whatever rates happen to be committed.</div>
+  <div class="field basis direct"><b>Basis — direct</b>
+    <code>test_cost.py:26-35</code> and <code>test_sync_models.py:18-27</code> are byte-for-byte the
+    same <code>_load()</code>. <code>test_providers_load_pricing_from_registry</code> asserts against
+    the live registry ("after we fill TOMLs", <code>test_cost.py:362</code>); CLAUDE.md already notes
+    <code>DEEPAGENTS_PROVIDERS_DIR</code> exists "used by tests" but the test doesn't use it.</div>
+  <div class="field"><b>Rationale</b>
+    Two copies of the import shim drift the moment one is touched. One source removes that class of bug;
+    fixture isolation makes the pricing test deterministic instead of coupled to committed data.</div>
+  <div class="field"><b>Downsides</b>
+    A <code>conftest.py</code> only auto-loads under pytest — if the standalone runners survive (see R1
+    downside), the shared helper must be a plain importable module they can use too.</div>
+</div>
+
+<!-- 4 -->
+<div class="card" id="r4">
+  <h3>R4. Cover the untested core: model routing first</h3>
+  <div class="tags">
+    <span class="tag axis">axis: coverage breadth</span>
+    <span class="tag conf">confidence: 82%</span>
+    <span class="tag cx">complexity: Medium</span>
+  </div>
+  <div class="field"><b>Description</b>
+    Add tests for the routing logic that decisions actually flow through:
+    <code>choose_model</code> ascending-priority scan, the "skip provider whose
+    <code>default_model</code> is unset" rule, <code>DEEPAGENTS_MODEL=provider:model</code> override,
+    and the OpenAI-compatible <code>*_BASE_URL</code> requirement. Then the cheaper wins:
+    <code>loaders.py</code> optional-file IO and <code>parse_args</code> / single-turn degradation.</div>
+  <div class="field basis direct"><b>Basis — direct</b>
+    CLAUDE.md (model-routing section) describes priority scan, default-model skip, and base-URL rules
+    as load-bearing — yet tests touch <code>providers.py</code> only via one pricing assertion
+    (<code>test_cost.py:359-371</code>). The branchy selection logic is unverified.</div>
+  <div class="field"><b>Rationale</b>
+    "More robust" most literally means covering the logic that picks a model and validates creds —
+    today a routing regression ships green. The cost math is already well-covered; this is where the
+    real exposure is.</div>
+  <div class="field"><b>Downsides</b>
+    Routing tests need registry fixtures and may brush credential-validation paths — pairs naturally
+    with R3's fixture isolation; sequence it after R3.</div>
+</div>
+
+<!-- 5 -->
+<div class="card" id="r5">
+  <h3>R5. Import-isolation guard test</h3>
+  <div class="tags">
+    <span class="tag axis">axis: diagnostics &amp; determinism</span>
+    <span class="tag conf">confidence: 78%</span>
+    <span class="tag cx">complexity: Low</span>
+  </div>
+  <div class="field"><b>Description</b>
+    A small test that asserts the two contracts the codebase relies on but never checks: importing
+    <code>harness.cost</code> pulls in neither <code>langgraph</code>/<code>deepagents</code> nor
+    <code>providers</code> (the "cost.py holds math only, never imports providers" rule), so it stays
+    runnable on a bare interpreter and the providers→cost direction can't reverse.</div>
+  <div class="field basis direct"><b>Basis — direct</b>
+    <code>smoke.sh:7</code> exists precisely to catch a "providers↔cost import cycle"; CLAUDE.md §2.4
+    states cost.py "must never import providers.py". Both are enforced today only by a manual smoke
+    import, not a test that names the rule.</div>
+  <div class="field"><b>Rationale</b>
+    The whole bootstrap hack and the keyless-test property depend on this staying true. A guard test
+    turns an implicit invariant into a named failure with a clear message the day someone adds the
+    wrong import — cheap insurance on a load-bearing assumption.</div>
+  <div class="field"><b>Downsides</b>
+    Import-graph assertions can be fiddly (must check <code>sys.modules</code> in a clean subprocess to
+    be honest); keep it tight or it gives false confidence.</div>
+</div>
+
+<!-- 6 -->
+<div class="card" id="r6">
+  <h3>R6. Coverage measurement with a floor</h3>
+  <div class="tags">
+    <span class="tag axis">axis: coverage breadth</span>
+    <span class="tag conf">confidence: 70%</span>
+    <span class="tag cx">complexity: Low</span>
+  </div>
+  <div class="field"><b>Description</b>
+    Wire <code>pytest-cov</code> (or <code>coverage.py</code>) into the test run and surface the number
+    — in CI output and optionally as a soft floor that fails if it drops. Makes "which modules are
+    untested" a measured fact instead of a guess.</div>
+  <div class="field basis reasoned"><b>Basis — reasoned</b>
+    R4 names today's gaps from reading the tree by hand; that doesn't scale as the harness grows. A
+    coverage number is the instrument that keeps the gap list honest without re-auditing manually each
+    time, and it makes R4's progress visible.</div>
+  <div class="field"><b>Rationale</b>
+    Robustness you can't measure regresses quietly. A visible percentage (even informational at first)
+    converts coverage from opinion into a tracked signal — and pairs with R2 to show it on every PR.</div>
+  <div class="field"><b>Downsides</b>
+    A hard floor invites gaming (tests that execute lines without asserting); start informational, and
+    note the in-image dependency-free constraint — coverage tooling lives on the host/CI side, not the
+    sealed runtime.</div>
+</div>
+
+<!-- 7 -->
+<div class="card" id="r7">
+  <h3>R7. Root-cause: make <code>harness</code> import side-effect-free</h3>
+  <div class="tags">
+    <span class="tag axis">axis: shared infrastructure</span>
+    <span class="tag conf">confidence: 65%</span>
+    <span class="tag cx">complexity: Medium–High</span>
+  </div>
+  <div class="field"><b>Description</b>
+    Remove the eager <code>from harness.cli import main</code> at package import so that
+    <code>import harness.cost</code> doesn't drag in dotenv/langgraph/deepagents. With the side effect
+    gone, the entire <code>_load()</code> bootstrap hack can be deleted and tests import modules
+    normally.</div>
+  <figure>
+    <svg viewBox="0 0 620 150" role="img" aria-label="Before: importing harness pulls cli then langgraph. After: lazy entry, cost imports cleanly.">
+      <text x="10" y="18" font-size="12" fill="#9aa4b2">BEFORE — import harness has side effects</text>
+      <rect x="10" y="28" width="90" height="28" rx="5" fill="#1c222b" stroke="#2a313c"/>
+      <text x="22" y="46" font-size="11" font-family="monospace">__init__</text>
+      <line x1="100" y1="42" x2="140" y2="42" stroke="#f08a8a" stroke-width="1.5" marker-end="url(#a)"/>
+      <rect x="140" y="28" width="70" height="28" rx="5" fill="#1c222b" stroke="#2a313c"/>
+      <text x="152" y="46" font-size="11" font-family="monospace">cli</text>
+      <line x1="210" y1="42" x2="250" y2="42" stroke="#f08a8a" stroke-width="1.5" marker-end="url(#a)"/>
+      <rect x="250" y="28" width="190" height="28" rx="5" fill="#161a21" stroke="#f08a8a"/>
+      <text x="262" y="46" font-size="10" font-family="monospace" fill="#f08a8a">dotenv · langgraph · deepagents</text>
+      <text x="455" y="46" font-size="11" fill="#f08a8a">→ needs _load() hack</text>
+
+      <text x="10" y="98" font-size="12" fill="#9aa4b2">AFTER — lazy entry point</text>
+      <rect x="10" y="108" width="90" height="28" rx="5" fill="#1c222b" stroke="#5db0ff"/>
+      <text x="22" y="126" font-size="11" font-family="monospace">__init__</text>
+      <line x1="100" y1="122" x2="140" y2="122" stroke="#2a313c" stroke-width="1.5" stroke-dasharray="3 3" marker-end="url(#b)"/>
+      <text x="146" y="118" font-size="9" fill="#9aa4b2">cli imported only when run</text>
+      <rect x="250" y="108" width="120" height="28" rx="5" fill="#161a21" stroke="#7ee0c0"/>
+      <text x="262" y="126" font-size="10" font-family="monospace" fill="#7ee0c0">import harness.cost</text>
+      <text x="380" y="126" font-size="11" fill="#7ee0c0">→ clean, no hack</text>
+      <defs>
+        <marker id="a" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#f08a8a"/></marker>
+        <marker id="b" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#9aa4b2"/></marker>
+      </defs>
+    </svg>
+    <figcaption>Kill the import side effect and the bootstrap shim (R3) becomes unnecessary, not just deduplicated.</figcaption>
+  </div>
+  <div class="field basis direct"><b>Basis — direct</b>
+    <code>harness/__init__.py:16</code> is <code>from harness.cli import main</code>; the test files'
+    own comments (<code>test_cost.py:19-24</code>) cite exactly this as why they bypass the package.
+    Make entry lazy (e.g. a <code>main()</code> that imports cli inside the function, or rely on
+    <code>__main__.py</code>) and the cause disappears.</div>
+  <div class="field"><b>Rationale</b>
+    R3 deduplicates the workaround; this deletes the reason it exists. Cleaner imports also make every
+    future test (R4) trivial to write — no shim to copy. Highest leverage on the bootstrap problem.</div>
+  <div class="field"><b>Downsides</b>
+    Touches harness runtime, not just tests — must confirm <code>python3 main.py</code>,
+    <code>python3 -m harness</code>, and the REPL entry all still resolve <code>main</code>. Higher
+    blast radius; do it behind R2's CI net, not before it.</div>
+</div>
+
+<h2>Rejection Summary</h2>
+<table>
+  <thead><tr><th>#</th><th>Idea</th><th>Reason rejected</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>Pre-commit / pre-push test hook</td><td>Overlaps R2; CI is the stronger, unbypassable gate. Local hooks are opt-in and easy to skip.</td></tr>
+    <tr><td>2</td><td>Date-determinism / clock-freezing pass</td><td>Not grounded — tests pass dates as literal inputs (e.g. <code>"2026-06-23"</code>), never read the system clock. No real flakiness to fix.</td></tr>
+    <tr><td>3</td><td>Property-based tests (hypothesis) for cost math</td><td>Heavy dependency against the dependency-free in-image constraint; the arithmetic is already densely covered by example tests.</td></tr>
+    <tr><td>4</td><td>Golden/snapshot tests for <code>render_model_toml</code></td><td>Duplicate — <code>test_parse_render_roundtrip_is_idempotent</code> already pins render output via roundtrip.</td></tr>
+    <tr><td>5</td><td>Standalone host-only test script (no Docker)</td><td>Folded into R1 — tests already run on a bare interpreter; pytest on the host covers this without a bespoke script.</td></tr>
+  </tbody>
+</table>
+
+<footer class="composition-signal">Composed 2026-06-25 by ce-ideate from user prompt: "revamping test suite to be more robust and easily runnable" · repo-grounded</footer>
+
+</div>
+</body>
+</html>

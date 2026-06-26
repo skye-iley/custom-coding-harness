@@ -13,9 +13,7 @@ from langchain.agents.middleware.types import AgentMiddleware
 from harness.loaders import _read_optional_text
 from harness.providers import PROVIDERS
 
-DEFAULT_TASK = (
-    "inspect workspace, summarize structure."
-)
+DEFAULT_TASK = "inspect workspace, summarize structure."
 
 # Suffixes that mark an env var as a credential the agent's shell must not see.
 # Provider key names come from the PROVIDERS registry (single source of truth);
@@ -66,7 +64,25 @@ class _WorkspaceShellBackend(LocalShellBackend):
     This strips a literal root_dir prefix off incoming paths before the parent
     class's virtual resolution runs, so both conventions land in the same
     place instead of nesting.
+
+    Upstream-API coupling: the de-nesting hooks the parent's *private*
+    `_resolve_path`. A deepagents upgrade that renames or drops it would leave
+    this override dead (never called) or break the `super()` call — silently
+    reintroducing the nesting bug. `__init__` asserts the parent still defines
+    it, so an upstream change fails loud at construction instead of at runtime
+    (see tests/test_agent.py::test_backend_guards_upstream_resolve_path).
     """
+
+    def __init__(self, *args, **kwargs):
+        if not any(
+            "_resolve_path" in klass.__dict__ for klass in LocalShellBackend.__mro__
+        ):
+            raise RuntimeError(
+                "deepagents LocalShellBackend no longer defines _resolve_path; the "
+                "path de-nesting in _WorkspaceShellBackend is dead. Re-check the "
+                "upstream backend API and update the override."
+            )
+        super().__init__(*args, **kwargs)
 
     def _resolve_path(self, key: str) -> Path:
         if self.virtual_mode:
