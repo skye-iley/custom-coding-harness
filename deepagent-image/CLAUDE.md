@@ -127,6 +127,36 @@ never import `providers.py` (the import goes providers → cost, §2.4).
   keys/network) — run by `smoke` via `python3 -m pytest tests/` (needs pytest +
   harness deps; the `test` image stage has both).
 
+## Test suite layout & conventions
+
+`smoke` runs `python3 -m pytest tests/` in the `test` image stage. The suite is
+layered by dependency so most of it also runs on a bare host with just pytest:
+
+- **Host-runnable (stdlib + harness.cost only):** `test_cost`, `test_sync_models`,
+  `test_providers` (model routing), `test_loaders` (optional-config IO),
+  `test_import_isolation` (cost-↛-sibling acyclic guard). These import harness
+  submodules via `tests/_bootstrap._load` (by file path, skipping
+  `harness/__init__`) and never need keys, network, or the runtime stack.
+- **Image-only (need deepagents/langchain/langgraph):** `test_agent` (workspace
+  trust boundary, shell-env secret scrub, final-message extraction, AGENTS.md
+  append), `test_hooks` (lifecycle hook dispatch), `test_cli` (arg parsing,
+  budgets, the null=MVP cost-tracker contract). Each guards its module with
+  `pytest.importorskip(...)`, so on a bare host the module is reported skipped
+  instead of erroring; in the `test` image it runs.
+
+Conventions for new tests:
+
+- **No keys, no network, no real model calls.** Stub `create_deep_agent` /
+  `subprocess.run`, monkeypatch `providers.PROVIDERS`, build throwaway provider
+  registries under `tmp_path` via `providers._load_providers(dir)`.
+- **All filesystem writes go to `tmp_path`** (or the `workspace_sandbox` fixture,
+  which is a tmp workspace with CWD pointed at it). Nothing a test writes may
+  reach the repo or the host-mounted workspace.
+- A session-scoped autouse guard in `conftest.py` (`_clean_repo_artifacts`)
+  diffs the `project/` tree and removes anything a test leaves behind, unless
+  `DEEPAGENTS_KEEP_TEST_ARTIFACTS=1` is set (debug escape hatch). It's a backstop
+  — write to `tmp_path` so it has nothing to do.
+
 ## Resource caps (Milestone 1)
 
 `run-docker.{sh,ps1}` apply `--cpus` (2), `--memory` (4g), `--pids-limit` (512)
