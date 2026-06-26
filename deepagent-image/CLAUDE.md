@@ -124,7 +124,8 @@ never import `providers.py` (the import goes providers → cost, §2.4).
   `[harness] session total: ...`, both on **stderr** (out of the agent's reply
   stream, like the other stage markers).
 - **Tests:** `tests/test_cost.py` / `tests/test_sync_models.py` (pure math, no
-  keys/network) — run by `smoke`, or standalone (`python3 tests/test_cost.py`).
+  keys/network) — run by `smoke` via `python3 -m pytest tests/` (needs pytest +
+  harness deps; the `test` image stage has both).
 
 ## Resource caps (Milestone 1)
 
