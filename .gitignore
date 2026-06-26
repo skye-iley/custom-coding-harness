@@ -12,5 +12,12 @@
 **/__pycache__/
 **/*.py[cod]
 
+# Python tooling caches + virtualenvs (mirror deepagent-image/.dockerignore)
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.venv/
+**/venv/
+
 # Compound Engineering machine-local config
 .compound-engineering/*.local.yaml
