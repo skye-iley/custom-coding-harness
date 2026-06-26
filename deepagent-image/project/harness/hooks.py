@@ -8,7 +8,9 @@ Two scopes:
 
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 
 from langchain.agents.middleware.types import AgentMiddleware
 
@@ -16,11 +18,37 @@ from langchain.agents.middleware.types import AgentMiddleware
 # NOT per agent invocation. Everything else is per-turn / per-call middleware.
 SESSION_EVENTS = ("session.start", "session.end")
 
+# Per-command wall-clock cap so a hung hook can't freeze the whole session
+# (the REPL is otherwise blocked in the synchronous middleware dispatch).
+# Overridable via env for slow but legitimate hooks; <=0 disables the cap.
+_DEFAULT_HOOK_TIMEOUT = 30.0
+
+
+def _hook_timeout() -> float | None:
+    raw = os.getenv("DEEPAGENTS_HOOK_TIMEOUT")
+    if raw is None:
+        return _DEFAULT_HOOK_TIMEOUT
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DEFAULT_HOOK_TIMEOUT
+    return value if value > 0 else None
+
 
 def _run_hook_commands(commands: list[str]) -> None:
     # shell=True is intentional: hooks.json declares shell commands. Trust it.
+    timeout = _hook_timeout()
     for command in commands:
-        subprocess.run(command, shell=True, check=False)
+        try:
+            subprocess.run(command, shell=True, check=False, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # Loud, non-fatal: a stuck hook is killed and the session continues
+            # rather than hanging indefinitely.
+            print(
+                f"[harness] WARNING: hook command timed out after {timeout}s "
+                f"and was killed: {command!r}",
+                file=sys.stderr,
+            )
 
 
 class ShellHooksMiddleware(AgentMiddleware):

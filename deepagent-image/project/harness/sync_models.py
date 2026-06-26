@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import tomllib
 import urllib.error
@@ -238,6 +239,16 @@ def _build_url(base: str, ep: Endpoint, key: str | None) -> str:
     if ep.auth == "query" and key:
         url += f"?key={key}"
     return url
+
+
+# Google-style auth passes the key in the query string (?key=...), so a urllib
+# HTTPError/URLError str (which embeds the failing URL) would leak it to stderr.
+# Scrub any key=<value> before an error string is ever printed.
+_KEY_QUERY_RE = re.compile(r"([?&]key=)[^&\s]+")
+
+
+def _redact(text: str) -> str:
+    return _KEY_QUERY_RE.sub(r"\1REDACTED", text)
 
 
 def _get_json(url: str, headers: dict[str, str], timeout: float = 20.0) -> dict:
@@ -471,7 +482,7 @@ def sync_models_main(argv: list[str] | None = None) -> int:
         except (urllib.error.URLError, urllib.error.HTTPError, OSError, RuntimeError,
                 json.JSONDecodeError, KeyError) as exc:
             total_err += 1
-            print(f"  {provider.prefix} ERROR: {exc}", file=sys.stderr)
+            print(f"  {provider.prefix} ERROR: {_redact(str(exc))}", file=sys.stderr)
 
     verb = "would write" if args.dry_run else "wrote"
     print(f"\n{verb} {total_written} model file(s); "

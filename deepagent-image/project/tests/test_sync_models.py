@@ -1,31 +1,14 @@
 """Tests for the [pricing] table emit in harness/sync_models.py (Milestone 1).
 
-Pure parse/render — no network. Uses the same path-based bootstrap as
-test_cost.py to avoid importing harness/__init__ (cli -> dotenv/langgraph).
+Pure parse/render — no network. Uses the shared lazy loader in `_bootstrap.py`
+to avoid importing harness/__init__ (cli -> dotenv/langgraph).
 """
 
 from __future__ import annotations
 
-import importlib.util
-import sys
 import tomllib
-import types
-from pathlib import Path
 
-_HARNESS = Path(__file__).resolve().parent.parent / "harness"
-
-
-def _load(modname: str) -> types.ModuleType:
-    if "harness" not in sys.modules:
-        pkg = types.ModuleType("harness")
-        pkg.__path__ = [str(_HARNESS)]
-        sys.modules["harness"] = pkg
-    spec = importlib.util.spec_from_file_location(modname, _HARNESS / f"{modname.split('.')[-1]}.py")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[modname] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
+from _bootstrap import _load
 
 cost = _load("harness.cost")
 sm = _load("harness.sync_models")
@@ -153,15 +136,15 @@ def test_render_uses_lf_newlines_only():
     assert "\r" not in text and text.endswith("\n")
 
 
-if __name__ == "__main__":
-    fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
-    failed = 0
-    for name, fn in fns:
-        try:
-            fn()
-            print(f"  ok   {name}")
-        except Exception as exc:  # noqa: BLE001
-            failed += 1
-            print(f"  FAIL {name}: {exc!r}")
-    print(f"\n{len(fns) - failed}/{len(fns)} passed")
-    sys.exit(1 if failed else 0)
+def test_redact_scrubs_query_key():
+    url = "https://api.example.com/models?key=SECRET123&alt=json"
+    out = sm._redact(f"HTTP Error 403: Forbidden for url: {url}")
+    assert "SECRET123" not in out
+    assert "key=REDACTED" in out
+    # non-key query params survive.
+    assert "alt=json" in out
+
+
+def test_redact_noop_without_key():
+    text = "HTTP Error 500: Internal Server Error"
+    assert sm._redact(text) == text

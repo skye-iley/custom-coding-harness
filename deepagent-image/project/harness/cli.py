@@ -66,12 +66,22 @@ def parse_args() -> argparse.Namespace:
 
 def _env_float(name: str) -> float | None:
     raw = os.getenv(name)
-    return float(raw) if raw else None
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        raise SystemExit(f"{name}={raw!r} is not a valid number.")
 
 
 def _env_int(name: str) -> int | None:
     raw = os.getenv(name)
-    return int(raw) if raw else None
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        raise SystemExit(f"{name}={raw!r} is not a valid integer.")
 
 
 EXIT_TOKENS = {"/exit", "/quit"}
@@ -140,7 +150,7 @@ def _print_session_total(tracker: CostTrackerMiddleware | None) -> None:
     """End-of-session token/cost/energy total (§1 req 2). No-op without a tracker."""
     if tracker is not None:
         print(
-            format_session_total(tracker.session, electricity_rate=tracker._electricity_rate),
+            format_session_total(tracker.session, electricity_rate=tracker.electricity_rate),
             file=sys.stderr,
         )
 
@@ -222,6 +232,21 @@ def run_repl(
     _print_session_total(tracker)
     _stage("session closed")
     return 0
+
+
+def dispatch(argv: list[str]) -> int:
+    """Shared entry for both `python3 main.py` and `python3 -m harness`.
+
+    Routes the optional dev-time `sync-models` subcommand; anything else runs
+    the agent loop. Kept in one place so the two entry points can't drift —
+    previously only `-m harness` handled `sync-models` and `main.py sync-models`
+    silently swallowed it as an agent task.
+    """
+    if argv and argv[0] == "sync-models":
+        from harness.sync_models import sync_models_main
+
+        return sync_models_main(argv[1:])
+    return main()
 
 
 def main() -> int:
