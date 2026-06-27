@@ -59,6 +59,14 @@ thread id), isolates workspace dependencies in a workspace-local conda env, and 
 | 9 | HITL autonomy config (`.harness-config.yaml`) | ⬜ Planned | — |
 | 10 | Security verification test suite | ⬜ Planned | Risk analysis is design-only |
 | 11 | Future extensions & roadmap | 🔬 Research | By definition |
+| 12 | CI pipeline for the harness repo | ⬜ Planned | Suite exists (`pytest`/`verify`/`smoke`) but nothing runs it on push/PR; no `.github/workflows/` |
+| 12 | Config-validate / `harness doctor` | ⬜ Planned | `verify` checks imports only; no pre-flight check that the registry / `.mcp.json` / `hooks.json` / `workflow.md` are coherent |
+| 12 | Headless one-shot-to-PR mode | ⬜ Planned | Non-TTY today only degrades to a single REPL turn; no structured-result batch entrypoint |
+| 12 | Provider resilience (retry/backoff + context-overflow fallback) | ⬜ Planned | No handling of 429/5xx/network blips mid-turn; no interim plan before §7 compression lands |
+| 12 | Thread / checkpoint management | ⬜ Planned | `checkpoints.sqlite` grows unbounded; no list/show/rm/prune of threads |
+| 12 | Deepagents-native skills & memories wiring | ⬜ Planned | `project/agents/`,`skills/`,`memories/` are baked into the image but empty + unread by `build_agent` (dead scaffolding) |
+| 12 | Cost / telemetry persistence | ⬜ Planned | Cost prints to stderr then vanishes; nothing on disk to feed §8 telemetry-to-PR or spend-over-time |
+| 13 | File-read middleware (per-file context shaping) | ⬜ Planned | No read-time transform seam; `read_file` serves whole files. Planned: pipeline on the backend `read()` override; tag add/omit + in-file progressive disclosure as instances |
 
 ---
 
@@ -233,7 +241,9 @@ first-party workflows on this one engine. A workflow is fully described by three
         (`subprocess.run(..., check=False)`). This is the whole of `hooks.json` today.
     *   **Context mutation** *(planned)* — read and rewrite the outgoing prompt/context or shared
         state (inject a system note, redact, compact, attach retrieved files) before it reaches the
-        model. Requires hooks to *return* a value the middleware applies, not just fire.
+        model. Requires hooks to *return* a value the middleware applies, not just fire. (Distinct
+        from the **read-boundary** transform seam of §13, which shapes one tool's output — `read_file`
+        — rather than the whole outgoing context.)
     *   **Control-flow** *(planned)* — alter dispatch: select/swap the model (model routing),
         short-circuit a turn, or veto a tool call.
 
@@ -341,6 +351,33 @@ prerequisites (a git repo / a clean tree / a remote / `gh` + `GH_TOKEN`).
         ```
     *   **Merge Policy**: The system must **never** auto-merge PRs. Human pre-review is mandatory before main branch integration.
 
+### Canonical workflow: the Funnel (control-flow + routing)
+The second worked example — and the one that exercises the **classifier-gate** and **control-flow**
+tiers the git lifecycle does not. A **funnel** is a workflow bound to a **per-user-input** hook
+(`agent.start`, or `model.start` to act before context is sent) whose gate decides — by any
+criterion — and whose action **selects which model/agent the (optionally transformed) input is
+dispatched to**. It is to routing what the git lifecycle is to side-effects: the canonical instance
+the engine generalizes. It needs no new hook point — `agent.start` already fires once per user
+input.
+
+*   **Gate = the routing criterion (any kind).** A deterministic predicate (`trigger.py`
+    rule/keyword match), a dedicated classifier-only model, or a full LLM — all the same gate slot,
+    returning a richer verdict than `bool` once the control-flow tier lands. The FSM/Qwen traffic
+    classifier of §4 is **one such criterion, not a prerequisite**: a funnel ships with a trivial
+    deterministic gate and upgrades to a classifier/LLM criterion without changing shape.
+*   **Action = control-flow (route to 1-of-N targets).** The step selects/swaps the model or
+    sub-agent for this turn (the §3 control-flow tier) instead of running a side-effect; the
+    `model="…#tag"` selection of §4 is the mechanism.
+*   **Optional transform = context-mutation.** Before dispatch the same workflow may rewrite the
+    outgoing context (the §3 context-mutation tier) — compress it (§7) or inject retrieved files.
+    "Potentially transformed text routed to the next area" is exactly *context-mutation action →
+    control-flow action* composed in one per-input workflow.
+
+So **classifier routing (§4), the multi-agent funnel (§5), and compression (§7) are one mechanism**:
+a per-input workflow over the planned gate / context-mutation / control-flow tiers. Specific
+criteria (classifier, LLM) and specific transforms (Headroom, Caveman) are pluggable instances — the
+way `git-branch` / `git-pr` are instances of the side-effect tier.
+
 ---
 
 ## 4. Model Routing & Provider Abstraction
@@ -392,6 +429,16 @@ prerequisites (a git repo / a clean tree / a remote / `gh` + `GH_TOKEN`).
 
 ## 5. Agent Architecture & Framework Comparison
 > **Status:** ⬜ Planned — a single Custom `create_deep_agent` runs today; the classifier→orchestrator→worker multi-agent funnel is **not** built. See the status matrix above.
+
+> **The funnel is a workflow, not a separate engine.** The classifier→orchestrator→worker funnel is
+> the §3 **Funnel** canonical workflow: a workflow on a per-input hook (`agent.start` /
+> `model.start`) whose **gate** is the routing criterion (deterministic fn, classifier-only model,
+> or LLM) and whose **control-flow action** dispatches the (optionally context-mutated, §7) input to
+> one of N models/agents. The structural options below are the *targets* a funnel routes between; the
+> §4 classifier is **one gate criterion, not a prerequisite** — a funnel ships with a deterministic
+> gate first, then upgrades the criterion in place. This is the same generalization as
+> git-lifecycle → workflow engine: routing is a *specific usage* of the funnel, the funnel a
+> *specific usage* of the workflow engine.
 
 ### Structural Options
 *   **Base Deep Agents Core**:
@@ -466,6 +513,16 @@ Local dictionary for calculating financial cost of session:
 
 ## 7. Token Optimization Pipeline (Headroom & Caveman)
 > **Status:** ⬜ Planned — neither Headroom, Caveman, nor prompt caching is integrated. See the status matrix above.
+
+> **As a workflow tier.** Compression is the §3 **context-mutation** action tier: a per-input
+> workflow step that rewrites the outgoing context before it reaches the model — the same seam a
+> funnel's optional transform uses (§3 / §5). Split the two: the **capability** (a context-transform
+> middleware seam on the engine, applied per input) is the completeness-tier feature; Headroom and
+> Caveman below are **pluggable instances** of that tier and are individually optional/swappable.
+> Building the seam is what makes "compression" a product capability; picking a specific filter is a
+> later, replaceable choice. (§13 is the sibling seam at the **read boundary** — same seam-vs-instances
+> split, applied to `read_file` output instead of the whole outgoing context; its progressive
+> disclosure is CCR applied per file.)
 
 ### Headroom Context Compression Layer
 *   **Tool**: Integrate `chopratejas/headroom` inside the orchestrator container environment.
@@ -669,5 +726,237 @@ Users can configure their level of autonomy via a `.harness-config.yaml` file:
 ### Advanced Optimization
 *   **Speculative Execution**: Run the local orchestrator and cloud orchestrator in parallel for `MODERATE` tasks; use the cloud result to verify the local one, optimizing for both speed and accuracy.
 *   **Dynamic Prompt Compression**: Adjust Caveman/Headroom intensity levels in real-time based on the current token window usage and the importance of the current task.
+
+
+---
+
+## 12. Operational Hardening & Automation Roadmap
+> **Status:** ⬜ Planned — these are the gaps surfaced by an audit of the built MVP + Milestone 1
+> against the full vision: the loop works and is config-driven, but it is not yet *operated* like a
+> product (no CI, no pre-flight validation, no headless/automation entrypoint, no resilience, no
+> lifecycle management of the state it accumulates). Each item below is independently shippable and
+> ordered roughly by leverage. Several are bridges to already-planned sections — cross-refs noted.
+
+### 12.1 CI pipeline for the harness repo
+*Why.* The harness already ships a real test suite — `project/tests/` (pytest, host-runnable +
+image-only tiers), `scripts/verify.{ps1,sh}`, `scripts/smoke.{ps1,sh}` — but nothing runs it
+automatically. Every change to provider routing, the cost math, or the workflow engine can regress
+silently until a human remembers to build + run locally. There is no `.github/workflows/`.
+
+*Design.* A GitHub Actions workflow on push + PR:
+1. **Host-tier tests** (no Docker): `python3 -m pytest tests/` for the stdlib-only modules
+   (`test_cost`, `test_sync_models`, `test_providers`, `test_loaders`, `test_import_isolation`) — the
+   `importorskip` guards already make the image-only modules skip cleanly off-image.
+2. **Image build + image-tier tests**: `docker build --target test` then run the full suite inside
+   (exercises `test_agent`/`test_cli`/`test_workflows` against the real runtime layer).
+3. **Smoke**: build `--target runtime`, run a keyless smoke turn (exits 0 by design — the git
+   workflows are safe no-ops without a remote/`gh`).
+4. **Script-parity lint**: assert every `scripts/*.ps1` has a matching `*.sh` (and flag drift) — the
+   "keep the pair in sync" rule is currently honour-system.
+
+*Touch points.* New `.github/workflows/ci.yml`; no source change. Optionally a tiny
+`scripts/check-parity.{sh,ps1}` for step 4.
+
+*Done when.* PRs show pass/fail status; a deliberately broken cost calc fails CI; the parity check
+fails if a `.ps1`/`.sh` pair drifts.
+
+### 12.2 Config validation — `harness doctor`
+*Why.* `verify` proves the venv imports; it does **not** prove the on-disk config is coherent. A
+`provider.toml` whose `default_model` names a missing model TOML, a `rate_table` provider missing a
+`[pricing]` table, a malformed `.mcp.json`, or a bad `workflow.md` manifest are only discovered at
+run time (the workflow loader already `SystemExit`s loudly — but after a container start). A
+pre-flight validator catches all of it in one cheap, keyless command.
+
+*Design.* `python3 -m harness doctor` (subcommand alongside `sync-models`), wired through
+`cli.dispatch`. Checks, all non-fatal-reporting (collect + summarize, exit non-zero if any error):
+- **Registry**: every `provider.toml` parses; each non-null `default_model` resolves to a real
+  `models/<model>.toml`; `rate_table` providers have `[pricing]` (or `[pricing.estimate]`) with
+  `priced_as_of`; flag stale `priced_as_of`.
+- **Credentials**: report which providers have their key / `*_BASE_URL` set (no values printed —
+  secret-hygiene rule).
+- **Optional config**: `.mcp.json`, `hooks.json` parse; every `workflows/<name>/workflow.md` passes
+  the same manifest parser used at load (name match, known hook, exactly one gate file).
+- Reuse the existing loaders (`providers._load_providers`, `loaders.*`, the workflow manifest parser)
+  so validation can't drift from runtime behaviour.
+
+*Touch points.* `harness/cli.py` (dispatch + arg), a new `harness/doctor.py` (pure, stdlib-only —
+keeps the host-runnable tier); `scripts/verify.{ps1,sh}` optionally call it; `test_doctor.py`.
+
+*Done when.* `doctor` flags a registry with a dangling `default_model` and a `rate_table` model
+missing pricing; passes clean on the shipped registry; runs with no keys/network.
+
+### 12.3 Headless one-shot-to-PR mode
+*Why.* Today a non-TTY stdin only *degrades* the interactive REPL to one turn (a CI fallback, not a
+feature). With the git lifecycle (§3) and cost tracker (§6/M1) now built, the missing capstone is a
+first-class **headless** mode that lets *other* automation drive the harness: run a task to
+completion, do the branch→commit→PR lifecycle, and emit a machine-readable result. This is the
+entrypoint the scheduled/remote-agent use case needs.
+
+*Design.* A `--headless` (a.k.a. batch) path in `cli.main`, distinct from the degraded single turn:
+- Input: a single task (arg/`DEEPAGENTS_TASK`) or a task file (one task per line / JSON array).
+- Runs the turn(s), lets the `session.end` git-pr workflow run, then emits a **structured result on
+  stdout** (JSON): final message, token/cost totals (from the §6 accumulator), thread id, branch,
+  PR URL (if created), and a clear exit code (0 ok / non-zero on agent error / budget exceeded).
+- Stage markers + usage stay on stderr (unchanged), so stdout is clean JSON for piping.
+- Honours the existing budget ceilings (`--max-cost`/`--max-tokens`) as hard stops.
+
+*Touch points.* `harness/cli.py` (`--headless`, a `run_batch` beside `run_repl`, JSON result
+serializer); `scripts/run-docker.{ps1,sh}` gain a headless pass-through (drop `-t`, keep `-i`);
+`test_cli.py` (result schema, exit codes). Builds on §3 (git-pr) and §6 (cost totals).
+
+*Done when.* `run-docker --headless "task"` prints one JSON object + exits with a meaningful code;
+piping a task file runs each and aggregates; a budget-exceeded run exits non-zero with the partial
+total in the JSON.
+
+### 12.4 Provider resilience — retry/backoff + context-overflow fallback
+*Why.* A long persistent session is one transient `429`/`5xx`/network blip away from dying
+mid-turn, and one long conversation away from a hard context-window error. The §7 compression
+pipeline is the eventual answer to context pressure but is research-stage; there is no interim
+guard, and no retry on transient provider failures at all.
+
+*Design.* Two narrow, optional behaviours, off by default-equivalent (safe):
+- **Transient-error retry**: bounded exponential backoff (e.g. 3 tries, jitter) around the per-turn
+  model invoke for retryable statuses (429 / 5xx / connection reset). Caps from env
+  (`DEEPAGENTS_MAX_RETRIES`, `DEEPAGENTS_RETRY_BASE`). A turn that still fails returns to the prompt
+  with a `[harness] provider error` marker instead of crashing the REPL.
+- **Context-overflow stopgap**: catch the provider's context-length error and apply a *minimal*
+  interim policy — trim/summarize the oldest turns and retry once — explicitly flagged as the
+  pre-§7 placeholder so it is replaced, not entrenched, when Headroom lands.
+
+*Touch points.* `harness/cli.py` `run_turn` (wrap the invoke; reuse the existing
+`try/except KeyboardInterrupt`/`BudgetExceeded` structure — add sibling clauses); a small
+`harness/resilience.py` for the backoff/classification helpers (pure, unit-testable);
+`test_resilience.py`. Interim context policy cross-refs §7 (to be superseded).
+
+*Done when.* A stubbed `429`-then-success turn completes after backoff; a stubbed permanent error
+returns to the prompt without killing the session; a simulated context-overflow trims + retries
+once and is labelled interim.
+
+### 12.5 Thread / checkpoint management
+*Why.* Conversation state persists in `<workspace>/.deepagents/checkpoints.sqlite`, keyed by
+`DEEPAGENTS_THREAD_ID`. It grows unbounded and there is no way to see what threads exist, inspect
+one, reset one, or prune old ones — resuming requires *knowing* the id. This completes the memory
+feature already shipped.
+
+*Design.* A `harness threads` subcommand group (keyless, operates on the local sqlite):
+- `list` — thread ids + turn count + last-modified.
+- `show <id>` — summary of a thread (first/last turn, counts).
+- `rm <id>` / `prune --older-than <N>d` — delete a thread / bulk-prune (with a confirm or `--yes`,
+  per the irreversible-action rule).
+
+*Touch points.* New `harness/threads.py` (queries the SqliteSaver schema directly), `cli.dispatch`
+wiring, `test_threads.py` against a tmp sqlite. No change to the run path.
+
+*Done when.* `threads list` shows seeded threads; `rm`/`prune` delete only the targeted rows;
+guarded against deleting everything without explicit confirmation.
+
+### 12.6 Deepagents-native skills & memories — wire or document
+*Why.* The Dockerfile bakes `project/agents/`, `project/skills/`, `project/memories/` into the
+image, but they are **empty scaffolding and unread** — `build_agent` only loads `AGENTS.md`. This is
+latent intent not captured anywhere in the docs, and distinct from the §5 multi-agent funnel and the
+§11 vector-DB "Long-Term Project Memory": it is deepagents' *own* skills / subagent / memory
+mechanism. Leaving dead dirs in the image is a maintenance trap.
+
+*Design.* Decide explicitly, document either way:
+- **Option A (wire it):** load `skills/` and `memories/` into `create_deep_agent` per the deepagents
+  API, and treat `agents/{coding-agents,orchestrators,pre-orchestrators,lightweight-tool-callers}`
+  as the on-disk staging ground for the §5 funnel roles. Smallest first step: load skills into the
+  single MVP agent (no funnel yet).
+- **Option B (defer cleanly):** keep the dirs only if they are referenced; otherwise remove the
+  `COPY` lines and the empty trees until §5 lands, and note the intended layout here so it is not
+  lost.
+
+*Touch points.* `harness/agent.py` (`build_agent` — load skills/memories if Option A); `Dockerfile`
+(COPY lines); `deepagent-image/CLAUDE.md` (describe the dirs). Cross-refs §5 + §11.
+
+*Done when.* The dirs are either functionally loaded (with a test asserting a seeded skill reaches
+the agent) or removed, and `deepagent-image/CLAUDE.md` states which and why — no silent dead
+scaffolding.
+
+### 12.7 Cost / telemetry persistence
+*Why.* The cost tracker (§6 / M1) prints per-turn + session usage to stderr, then it is gone. There
+is no on-disk record, so there is nothing to feed §8's telemetry-to-PR, no spend-over-time, and no
+post-hoc reconciliation. This bridges the built cost tracker to the planned observability layer.
+
+*Design.* An optional sink on the existing `CostTrackerMiddleware` / session-end path: append a
+per-session record to `<workspace>/.agent_telemetry/usage.jsonl` (thread id, model, per-turn +
+total tokens by kind, cost + provenance `official|estimate|reported`, energy if present,
+timestamps). Off unless the tracker is active (preserves the "removable = byte-for-byte MVP"
+contract). Honour the secret-scrubbing requirement from §10 before any disk write. `.agent_telemetry/`
+is already git-ignored (workspace `.gitignore`) and already excluded by the git-pr workflow, so it
+never lands in an agent commit.
+
+*Touch points.* `harness/cost.py` (a small `UsageSink` writing JSONL; called from the session-end
+print), `cli.py` (pass the workspace path / enable flag); `test_cost.py` (record shape, scrubbing,
+no-write-when-tracker-absent). Feeds §8; reuses §6 data structures.
+
+*Done when.* An active-tracker session writes one well-formed JSONL line per session; a tracker-off
+run writes nothing; secrets never appear in the file.
+
+
+---
+
+## 13. File-Read Middleware (per-file context shaping)
+> **Status:** ⬜ Planned — the read tool serves whole files verbatim (only the model-supplied
+> `offset`/`limit` trim them); there is no read-time transform seam. See the status matrix above.
+
+> **Three context seams — do not conflate.** This is a distinct third axis from §3 and §7:
+> *   **§7 compression** rewrites the *entire outgoing message list* before a model call
+>     (Headroom/Caveman) — global, role-agnostic.
+> *   **§3 context-mutation** rewrites the *prompt / shared state* at a workflow **hook point**
+>     (`model.start`, `tool.end`) — turn-scoped.
+> *   **This section** transforms *one tool's output* — `read_file` — as a file crosses into context,
+>     with awareness of **where inside the file** content lives (regions, sections, line ranges). It
+>     is the read-boundary analogue of §7's reversible CCR: serve less of a file up front, let the
+>     model pull more on demand.
+
+### The seam (the capability)
+Deep Agents routes every `read_file` call through a backend `read(path, offset, limit)` method (today
+`deepagents.backends.LocalShellBackend`, which the harness already subclasses as
+`_WorkspaceShellBackend` in `harness/agent.py`). The capability is a **registered, ordered
+read-transform pipeline** applied to that read result before it returns to the model — the single
+**designated insertion point** for read-time shaping, the same way §7 is the seam for outgoing-context
+compression.
+
+*   **Shape.** Each transform is a pure `(ReadRequest, ReadResult) -> ReadResult` step; the pipeline
+    is an ordered, config-declared list (like §3 `steps:`). An **empty pipeline returns the file
+    byte-for-byte** — the removable-seam contract shared with §7 and the M1 cost tracker: off ⇒
+    behaviour identical to today.
+*   **Where it plugs.** Override the **public** `read()` on `_WorkspaceShellBackend` to run the
+    pipeline around `super().read(...)`. Preferred over wrapping the `read_file` *tool* because
+    `read()` is the single choke point **every** read_file call funnels through, and it is public —
+    stable across a deepagents upgrade, unlike the `_resolve_path` override that needs the
+    construction-time guard (`agent.py`). The earlier `min(limit, N)` line clamp is the trivial
+    degenerate case of one such transform; this generalizes it to content-aware steps.
+*   **Two-stack rule.** Transforms run in the harness venv (`/opt/venv`) → **stdlib + engine API
+    only**, never workspace deps (Tree-Sitter etc. would ship as a harness dependency, not a
+    workspace one).
+
+### Pluggable instances
+The seam is the product capability; specific transforms are swappable instances (mirrors §7's
+seam-vs-Headroom/Caveman split):
+
+1.  **Tag-gated add / omit.** In-file content markers curate what the agent sees, per file, with no
+    external config: e.g. `<!-- agent:hide -->…<!-- /agent:hide -->` regions stripped from the
+    returned content; `<!-- agent:note: … -->` surfaced or hoisted. Repo authors steer attention at
+    the source, not in harness config. Markers are comment-syntax so they stay invisible to normal
+    tooling.
+2.  **Progressive disclosure within a single file.** The first read of a large file returns a
+    **map** — headings / outline / a symbol skeleton with line ranges (Tree-Sitter "relevant
+    fragment extraction", §7) — not the full body; the model then expands a named region or range on
+    demand. This is §7's reversible CCR applied at the read boundary: bounds context on big files
+    while keeping the full text one tool call away. Needs per-thread memory of what has already been
+    disclosed (reuse the SqliteSaver checkpoint state, §2/§9), so an expand request resolves against
+    the same file view.
+
+### Build notes
+*   *Touch points.* `harness/agent.py` (`_WorkspaceShellBackend.read` override + pipeline wiring), a
+    new `harness/read_pipeline.py` (the pipeline + transform registry, pure/stdlib so it stays in the
+    host-runnable test tier), `tests/test_read_pipeline.py` + a case in `test_agent.py`. Config
+    surface mirrors §3 (declare active transforms + order).
+*   *Done when.* An empty pipeline returns a file byte-for-byte (identical to today); the tag-strip
+    transform omits a `hide` region and leaves untagged content unchanged; a progressive-disclosure
+    read of a large file returns the outline only, a follow-up expand returns the requested region,
+    and the full body is never served unbidden; every transform is pure + unit-tested off-image.
 
 
