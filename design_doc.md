@@ -66,6 +66,7 @@ thread id), isolates workspace dependencies in a workspace-local conda env, and 
 | 12 | Thread / checkpoint management | ⬜ Planned | `checkpoints.sqlite` grows unbounded; no list/show/rm/prune of threads |
 | 12 | Deepagents-native skills & memories wiring | ⬜ Planned | `project/agents/`,`skills/`,`memories/` are baked into the image but empty + unread by `build_agent` (dead scaffolding) |
 | 12 | Cost / telemetry persistence | ⬜ Planned | Cost prints to stderr then vanishes; nothing on disk to feed §8 telemetry-to-PR or spend-over-time |
+| 13 | File-read middleware (per-file context shaping) | ⬜ Planned | No read-time transform seam; `read_file` serves whole files. Planned: pipeline on the backend `read()` override; tag add/omit + in-file progressive disclosure as instances |
 
 ---
 
@@ -240,7 +241,9 @@ first-party workflows on this one engine. A workflow is fully described by three
         (`subprocess.run(..., check=False)`). This is the whole of `hooks.json` today.
     *   **Context mutation** *(planned)* — read and rewrite the outgoing prompt/context or shared
         state (inject a system note, redact, compact, attach retrieved files) before it reaches the
-        model. Requires hooks to *return* a value the middleware applies, not just fire.
+        model. Requires hooks to *return* a value the middleware applies, not just fire. (Distinct
+        from the **read-boundary** transform seam of §13, which shapes one tool's output — `read_file`
+        — rather than the whole outgoing context.)
     *   **Control-flow** *(planned)* — alter dispatch: select/swap the model (model routing),
         short-circuit a turn, or veto a tool call.
 
@@ -517,7 +520,9 @@ Local dictionary for calculating financial cost of session:
 > middleware seam on the engine, applied per input) is the completeness-tier feature; Headroom and
 > Caveman below are **pluggable instances** of that tier and are individually optional/swappable.
 > Building the seam is what makes "compression" a product capability; picking a specific filter is a
-> later, replaceable choice.
+> later, replaceable choice. (§13 is the sibling seam at the **read boundary** — same seam-vs-instances
+> split, applied to `read_file` output instead of the whole outgoing context; its progressive
+> disclosure is CCR applied per file.)
 
 ### Headroom Context Compression Layer
 *   **Tool**: Integrate `chopratejas/headroom` inside the orchestrator container environment.
@@ -887,5 +892,71 @@ no-write-when-tracker-absent). Feeds §8; reuses §6 data structures.
 
 *Done when.* An active-tracker session writes one well-formed JSONL line per session; a tracker-off
 run writes nothing; secrets never appear in the file.
+
+
+---
+
+## 13. File-Read Middleware (per-file context shaping)
+> **Status:** ⬜ Planned — the read tool serves whole files verbatim (only the model-supplied
+> `offset`/`limit` trim them); there is no read-time transform seam. See the status matrix above.
+
+> **Three context seams — do not conflate.** This is a distinct third axis from §3 and §7:
+> *   **§7 compression** rewrites the *entire outgoing message list* before a model call
+>     (Headroom/Caveman) — global, role-agnostic.
+> *   **§3 context-mutation** rewrites the *prompt / shared state* at a workflow **hook point**
+>     (`model.start`, `tool.end`) — turn-scoped.
+> *   **This section** transforms *one tool's output* — `read_file` — as a file crosses into context,
+>     with awareness of **where inside the file** content lives (regions, sections, line ranges). It
+>     is the read-boundary analogue of §7's reversible CCR: serve less of a file up front, let the
+>     model pull more on demand.
+
+### The seam (the capability)
+Deep Agents routes every `read_file` call through a backend `read(path, offset, limit)` method (today
+`deepagents.backends.LocalShellBackend`, which the harness already subclasses as
+`_WorkspaceShellBackend` in `harness/agent.py`). The capability is a **registered, ordered
+read-transform pipeline** applied to that read result before it returns to the model — the single
+**designated insertion point** for read-time shaping, the same way §7 is the seam for outgoing-context
+compression.
+
+*   **Shape.** Each transform is a pure `(ReadRequest, ReadResult) -> ReadResult` step; the pipeline
+    is an ordered, config-declared list (like §3 `steps:`). An **empty pipeline returns the file
+    byte-for-byte** — the removable-seam contract shared with §7 and the M1 cost tracker: off ⇒
+    behaviour identical to today.
+*   **Where it plugs.** Override the **public** `read()` on `_WorkspaceShellBackend` to run the
+    pipeline around `super().read(...)`. Preferred over wrapping the `read_file` *tool* because
+    `read()` is the single choke point **every** read_file call funnels through, and it is public —
+    stable across a deepagents upgrade, unlike the `_resolve_path` override that needs the
+    construction-time guard (`agent.py`). The earlier `min(limit, N)` line clamp is the trivial
+    degenerate case of one such transform; this generalizes it to content-aware steps.
+*   **Two-stack rule.** Transforms run in the harness venv (`/opt/venv`) → **stdlib + engine API
+    only**, never workspace deps (Tree-Sitter etc. would ship as a harness dependency, not a
+    workspace one).
+
+### Pluggable instances
+The seam is the product capability; specific transforms are swappable instances (mirrors §7's
+seam-vs-Headroom/Caveman split):
+
+1.  **Tag-gated add / omit.** In-file content markers curate what the agent sees, per file, with no
+    external config: e.g. `<!-- agent:hide -->…<!-- /agent:hide -->` regions stripped from the
+    returned content; `<!-- agent:note: … -->` surfaced or hoisted. Repo authors steer attention at
+    the source, not in harness config. Markers are comment-syntax so they stay invisible to normal
+    tooling.
+2.  **Progressive disclosure within a single file.** The first read of a large file returns a
+    **map** — headings / outline / a symbol skeleton with line ranges (Tree-Sitter "relevant
+    fragment extraction", §7) — not the full body; the model then expands a named region or range on
+    demand. This is §7's reversible CCR applied at the read boundary: bounds context on big files
+    while keeping the full text one tool call away. Needs per-thread memory of what has already been
+    disclosed (reuse the SqliteSaver checkpoint state, §2/§9), so an expand request resolves against
+    the same file view.
+
+### Build notes
+*   *Touch points.* `harness/agent.py` (`_WorkspaceShellBackend.read` override + pipeline wiring), a
+    new `harness/read_pipeline.py` (the pipeline + transform registry, pure/stdlib so it stays in the
+    host-runnable test tier), `tests/test_read_pipeline.py` + a case in `test_agent.py`. Config
+    surface mirrors §3 (declare active transforms + order).
+*   *Done when.* An empty pipeline returns a file byte-for-byte (identical to today); the tag-strip
+    transform omits a `hide` region and leaves untagged content unchanged; a progressive-disclosure
+    read of a large file returns the outline only, a follow-up expand returns the requested region,
+    and the full body is never served unbidden; every transform is pure + unit-tested off-image.
 
 
