@@ -1,0 +1,38 @@
+# NetJail egress allowlist  (run-docker  NET_JAIL=1 / -NetJail).
+#
+# Each non-comment line = one domain the agent may reach over HTTP/HTTPS via the
+# egress proxy. Subdomains are included automatically (listing example.com also
+# allows api.example.com). Everything NOT listed is DENIED by the proxy.
+#
+# Plain domains only - one per line. No scheme, no path, no port:
+#     example.com
+#
+# The agent never routes to the internet directly; it hands the hostname to the
+# proxy, which enforces this list. To add access: add a line. To revoke: delete.
+
+# --- LLM model API  (REQUIRED for a cloud model in the jail) ---
+# The agent reaches its model provider over HTTPS; without this it cannot run.
+# Uncomment the line matching your DEEPAGENTS_MODEL provider. Local models
+# (ollama) go through host-services.txt instead and need nothing here.
+generativelanguage.googleapis.com   # google_genai
+# api.anthropic.com                 # anthropic
+# api.openai.com                    # openai
+# api.deepseek.com                  # deepseek
+# openrouter.ai                     # openrouter
+
+# --- git: push / fetch / gh  (HTTPS remotes + token) ---
+github.com
+api.github.com
+codeload.github.com
+objects.githubusercontent.com
+
+# --- pip / PyPI  (uncomment to allow) ---
+# pypi.org
+# files.pythonhosted.org
+
+# --- npm  (uncomment to allow) ---
+# registry.npmjs.org
+
+# --- conda workspace env  (uncomment if the agent builds the conda env online) ---
+# conda.anaconda.org
+# repo.anaconda.com

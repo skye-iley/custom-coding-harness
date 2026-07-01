@@ -44,6 +44,12 @@ on user code inside a separate **workspace** conda env. `project/main.py` is the
   `/project/workspace-seed/` in the image; the real workspace is bind-mounted at run time.
 - `scripts/` — `build`, `run-docker`, `verify`, `smoke`, `sync-models` in both `.ps1` (Windows)
   and `.sh`. `sync-models` is a dev-time registry refresh (see Model routing).
+- `netjail/` — opt-in deny-all-egress network jail for `run-docker` (`NET_JAIL=1` / `-NetJail`):
+  the agent runs on an `--internal` network and reaches only the host ports and internet domains
+  declared in `host-services.txt` / `allowed-domains.txt`. See `netjail/README.md`. Core mechanics
+  (isolation, allowlist enforcement, host forwarder) verified on Docker Desktop; the proxy check
+  **fails closed** (aborts rather than run with an open proxy). Default proxy image is
+  `kalaksi/tinyproxy` (Docker Hub; `ghcr.io` is blocked on some networks).
 
 ## Commands (PowerShell primary on this machine)
 

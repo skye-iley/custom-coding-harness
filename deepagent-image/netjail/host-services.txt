@@ -1,0 +1,22 @@
+# NetJail host-service forwarders  (run-docker  NET_JAIL=1 / -NetJail).
+#
+# Each non-comment line = one TCP forwarder from the agent's --internal jail
+# network to a service listening on the DOCKER HOST. Grants the agent reach to
+# exactly that host port and nothing else.
+#
+#   <name>  <port>
+#
+#   name  - letters/digits/dash. Reachable from the agent as
+#           http://deepagent-fwd-<name>:<port>   (Docker DNS on the jail net).
+#   port  - TCP port on the host; the same port is used inside the jail.
+#
+# The host daemon must listen on the docker bridge interface, not only on
+# 127.0.0.1 (loopback is unreachable from any container). For Ollama:
+#     OLLAMA_HOST=0.0.0.0:11434 ollama serve
+#
+# 'ollama' is special-cased: when present, the agent's OLLAMA_HOST is auto-set
+# to this forwarder, so you don't touch project/.env for jail runs.
+#
+# To add a host service: add one line here. To revoke: delete the line.
+
+ollama  11434
