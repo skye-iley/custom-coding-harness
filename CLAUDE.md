@@ -48,6 +48,7 @@ cd deepagent-image
 .\scripts\build.ps1                       # docker build -t deepagent-harness
 .\scripts\verify.ps1                      # sanity-check harness venv + conda
 .\scripts\smoke.ps1                       # smoke test
+.\scripts\smoke.ps1 -NetJail              # smoke test run inside the NetJail (NET_JAIL=1 ./scripts/smoke.sh)
 .\scripts\run-docker.ps1                  # opens a persistent interactive session (you> prompt)
 .\scripts\run-docker.ps1 "your task"      # runs that task first, then drops to the prompt
 ```
