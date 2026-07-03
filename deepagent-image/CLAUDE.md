@@ -237,6 +237,12 @@ don't describe it as sandboxing. Verify with `docker inspect` (`NanoCpus`,
 - Conversation state persists at `<workspace>/.deepagents/checkpoints.sqlite`, keyed by
   `DEEPAGENTS_THREAD_ID`. Reuse the id to resume a thread.
 - `project/suggestions/old/` is archived reference, not live code — ignore it.
+- **NetJail is deny-all by default.** When you implement a feature that needs a host service
+  (e.g. a daemon on the Docker host) or internet access (a model API, package registry, git
+  remote), you MUST also grant it in the jail or it silently breaks under `NET_JAIL=1` /
+  `-NetJail`: add a `<name> <port>` line to `netjail/host-services.txt` for a host service, or
+  the bare domain to `netjail/allowed-domains.txt` for an egress destination. Anything not
+  listed is blocked. Don't widen the allowlist beyond what the feature needs.
 
 ## Conventions
 

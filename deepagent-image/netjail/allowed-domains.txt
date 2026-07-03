@@ -13,12 +13,13 @@
 # --- LLM model API  (REQUIRED for a cloud model in the jail) ---
 # The agent reaches its model provider over HTTPS; without this it cannot run.
 # Uncomment the line matching your DEEPAGENTS_MODEL provider. Local models
-# (ollama) go through host-services.txt instead and need nothing here.
+# (ollama, lmstudio) go through host-services.txt instead and need nothing here.
 generativelanguage.googleapis.com   # google_genai
 # api.anthropic.com                 # anthropic
 # api.openai.com                    # openai
 # api.deepseek.com                  # deepseek
 # openrouter.ai                     # openrouter
+# api.cursor.sh                     # cursor  (matches the default CURSOR_BASE_URL)
 
 # --- git: push / fetch / gh  (HTTPS remotes + token) ---
 github.com
@@ -36,3 +37,7 @@ objects.githubusercontent.com
 # --- conda workspace env  (uncomment if the agent builds the conda env online) ---
 # conda.anaconda.org
 # repo.anaconda.com
+
+# --- networked MCP servers  (planned; uncomment + add each server's domain) ---
+# If you wire an MCP server over http/sse transport (.mcp.json), add its host
+# here or the egress proxy blocks it. stdio MCP servers need nothing.

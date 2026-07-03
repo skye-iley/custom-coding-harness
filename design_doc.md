@@ -71,7 +71,7 @@ thread id), isolates workspace dependencies in a workspace-local conda env, and 
 ---
 
 ## 2. Sandboxing Strategy & Container Layout
-> **Status:** 🟡 Partial — single container + conda isolation + secret provisioning + persistent workspace built; dual-container, bubblewrap jail (built but not wired in), `HarnessProfile` binds, path guard, and resource limits **planned**. See the status matrix above.
+> **Status:** 🟡 Partial — single container + conda isolation + secret provisioning + persistent workspace built; dual-container, bubblewrap jail (built but not wired in), `HarnessProfile` binds + per-agent network policy, path guard, and resource limits **planned**. See the status matrix above.
 
 ### Dual-Container Boundary
 *   **Orchestrator Container**: Hosts Deep Agents runtime and coordinates agent execution. No mount to host Docker socket (`/var/run/docker.sock`).
@@ -127,6 +127,52 @@ bwrap \
 >
 > The `HarnessProfile` selects the phase; the default for arbitrary agent commands is the
 > network-isolated execution phase.
+
+### Per-Agent Network Policy
+
+> **Status:** 🔵 Planned. Extends the container-wide NetJail (`deepagent-image/netjail/`, opt-in
+> `NET_JAIL=1` / `-NetJail`) with a *subtractive* per-agent layer.
+
+The container-wide NetJail (egress allowlist + host-service forwarders) is the **outer bound**:
+if *any* agent in the run needs a domain or host service, it is declared once in
+`allowed-domains.txt` / `host-services.txt` and the whole container can reach it. That is correct
+for the shared bound, but it means a lightweight or untrusted subagent inherits the full reach of
+the most-privileged agent. The per-agent policy narrows that reach back down for individual agents.
+
+`HarnessProfile` gains a `network` field, applied per agent when its tools are constructed:
+
+```python
+@dataclass
+class NetworkPolicy:
+    egress: bool = True                 # False → withhold proxy env → no external domains
+    host_services: set[str] | None = None  # forwarder names this agent may use; None = all, set() = none
+    allow_net_tools: bool = True        # gate http/fetch/MCP-over-network tools for this agent
+
+# on HarnessProfile:
+network: NetworkPolicy = NetworkPolicy()
+```
+
+**Enforcement is Tier-1 (app-layer, env-based).** The policy shapes the shell-tool env in
+`_agent_shell_env()` (`harness/agent.py`) and the tool list in `build_agent()`, per agent:
+
+*   `egress=False` → withhold `HTTP_PROXY` / `HTTPS_PROXY` / `http_proxy` / `https_proxy` from that
+    agent's shell env. Under NetJail the egress proxy is the **only** path out (the container is on an
+    `--internal` network with direct internet denied), so an agent with no proxy env cannot reach any
+    external domain — even ones the container allows.
+*   `host_services` → withhold the `deepagent-fwd-<name>` hostnames (and the auto-set `OLLAMA_HOST`)
+    for forwarders not in the set, so the agent cannot dial host daemons it wasn't granted.
+*   `allow_net_tools=False` → omit http/fetch and network-transport MCP tools from that agent's
+    toolset entirely.
+
+> **This is a policy, not a cage — same trust caveat as the MVP shell (`design_doc_mvp.md` §5).**
+> All subagents run in-process, sharing one network namespace and one proxy. Env-withholding stops a
+> *cooperative* agent and a prompt-injected one that only knows the documented env, but an agent that
+> hardcodes the proxy IP or a forwarder address can still reach it. It is meaningful **only while
+> `NET_JAIL=1`**: without the jail the container has open egress and withholding proxy env changes
+> nothing (direct internet still works). For a kernel-enforced per-agent boundary — or for true
+> per-domain subsets, which one shared tinyproxy cannot attribute to an in-process caller — the agent
+> must move to its own container/netns (the Dual-Container / Executor-Sandbox direction above). That
+> is the strong-isolation successor, out of scope for the in-process Tier-1 mechanism specified here.
 
 ### Path Guard Middleware
 Pre-flight check in Python tool execution class prevents symlink escapes and directory traversal:
