@@ -46,6 +46,9 @@ thread id), isolates workspace dependencies in a workspace-local conda env, and 
 | 2 | `HarnessProfile` dynamic bind mounts | ⬜ Planned | Fixed bind list; no per-agent profile |
 | 2 | Path Guard middleware (`validate_path`) | ⬜ Planned | Snippet only; not in `main.py` |
 | 2 | Resource limits (`--cpus`/`--pids-limit`/mem) | ✅ Built | `run-docker.{sh,ps1}` set `--cpus`/`--memory`/`--pids-limit` (defaults 2/4g/512, overridable). Docker host-boundary control, not a sandbox |
+| 2 | NetJail — container-wide deny-all egress jail (opt-in) | ✅ Built | `run-docker -NetJail` / `NET_JAIL=1`: agent on an `--internal` net, socat host-service forwarders (`host-services.txt`) + domain-allowlisted tinyproxy egress (`allowed-domains.txt`), **fail-closed** if the proxy config doesn't load. `smoke -NetJail` exercises it. Verified on Docker Desktop; see `netjail/README.md` |
+| 2 | Per-agent network policy (`HarnessProfile.network`) | ⬜ Planned | NetJail is all-or-nothing per run; no per-agent *subtractive* egress / host-service / net-tool gating (Tier-1 env-based; §2) |
+| 2 | Config-driven allowlist selection (`@group` + `enabled.txt`) | ⬜ Planned | Entries enabled by hand-uncommenting; no group tags / machine-written selection for a startup menu (§2) |
 | 3 | Workflow engine — folder format + deterministic gates + side-effect steps | ✅ Built | `harness/workflows.py`: `workflows/<name>/` folders (`workflow.md` + `trigger.py`/`trigger.sh` gate + ordered steps), `WorkflowMiddleware`. `hooks.json` is the flat always-gate precursor, adapted into the same path |
 | 3 | Classifier-gated triggers + context-mutation / control-flow action tiers | ⬜ Planned | Deterministic predicate gates + the side-effect action tier are built (above); the classifier gate and the context-rewrite / control-flow tiers are not |
 | — | MCP tool loading (`.mcp.json`) | ✅ Built | `load_mcp_tools` (not a separate doc section) |
@@ -71,7 +74,7 @@ thread id), isolates workspace dependencies in a workspace-local conda env, and 
 ---
 
 ## 2. Sandboxing Strategy & Container Layout
-> **Status:** 🟡 Partial — single container + conda isolation + secret provisioning + persistent workspace built; dual-container, bubblewrap jail (built but not wired in), `HarnessProfile` binds + per-agent network policy + config-driven allowlist selection, path guard, and resource limits **planned**. See the status matrix above.
+> **Status:** 🟡 Partial — single container + conda isolation + secret provisioning + persistent workspace + resource limits + opt-in container-wide NetJail (deny-all egress + allowlist) built; dual-container, bubblewrap jail (built but not wired in), `HarnessProfile` binds + per-agent network policy + config-driven allowlist selection, and path guard **planned**. See the status matrix above.
 
 ### Dual-Container Boundary
 *   **Orchestrator Container**: Hosts Deep Agents runtime and coordinates agent execution. No mount to host Docker socket (`/var/run/docker.sock`).
