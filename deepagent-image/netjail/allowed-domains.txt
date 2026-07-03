@@ -41,3 +41,9 @@ objects.githubusercontent.com
 # --- networked MCP servers  (planned; uncomment + add each server's domain) ---
 # If you wire an MCP server over http/sse transport (.mcp.json), add its host
 # here or the egress proxy blocks it. stdio MCP servers need nothing.
+
+# --- LangSmith tracing  (uncomment IF LANGSMITH_TRACING=true in project/.env) ---
+# LangChain auto-uploads traces here. Left denied, the SDK retries and prints
+# your LANGSMITH_API_KEY into the logs on each failure -- so either allow it
+# here, or set LANGSMITH_TRACING=false to stop the upload attempt entirely.
+# api.smith.langchain.com
