@@ -71,7 +71,7 @@ thread id), isolates workspace dependencies in a workspace-local conda env, and 
 ---
 
 ## 2. Sandboxing Strategy & Container Layout
-> **Status:** 🟡 Partial — single container + conda isolation + secret provisioning + persistent workspace built; dual-container, bubblewrap jail (built but not wired in), `HarnessProfile` binds + per-agent network policy, path guard, and resource limits **planned**. See the status matrix above.
+> **Status:** 🟡 Partial — single container + conda isolation + secret provisioning + persistent workspace built; dual-container, bubblewrap jail (built but not wired in), `HarnessProfile` binds + per-agent network policy + config-driven allowlist selection, path guard, and resource limits **planned**. See the status matrix above.
 
 ### Dual-Container Boundary
 *   **Orchestrator Container**: Hosts Deep Agents runtime and coordinates agent execution. No mount to host Docker socket (`/var/run/docker.sock`).
@@ -173,6 +173,55 @@ network: NetworkPolicy = NetworkPolicy()
 > per-domain subsets, which one shared tinyproxy cannot attribute to an in-process caller — the agent
 > must move to its own container/netns (the Dual-Container / Executor-Sandbox direction above). That
 > is the strong-isolation successor, out of scope for the in-process Tier-1 mechanism specified here.
+
+### Config-Driven Allowlist Selection
+
+> **Status:** 🔵 Planned. Makes the container-wide NetJail allowlist toggleable programmatically
+> (e.g. from a startup menu) instead of by hand-editing comments in `allowed-domains.txt` /
+> `host-services.txt`.
+
+Today an entry is enabled by *uncommenting* it. That does not scale to a UI: a menu would have to do
+string surgery on comment characters, and it conflates "not in the catalog" with "in the catalog but
+off." Split the two concerns — a static **catalog** (every known destination, human-authored) and a
+small machine-written **selection** — so a menu only ever rewrites the selection.
+
+**Hard constraint:** `run-docker` parses these files on the **host** in PowerShell / bash *before any
+container exists*, so the format must stay shell-greppable — no host-side TOML/JSON parser dependency.
+
+**Catalog** — `allowed-domains.txt` / `host-services.txt` gain an optional `@group` tag per line:
+
+```
+generativelanguage.googleapis.com   @google     # google_genai model API
+api.openai.com                      @openai     # openai model API
+github.com                          @git        # git push / fetch
+api.smith.langchain.com             @tracing    # LangSmith telemetry
+```
+
+*   A leading `#` still means **hard-off** — absent from the catalog for this run, never selectable.
+*   `@group` is the toggle unit a menu presents (one checkbox per distinct group).
+*   A line with **no** `@group` is always-on **base** (e.g. an org that must always be reachable).
+
+**Selection** — `netjail/enabled.txt`, one group per line, written by the menu (nothing else edits it):
+
+```
+google
+git
+```
+
+An env override `NETJAIL_GROUPS=google,git` is honored when set, for one-off runs; `enabled.txt` is
+the persisted default. (`enabled.txt` is runtime state — gitignore it.)
+
+**Effective allowlist** = every non-`#` catalog line whose `@group` is in the selection, **plus** every
+untagged (base) line. `run-docker` / `smoke` compute this in place of today's "every non-`#` line."
+
+**Back-compatible.** The current parser already takes the first whitespace token of each non-`#` line;
+this adds only "strip a trailing `@tag`, then filter by selection." A catalog with no `@group` tags and
+no `enabled.txt` behaves exactly as today (all uncommented lines on), so the migration is additive.
+
+This is the **run-level** companion to the per-agent `NetworkPolicy` above: groups decide what the
+*container* may reach; `NetworkPolicy` decides which subset each *agent* may reach within that. The
+startup menu is the writer of `enabled.txt`; the four scripts (`run-docker` / `smoke` × `ps1`/`sh`)
+are the readers and must stay in sync.
 
 ### Path Guard Middleware
 Pre-flight check in Python tool execution class prevents symlink escapes and directory traversal:
