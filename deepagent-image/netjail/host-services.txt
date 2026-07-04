@@ -20,3 +20,14 @@
 # To add a host service: add one line here. To revoke: delete the line.
 
 ollama  11434
+
+# lmstudio  1234
+# ^ LM Studio on the host (keyless, OpenAI-compatible). NOT special-cased like
+#   ollama: uncommenting grants reach, but you must ALSO set
+#   LMSTUDIO_BASE_URL=http://deepagent-fwd-lmstudio:1234/v1 in project/.env --
+#   nothing auto-rewrites it for jail runs.
+
+# postgres  5432
+# ^ example (planned): a Postgres the agent tests against. The daemon must
+#   listen on the docker bridge, not only 127.0.0.1. Reachable in the jail as
+#   deepagent-fwd-postgres:5432.

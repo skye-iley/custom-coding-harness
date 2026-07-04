@@ -46,6 +46,9 @@ thread id), isolates workspace dependencies in a workspace-local conda env, and 
 | 2 | `HarnessProfile` dynamic bind mounts | ⬜ Planned | Fixed bind list; no per-agent profile |
 | 2 | Path Guard middleware (`validate_path`) | ⬜ Planned | Snippet only; not in `main.py` |
 | 2 | Resource limits (`--cpus`/`--pids-limit`/mem) | ✅ Built | `run-docker.{sh,ps1}` set `--cpus`/`--memory`/`--pids-limit` (defaults 2/4g/512, overridable). Docker host-boundary control, not a sandbox |
+| 2 | NetJail — container-wide deny-all egress jail (opt-in) | ✅ Built | `run-docker -NetJail` / `NET_JAIL=1`: agent on an `--internal` net, socat host-service forwarders (`host-services.txt`) + domain-allowlisted tinyproxy egress (`allowed-domains.txt`), **fail-closed** if the proxy config doesn't load. `smoke -NetJail` exercises it. Verified on Docker Desktop; see `netjail/README.md` |
+| 2 | Per-agent network policy (`HarnessProfile.network`) | ⬜ Planned | NetJail is all-or-nothing per run; no per-agent *subtractive* egress / host-service / net-tool gating (Tier-1 env-based; §2) |
+| 2 | Config-driven allowlist selection (`@group` + `enabled.txt`) | ⬜ Planned | Entries enabled by hand-uncommenting; no group tags / machine-written selection for a startup menu (§2) |
 | 3 | Workflow engine — folder format + deterministic gates + side-effect steps | ✅ Built | `harness/workflows.py`: `workflows/<name>/` folders (`workflow.md` + `trigger.py`/`trigger.sh` gate + ordered steps), `WorkflowMiddleware`. `hooks.json` is the flat always-gate precursor, adapted into the same path |
 | 3 | Classifier-gated triggers + context-mutation / control-flow action tiers | ⬜ Planned | Deterministic predicate gates + the side-effect action tier are built (above); the classifier gate and the context-rewrite / control-flow tiers are not |
 | — | MCP tool loading (`.mcp.json`) | ✅ Built | `load_mcp_tools` (not a separate doc section) |
@@ -71,7 +74,7 @@ thread id), isolates workspace dependencies in a workspace-local conda env, and 
 ---
 
 ## 2. Sandboxing Strategy & Container Layout
-> **Status:** 🟡 Partial — single container + conda isolation + secret provisioning + persistent workspace built; dual-container, bubblewrap jail (built but not wired in), `HarnessProfile` binds, path guard, and resource limits **planned**. See the status matrix above.
+> **Status:** 🟡 Partial — single container + conda isolation + secret provisioning + persistent workspace + resource limits + opt-in container-wide NetJail (deny-all egress + allowlist) built; dual-container, bubblewrap jail (built but not wired in), `HarnessProfile` binds + per-agent network policy + config-driven allowlist selection, and path guard **planned**. See the status matrix above.
 
 ### Dual-Container Boundary
 *   **Orchestrator Container**: Hosts Deep Agents runtime and coordinates agent execution. No mount to host Docker socket (`/var/run/docker.sock`).
@@ -127,6 +130,101 @@ bwrap \
 >
 > The `HarnessProfile` selects the phase; the default for arbitrary agent commands is the
 > network-isolated execution phase.
+
+### Per-Agent Network Policy
+
+> **Status:** 🔵 Planned. Extends the container-wide NetJail (`deepagent-image/netjail/`, opt-in
+> `NET_JAIL=1` / `-NetJail`) with a *subtractive* per-agent layer.
+
+The container-wide NetJail (egress allowlist + host-service forwarders) is the **outer bound**:
+if *any* agent in the run needs a domain or host service, it is declared once in
+`allowed-domains.txt` / `host-services.txt` and the whole container can reach it. That is correct
+for the shared bound, but it means a lightweight or untrusted subagent inherits the full reach of
+the most-privileged agent. The per-agent policy narrows that reach back down for individual agents.
+
+`HarnessProfile` gains a `network` field, applied per agent when its tools are constructed:
+
+```python
+@dataclass
+class NetworkPolicy:
+    egress: bool = True                 # False → withhold proxy env → no external domains
+    host_services: set[str] | None = None  # forwarder names this agent may use; None = all, set() = none
+    allow_net_tools: bool = True        # gate http/fetch/MCP-over-network tools for this agent
+
+# on HarnessProfile:
+network: NetworkPolicy = NetworkPolicy()
+```
+
+**Enforcement is Tier-1 (app-layer, env-based).** The policy shapes the shell-tool env in
+`_agent_shell_env()` (`harness/agent.py`) and the tool list in `build_agent()`, per agent:
+
+*   `egress=False` → withhold `HTTP_PROXY` / `HTTPS_PROXY` / `http_proxy` / `https_proxy` from that
+    agent's shell env. Under NetJail the egress proxy is the **only** path out (the container is on an
+    `--internal` network with direct internet denied), so an agent with no proxy env cannot reach any
+    external domain — even ones the container allows.
+*   `host_services` → withhold the `deepagent-fwd-<name>` hostnames (and the auto-set `OLLAMA_HOST`)
+    for forwarders not in the set, so the agent cannot dial host daemons it wasn't granted.
+*   `allow_net_tools=False` → omit http/fetch and network-transport MCP tools from that agent's
+    toolset entirely.
+
+> **This is a policy, not a cage — same trust caveat as the MVP shell (`design_doc_mvp.md` §5).**
+> All subagents run in-process, sharing one network namespace and one proxy. Env-withholding stops a
+> *cooperative* agent and a prompt-injected one that only knows the documented env, but an agent that
+> hardcodes the proxy IP or a forwarder address can still reach it. It is meaningful **only while
+> `NET_JAIL=1`**: without the jail the container has open egress and withholding proxy env changes
+> nothing (direct internet still works). For a kernel-enforced per-agent boundary — or for true
+> per-domain subsets, which one shared tinyproxy cannot attribute to an in-process caller — the agent
+> must move to its own container/netns (the Dual-Container / Executor-Sandbox direction above). That
+> is the strong-isolation successor, out of scope for the in-process Tier-1 mechanism specified here.
+
+### Config-Driven Allowlist Selection
+
+> **Status:** 🔵 Planned. Makes the container-wide NetJail allowlist toggleable programmatically
+> (e.g. from a startup menu) instead of by hand-editing comments in `allowed-domains.txt` /
+> `host-services.txt`.
+
+Today an entry is enabled by *uncommenting* it. That does not scale to a UI: a menu would have to do
+string surgery on comment characters, and it conflates "not in the catalog" with "in the catalog but
+off." Split the two concerns — a static **catalog** (every known destination, human-authored) and a
+small machine-written **selection** — so a menu only ever rewrites the selection.
+
+**Hard constraint:** `run-docker` parses these files on the **host** in PowerShell / bash *before any
+container exists*, so the format must stay shell-greppable — no host-side TOML/JSON parser dependency.
+
+**Catalog** — `allowed-domains.txt` / `host-services.txt` gain an optional `@group` tag per line:
+
+```
+generativelanguage.googleapis.com   @google     # google_genai model API
+api.openai.com                      @openai     # openai model API
+github.com                          @git        # git push / fetch
+api.smith.langchain.com             @tracing    # LangSmith telemetry
+```
+
+*   A leading `#` still means **hard-off** — absent from the catalog for this run, never selectable.
+*   `@group` is the toggle unit a menu presents (one checkbox per distinct group).
+*   A line with **no** `@group` is always-on **base** (e.g. an org that must always be reachable).
+
+**Selection** — `netjail/enabled.txt`, one group per line, written by the menu (nothing else edits it):
+
+```
+google
+git
+```
+
+An env override `NETJAIL_GROUPS=google,git` is honored when set, for one-off runs; `enabled.txt` is
+the persisted default. (`enabled.txt` is runtime state — gitignore it.)
+
+**Effective allowlist** = every non-`#` catalog line whose `@group` is in the selection, **plus** every
+untagged (base) line. `run-docker` / `smoke` compute this in place of today's "every non-`#` line."
+
+**Back-compatible.** The current parser already takes the first whitespace token of each non-`#` line;
+this adds only "strip a trailing `@tag`, then filter by selection." A catalog with no `@group` tags and
+no `enabled.txt` behaves exactly as today (all uncommented lines on), so the migration is additive.
+
+This is the **run-level** companion to the per-agent `NetworkPolicy` above: groups decide what the
+*container* may reach; `NetworkPolicy` decides which subset each *agent* may reach within that. The
+startup menu is the writer of `enabled.txt`; the four scripts (`run-docker` / `smoke` × `ps1`/`sh`)
+are the readers and must stay in sync.
 
 ### Path Guard Middleware
 Pre-flight check in Python tool execution class prevents symlink escapes and directory traversal:
