@@ -66,9 +66,9 @@ thread id), isolates workspace dependencies in a workspace-local conda env, and 
 | 12 | Config-validate / `harness doctor` | ⬜ Planned | `verify` checks imports only; no pre-flight check that the registry / `.mcp.json` / `hooks.json` / `workflow.md` are coherent |
 | 12 | Headless one-shot-to-PR mode | ⬜ Planned | Non-TTY today only degrades to a single REPL turn; no structured-result batch entrypoint |
 | 12 | Provider resilience (retry/backoff + context-overflow fallback) | ⬜ Planned | No handling of 429/5xx/network blips mid-turn; no interim plan before §7 compression lands |
-| 12 | Thread / checkpoint management | ⬜ Planned | `checkpoints.sqlite` grows unbounded; no list/show/rm/prune of threads. Present/past split (fresh-by-default thread + separate on-demand archive) specced in `design_doc_milestone2.md` |
-| 12 | Deepagents-native skills & memories wiring | ⬜ Planned | `project/agents/`,`skills/`,`memories/` are baked into the image but empty + unread by `build_agent` (dead scaffolding). Accumulating on-demand "past" memory specced in `design_doc_milestone2.md` |
-| 12 | Cost / telemetry persistence | ⬜ Planned | Cost prints to stderr then vanishes; nothing on disk to feed §8 telemetry-to-PR or spend-over-time |
+| 12 | Thread / checkpoint management | ⬜ Planned | `checkpoints.sqlite` grows unbounded; no list/show/rm/prune of threads. Present/past split (fresh-by-default thread + separate on-demand archive) **and** the `harness threads`/`harness past` list/show/rm/prune lifecycle CLI specced in `design_doc_milestone2.md` (§2.6) |
+| 12 | Deepagents-native skills & memories wiring | ⬜ Planned | `project/agents/`,`skills/`,`memories/` are baked into the image but empty + unread by `build_agent` (dead scaffolding). Accumulating on-demand "past" memory specced in `design_doc_milestone2.md`, which (§2.7) **disambiguates** that bespoke `past.sqlite` archive from this native `memories/` surface and defers the native-wiring decision to here |
+| 12 | Cost / telemetry persistence | ⬜ Planned | Cost prints to stderr then vanishes; nothing on disk to feed §8 telemetry-to-PR or spend-over-time. First slice specced in `design_doc_milestone2.md` (§2.3): a per-session token/cost ledger on the `past.sqlite` `sessions` row |
 | 13 | File-read middleware (per-file context shaping) | ⬜ Planned | No read-time transform seam; `read_file` serves whole files. Planned: pipeline on the backend `read()` override; tag add/omit + in-file progressive disclosure as instances |
 
 ---
@@ -931,6 +931,9 @@ returns to the prompt without killing the session; a simulated context-overflow 
 once and is labelled interim.
 
 ### 12.5 Thread / checkpoint management
+> Specced in `design_doc_milestone2.md` §2.6 (present/past split + `harness threads`/`harness past`
+> lifecycle CLI). The design below is the source the milestone pulls from.
+
 *Why.* Conversation state persists in `<workspace>/.deepagents/checkpoints.sqlite`, keyed by
 `DEEPAGENTS_THREAD_ID`. It grows unbounded and there is no way to see what threads exist, inspect
 one, reset one, or prune old ones — resuming requires *knowing* the id. This completes the memory
@@ -949,6 +952,9 @@ wiring, `test_threads.py` against a tmp sqlite. No change to the run path.
 guarded against deleting everything without explicit confirmation.
 
 ### 12.6 Deepagents-native skills & memories — wire or document
+> `design_doc_milestone2.md` §2.7 disambiguates this native `memories/` surface from that milestone's
+> bespoke `past.sqlite` archive and defers the wire-or-document decision below to here.
+
 *Why.* The Dockerfile bakes `project/agents/`, `project/skills/`, `project/memories/` into the
 image, but they are **empty scaffolding and unread** — `build_agent` only loads `AGENTS.md`. This is
 latent intent not captured anywhere in the docs, and distinct from the §5 multi-agent funnel and the
@@ -972,6 +978,9 @@ the agent) or removed, and `deepagent-image/CLAUDE.md` states which and why — 
 scaffolding.
 
 ### 12.7 Cost / telemetry persistence
+> First slice specced in `design_doc_milestone2.md` §2.3: a per-session token/cost ledger on the
+> `past.sqlite` `sessions` row. The `usage.jsonl` sink below remains the fuller, still-planned form.
+
 *Why.* The cost tracker (§6 / M1) prints per-turn + session usage to stderr, then it is gone. There
 is no on-disk record, so there is nothing to feed §8's telemetry-to-PR, no spend-over-time, and no
 post-hoc reconciliation. This bridges the built cost tracker to the planned observability layer.
