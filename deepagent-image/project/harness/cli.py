@@ -116,6 +116,36 @@ def _stage(message: str) -> None:
     print(f"[harness] {message}", file=sys.stderr)
 
 
+def _dump_partial(agent, config: dict) -> None:
+    """On a failed turn, dump whatever the agent accumulated before the error —
+    AI reasoning, tool calls, and tool results from earlier super-steps of this
+    turn — pulled from the LangGraph checkpointer state (persisted per super-step,
+    so it holds everything up to, but not including, the node that raised).
+
+    Gated behind DEEPAGENTS_DEBUG (off by default so normal runs stay quiet), and
+    best-effort: it must never raise from inside an error handler. Note a
+    pre-generation failure (e.g. a provider 500, which fails before the model
+    emits anything) legitimately has nothing new to show beyond the input."""
+    if os.environ.get("DEEPAGENTS_DEBUG", "").strip().lower() not in _TRUTHY:
+        return
+    try:
+        snap = agent.get_state(config)
+        msgs = (getattr(snap, "values", None) or {}).get("messages", [])
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not mask the real error
+        _stage(f"partial state unavailable: {type(exc).__name__}: {exc}")
+        return
+    if not msgs:
+        _stage("partial turn state: none (failed before any step was checkpointed)")
+        return
+    _stage(f"partial turn state ({len(msgs)} msg, last few):")
+    for m in msgs[-6:]:
+        role = getattr(m, "type", "?")
+        text = str(getattr(m, "content", ""))[:200]
+        tcs = getattr(m, "tool_calls", None)
+        extra = f" tool_calls={[t.get('name') for t in tcs]}" if tcs else ""
+        print(f"  [{role}] {text}{extra}", file=sys.stderr)
+
+
 # Enable flags and API-key vars LangChain/LangSmith reads for tracing. Both the
 # current (LANGSMITH_*) and legacy (LANGCHAIN_*) names are honored by the client,
 # so the guard has to consider all of them.
@@ -345,6 +375,15 @@ def run_repl(
             _print_session_total(tracker)
             _stage("session closed")
             return 0
+        except Exception as exc:  # noqa: BLE001
+            # A turn failure (e.g. a transient provider 5xx surfaced by the model
+            # client) must not crash the container or bypass session finalization.
+            # Report it and fall through: an interactive session drops to the
+            # prompt for a retry; a non-interactive run closes cleanly below so the
+            # archive row is still finalized by main().
+            _stage(f"turn failed: {type(exc).__name__}: {exc}")
+            _dump_partial(agent, config)
+            answer = None
         if answer is not None:
             print(answer)
             print()
@@ -393,6 +432,15 @@ def run_repl(
             # Budget crossed mid-turn: end the session like /exit (§2.5).
             _stage(f"budget exceeded: {exc}")
             break
+        except Exception as exc:  # noqa: BLE001
+            # One failed turn (transient provider error, etc.) shouldn't end the
+            # persistent session: report it and keep the loop alive so the user can
+            # retry. The staged recall slice is dropped so a poison injection can't
+            # fail the same turn forever; re-issue /recall to stage it again.
+            _stage(f"turn failed: {type(exc).__name__}: {exc}")
+            _dump_partial(agent, config)
+            pending = []
+            continue
 
         if answer is not None:
             print(answer)

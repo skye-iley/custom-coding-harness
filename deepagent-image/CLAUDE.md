@@ -304,6 +304,15 @@ don't describe it as sandboxing. Verify with `docker inspect` (`NanoCpus`,
   thread. The separate `past.sqlite` archive beside it is **never** opened by the checkpointer (see
   "Present / past memory" above) — don't conflate the two DBs.
 - `project/suggestions/old/` is archived reference, not live code — ignore it.
+- **A failed turn never kills the session.** `run_repl` catches any turn exception
+  (not just `KeyboardInterrupt`/`BudgetExceeded`) — e.g. a transient provider 5xx
+  surfaced out of `agent.invoke`. Interactive: report `[harness] turn failed: …` and
+  drop back to the prompt for a retry (staged `/recall` slice is dropped). Non-TTY:
+  report and close cleanly (rc 0) so `main()` still finalizes the archive row. Set
+  `DEEPAGENTS_DEBUG=1` to also dump the turn's partial checkpointer state on failure
+  (accumulated AI reasoning / tool calls / tool results from earlier super-steps, via
+  `cli._dump_partial`); off by default. A pre-generation failure (e.g. a 500 that
+  fails before the model emits anything) legitimately shows no new state.
 - **NetJail is deny-all by default.** When you implement a feature that needs a host service
   (e.g. a daemon on the Docker host) or internet access (a model API, package registry, git
   remote), you MUST also grant it in the jail or it silently breaks under `NET_JAIL=1` /
