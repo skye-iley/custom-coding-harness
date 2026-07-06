@@ -66,8 +66,8 @@ thread id), isolates workspace dependencies in a workspace-local conda env, and 
 | 12 | Config-validate / `harness doctor` | ⬜ Planned | `verify` checks imports only; no pre-flight check that the registry / `.mcp.json` / `hooks.json` / `workflow.md` are coherent |
 | 12 | Headless one-shot-to-PR mode | ⬜ Planned | Non-TTY today only degrades to a single REPL turn; no structured-result batch entrypoint |
 | 12 | Provider resilience (retry/backoff + context-overflow fallback) | ⬜ Planned | No handling of 429/5xx/network blips mid-turn; no interim plan before §7 compression lands |
-| 12 | Thread / checkpoint management | ⬜ Planned | `checkpoints.sqlite` grows unbounded; no list/show/rm/prune of threads |
-| 12 | Deepagents-native skills & memories wiring | ⬜ Planned | `project/agents/`,`skills/`,`memories/` are baked into the image but empty + unread by `build_agent` (dead scaffolding) |
+| 12 | Thread / checkpoint management | ⬜ Planned | `checkpoints.sqlite` grows unbounded; no list/show/rm/prune of threads. Present/past split (fresh-by-default thread + separate on-demand archive) specced in `design_doc_milestone2.md` |
+| 12 | Deepagents-native skills & memories wiring | ⬜ Planned | `project/agents/`,`skills/`,`memories/` are baked into the image but empty + unread by `build_agent` (dead scaffolding). Accumulating on-demand "past" memory specced in `design_doc_milestone2.md` |
 | 12 | Cost / telemetry persistence | ⬜ Planned | Cost prints to stderr then vanishes; nothing on disk to feed §8 telemetry-to-PR or spend-over-time |
 | 13 | File-read middleware (per-file context shaping) | ⬜ Planned | No read-time transform seam; `read_file` serves whole files. Planned: pipeline on the backend `read()` override; tag add/omit + in-file progressive disclosure as instances |
 

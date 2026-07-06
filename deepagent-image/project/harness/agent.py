@@ -41,7 +41,7 @@ def _agent_shell_env() -> dict[str, str]:
     return env
 
 
-BASE_SYSTEM_PROMPT = """You are an expert coding assistant operating inside a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files."""
+BASE_SYSTEM_PROMPT = """You are an expert coding assistant operating inside a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files. You *only* check the previous sessions **if** there is some clear reference to them or clearly missing info, otherwise take the inputs as-is"""
 
 
 class _WorkspaceShellBackend(LocalShellBackend):
