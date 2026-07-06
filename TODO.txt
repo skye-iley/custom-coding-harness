@@ -1,8 +1,0 @@
-1. For checkpoints.sqlite, make it create one if not exists.
-    - should it be in build, or on run?
-2. Look into issues with readonly database by default 
-    - Line 307 in cli.py "with SqliteSaver.from_conn_string(str(checkpoint_db)) as checkpointer:"
-        - Lazily creates sqlite database but graph is not compiled before creating the agent, so nonexistant or improperly created .sqlite files cause crash.
-        - OR in linux system --> docker, issues with r/w permissions. Different user id = need to fix mount permissions.
-3. Have LangSmith tracking false by default and flip to false if key is missing (but not if key is just invalid)
-4. Figure out how to best handle ollama/local models. Run externally and connect via local URL?
