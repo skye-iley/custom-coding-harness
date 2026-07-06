@@ -101,6 +101,38 @@ def _stage(message: str) -> None:
     print(f"[harness] {message}", file=sys.stderr)
 
 
+# Enable flags and API-key vars LangChain/LangSmith reads for tracing. Both the
+# current (LANGSMITH_*) and legacy (LANGCHAIN_*) names are honored by the client,
+# so the guard has to consider all of them.
+_LANGSMITH_TRACING_VARS = ("LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2")
+_LANGSMITH_KEY_VARS = ("LANGSMITH_API_KEY", "LANGCHAIN_API_KEY")
+_TRUTHY = {"true", "1", "yes", "on"}
+
+
+def _guard_langsmith() -> None:
+    """Don't let tracing try to connect without a key.
+
+    If tracing is enabled (any enable flag truthy) but no API key is set, the
+    LangSmith client would attempt to reach the tracing endpoint on every run
+    and fail (noisy errors, and a network call the NetJail blocks anyway). Flag
+    the missing key once and disable tracing so the run continues exactly as if
+    it were off."""
+    enabled = any(
+        os.getenv(var, "").strip().lower() in _TRUTHY for var in _LANGSMITH_TRACING_VARS
+    )
+    if not enabled:
+        return
+    if any(os.getenv(var, "").strip() for var in _LANGSMITH_KEY_VARS):
+        return
+    # Enabled but keyless: disable and continue as if never set.
+    for var in _LANGSMITH_TRACING_VARS:
+        os.environ[var] = "false"
+    _stage(
+        "LangSmith tracing is enabled but LANGSMITH_API_KEY is missing — "
+        "tracing disabled for this run"
+    )
+
+
 def _is_exit_command(line: str) -> bool:
     # Matched in Python before the line ever reaches the agent, so quitting
     # never depends on the model choosing to call a tool (MVP §1a req 5).
@@ -258,6 +290,7 @@ def dispatch(argv: list[str]) -> int:
 
 def main() -> int:
     load_dotenv()
+    _guard_langsmith()
     args = parse_args()
 
     _stage("container loading")
