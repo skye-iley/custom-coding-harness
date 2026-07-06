@@ -181,6 +181,61 @@ never import `providers.py` (the import goes providers → cost, §2.4).
   keys/network) — run by `smoke` via `python3 -m pytest tests/` (needs pytest +
   harness deps; the `test` image stage has both).
 
+## Present / past memory (Milestone 2)
+
+The harness keeps **two** stores under `<workspace>/.deepagents/`, split so the
+past can never leak into context by accident:
+
+- **Present** — `checkpoints.sqlite`, the LangGraph `SqliteSaver` (one live
+  thread, auto-loaded). `--thread-id` now defaults to a **fresh `session-<ts>`
+  per run** (not the old literal `"default"`), so a new session starts fresh and
+  never silently resumes yesterday's conversation. Pass a name (`--thread-id
+  my-refactor` / `DEEPAGENTS_THREAD_ID`) to resume/create a named thread.
+- **Past** — `past.sqlite`, an accumulating archive in its **own DB the
+  checkpointer never opens**, so it is *structurally* impossible to auto-inject.
+  Owned by `harness/archive.py` (stdlib `sqlite3` only; **must not import
+  `providers.py`/`cost.py`** — the model, cost totals, and provider/model strings
+  are passed in from `cli.py`). One `sessions` row **per run** (`run_id` PK — not
+  `thread_id`, which repeats across resumes) + a full `turns` transcript.
+
+Write path: `ArchiveMiddleware` (appended in `cli.main` next to the cost tracker,
+only when enabled) taps each **completed** turn and writes it immediately, so a
+crash bounds loss to the in-flight turn. At `session.end` the row is closed with
+a summary (cheap LLM condense; deterministic first-prompt+turn-count fallback on
+keyless/offline/failed calls) and the **Milestone 1 token/cost totals** — written
+*after* the M1 session-total line prints so the ledger matches stderr, `cost_usd`
+NULL on a keyless run. This makes `past.sqlite` the on-disk spend ledger §8 wants.
+
+Read path — **recall only, never automatic** (`archive.recall(query, topic=…)`):
+- `/recall [query] [--all]` — REPL command. No query lists recent sessions; a
+  query stages a **marked** context slice injected into the next turn. The tap
+  skips recall-marked messages, so recalled context is **never re-archived**.
+- `recall_past(query, topic=None)` — agent tool (registered in `agent.py`,
+  guarded by `DEEPAGENTS_ARCHIVE`) so the model can pull prior context mid-turn.
+- **Continual topic** (`--topic`/`DEEPAGENTS_TOPIC`/`/topic <name>`): an explicit
+  operator label (NULL = untagged/global). A tagged session's recall defaults to
+  its own topic lane; `--all` widens to the whole archive. Auto-clustering of
+  topics is deferred — the `topic=` seam is where a later embedding backend slots.
+
+Knobs: `DEEPAGENTS_ARCHIVE=0` disables the archive entirely (removable contract —
+delete `archive.py`+`memadmin.py`+wiring and default `--thread-id` back to
+`"default"` and the harness is byte-for-byte Milestone 1). `DEEPAGENTS_TOPIC`
+tags the run.
+
+**Lifecycle admin (keyless, `harness/memadmin.py`, via `cli.dispatch`):**
+`harness threads list|show|rm|prune` over `checkpoints.sqlite` and `harness past
+list|show|rm|prune|topics` (with `--topic` filter) over `past.sqlite`. Deletes
+are confirm-guarded — `rm`/`prune` refuse without `--yes`. This is the **manual**
+retention surface; automatic/policy GC stays deferred.
+
+**Not deepagents' native `memories/`.** This past archive is the harness's own
+conversation ledger; Milestone 2 did **not** wire deepagents' built-in
+`memories/` store — no dead scaffolding for it exists. If a future milestone
+wants agent-authored long-term memories, that is a separate, additive store.
+
+Tests: `tests/test_archive.py` + `tests/test_memadmin.py` (host-runnable, stdlib
+only) and the M2 additions in `tests/test_cli.py`.
+
 ## Test suite layout & conventions
 
 `smoke` runs `python3 -m pytest tests/` in the `test` image stage. The suite is
@@ -243,8 +298,11 @@ don't describe it as sandboxing. Verify with `docker inspect` (`NanoCpus`,
   reach them — this allowlist only narrows the *agent's* shell.
 - `resolve_workspace` (`harness/agent.py`) uses the `DEEPAGENTS_IN_CONTAINER` env marker to detect
   the harness image — don't swap it back to filesystem sniffing (e.g. checking for `/project`).
-- Conversation state persists at `<workspace>/.deepagents/checkpoints.sqlite`, keyed by
-  `DEEPAGENTS_THREAD_ID`. Reuse the id to resume a thread.
+- Present conversation state persists at `<workspace>/.deepagents/checkpoints.sqlite`, keyed by
+  the present `thread_id`. Since Milestone 2 the id defaults to a **fresh `session-<ts>` per run**
+  (fresh context by default); set `--thread-id`/`DEEPAGENTS_THREAD_ID` to a prior id to resume that
+  thread. The separate `past.sqlite` archive beside it is **never** opened by the checkpointer (see
+  "Present / past memory" above) — don't conflate the two DBs.
 - `project/suggestions/old/` is archived reference, not live code — ignore it.
 - **NetJail is deny-all by default.** When you implement a feature that needs a host service
   (e.g. a daemon on the Docker host) or internet access (a model API, package registry, git

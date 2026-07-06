@@ -139,6 +139,42 @@ class _WorkspaceShellBackend(LocalShellBackend):
         return super()._resolve_path(key)
 
 
+def make_recall_past_tool(conn, default_topic: str | None):
+    """Build the `recall_past` agent tool over an open archive connection.
+
+    Lets the model pull prior-session context mid-turn ("what did we decide about
+    X"). Same `archive.recall()` the `/recall` REPL command uses; defaults to the
+    session's continual topic, and the model may widen by passing a topic or "".
+    Guarded by DEEPAGENTS_ARCHIVE at the call site (cli only builds it when the
+    archive is enabled). Returns None if langchain's tool decorator is unavailable
+    so a bare host still imports this module.
+    """
+    from langchain_core.tools import tool
+
+    from harness import archive
+
+    # Sentinel default so "omitted" (use the session topic) is distinguishable
+    # from an explicit None/"" (widen to the whole archive).
+    _UNSET = "\x00use-session-topic"
+
+    @tool
+    def recall_past(query: str, topic: str | None = _UNSET) -> str:
+        """Search the PAST archive of prior sessions for context relevant to `query`.
+
+        The past archive is a separate store that is NOT in your current context.
+        Call this ONLY when the task clearly references earlier work you cannot see
+        in this thread. `topic`: omit to search this session's topic lane; pass a
+        specific topic name, or an empty string, to search the whole archive.
+        Returns up to a few matching session summaries with truncated transcript
+        excerpts (the slice is capped to protect the context window).
+        """
+        scope = default_topic if topic == _UNSET else (topic or None)
+        hits = archive.recall(conn, query, topic=scope, limit=5)
+        return archive.format_hits(hits, with_turns=True) or "(no matching past sessions)"
+
+    return recall_past
+
+
 def resolve_workspace(raw: str) -> Path:
     workspace = Path(raw).expanduser().resolve()
     # The image sets DEEPAGENTS_IN_CONTAINER=1 (see Dockerfile). An explicit

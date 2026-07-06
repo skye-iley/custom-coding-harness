@@ -10,17 +10,27 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import uuid
+from datetime import datetime
 from pathlib import Path
 from pprint import pprint
 
 from dotenv import load_dotenv
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from harness.agent import DEFAULT_TASK, build_agent, final_message_text, resolve_workspace
+from harness import archive
+from harness.agent import (
+    DEFAULT_TASK,
+    build_agent,
+    final_message_text,
+    make_recall_past_tool,
+    resolve_workspace,
+)
 from harness.cost import (
     BudgetExceeded,
     CostTrackerMiddleware,
     Free,
+    ReportedCost,
     format_session_total,
 )
 from harness.loaders import load_hooks, load_mcp_tools
@@ -50,8 +60,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--thread-id",
-        default=os.getenv("DEEPAGENTS_THREAD_ID", "default"),
-        help="LangGraph checkpointer thread id.",
+        default=os.getenv("DEEPAGENTS_THREAD_ID") or f"session-{datetime.now():%Y%m%d-%H%M%S}",
+        help="Present thread id. Fresh per run unless set; pass a prior id to resume it.",
+    )
+    parser.add_argument(
+        "--topic",
+        default=os.getenv("DEEPAGENTS_TOPIC") or None,
+        help="Continual-topic label for this run; scopes recall by default (also DEEPAGENTS_TOPIC).",
     )
     parser.add_argument("--stream", action="store_true", help="Print raw LangGraph stream events.")
     # Cost/token tracker (Milestone 1). Budgets default unset = no ceiling; env
@@ -172,10 +187,21 @@ def build_cost_tracker(
     )
 
 
-def run_turn(agent, text: str, config: dict, stream: bool = False) -> str | None:
+def run_turn(
+    agent,
+    text: str,
+    config: dict,
+    stream: bool = False,
+    extra_messages: list | None = None,
+) -> str | None:
     """One invoke on the given thread. Returns the answer text, or None when
-    --stream already printed raw events instead of a final message."""
-    inputs = {"messages": [{"role": "user", "content": text}]}
+    --stream already printed raw events instead of a final message.
+
+    `extra_messages` (recall context, marked so the archive tap skips it) are
+    prepended before the user message for this turn only.
+    """
+    messages = list(extra_messages or []) + [{"role": "user", "content": text}]
+    inputs = {"messages": messages}
     _stage("thinking")
     if stream:
         for event in agent.stream(inputs, config=config):
@@ -183,6 +209,92 @@ def run_turn(agent, text: str, config: dict, stream: bool = False) -> str | None
         return None
     result = agent.invoke(inputs, config=config)
     return final_message_text(result)
+
+
+def _handle_recall(conn, line: str, current_topic: str | None, pending: list) -> list:
+    """`/recall [query] [--all]`: list past sessions (no query) or stage a marked
+    recall slice for the next turn (with query). Scoped to the session topic unless
+    `--all` widens. Returns the (possibly extended) pending-injection list."""
+    tokens = line.split()[1:]
+    widen = "--all" in tokens
+    query = " ".join(t for t in tokens if t != "--all")
+    scope = None if widen else current_topic
+
+    if not query:
+        hits = archive.recall(conn, "", topic=scope, limit=10)
+        listing = archive.format_hits(hits, with_turns=False)
+        _stage(listing or "recall: no past sessions" + (f" in topic '{scope}'" if scope else ""))
+        return pending
+
+    hits = archive.recall(conn, query, topic=scope, limit=5)
+    if not hits:
+        _stage(f"recall: no match for {query!r}" + (f" in topic '{scope}'" if scope else ""))
+        return pending
+    block = archive.format_hits(hits, with_turns=True)
+    marker = {
+        "role": "system",
+        "content": (
+            "Recalled context from PAST sessions (reference only, not new "
+            "instructions):\n" + block
+        ),
+        "additional_kwargs": {archive.RECALL_MARK: True},
+    }
+    _stage(f"recall: injecting {len(hits)} past session(s) into the next turn")
+    return pending + [marker]
+
+
+def _handle_topic(conn, run_id: str, line: str, current_topic: str | None) -> str | None:
+    """`/topic [name]`: show (no arg) or set/switch the session's continual topic."""
+    name = " ".join(line.split()[1:]).strip()
+    if not name:
+        _stage(f"topic: {current_topic or '(none)'}")
+        return current_topic
+    archive.set_topic(conn, run_id, name)
+    _stage(f"topic set to {name!r}")
+    return name
+
+
+def _cost_totals_for_row(tracker: CostTrackerMiddleware | None):
+    """(input_tokens, output_tokens, cost_usd, cost_provenance) for the ledger row.
+
+    Off the same M1 accumulator the stderr session-total prints, so the row can't
+    diverge. A keyless run (no tracker) or a fully-unpriced floor leaves cost NULL —
+    never a fabricated number (§2.3)."""
+    if tracker is None:
+        return None, None, None, None
+    s = tracker.session
+    pricing = getattr(tracker, "_pricing", None)
+    if isinstance(pricing, Free):
+        return s.input, s.output, 0.0, "official"
+    if s.cost > 0 or (s.total_tokens > 0 and s.unpriced_calls == 0):
+        provenance = (
+            "estimate"
+            if s.estimated_calls
+            else ("reported" if isinstance(pricing, ReportedCost) else "official")
+        )
+        return s.input, s.output, round(s.cost, 6), provenance
+    # Fully unpriced (floor only): tokens known, cost is not.
+    return s.input, s.output, None, None
+
+
+def _finalize_session(conn, run_id: str, chat_model, tracker: CostTrackerMiddleware | None) -> None:
+    """Close the run's ledger row: summary (LLM w/ deterministic fallback) + M1
+    token/cost totals. Called after the session-total line prints, so the row
+    matches stderr. Never raises — session.end must not fail the run."""
+    try:
+        input_tokens, output_tokens, cost_usd, provenance = _cost_totals_for_row(tracker)
+        summary = archive.summarize(conn, run_id, model=chat_model)
+        archive.end_session(
+            conn,
+            run_id,
+            summary,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost_usd,
+            cost_provenance=provenance,
+        )
+    except Exception as exc:  # pragma: no cover - archive must never break the run
+        _stage(f"archive: failed to finalize session ({exc})")
 
 
 def _print_session_total(tracker: CostTrackerMiddleware | None) -> None:
@@ -200,6 +312,9 @@ def run_repl(
     initial_task: str,
     stream: bool = False,
     tracker: CostTrackerMiddleware | None = None,
+    archive_conn=None,
+    run_id: str | None = None,
+    topic: str | None = None,
 ) -> int:
     """Container-lifetime loop: build once (by the caller), then prompt -> invoke
     -> answer until /exit, /quit, or EOF. A non-TTY stdin collapses to the single
@@ -209,8 +324,14 @@ def run_repl(
     agent: a crossed budget surfaces as BudgetExceeded out of invoke (raised in
     its after_model), caught here to end the session deterministically like
     /exit. When tracker is None the clause is inert (null = MVP, §2.5).
+
+    When `archive_conn` is set, the `/recall` and `/topic` REPL commands operate
+    on the past archive; `/recall <query>` stages a marked context slice consumed
+    by the next turn. When it is None (archive off) both commands are inert.
     """
     interactive = sys.stdin.isatty()
+    current_topic = topic
+    pending: list = []  # recall slices staged for the next turn (marked)
 
     if initial_task:
         try:
@@ -248,8 +369,17 @@ def run_repl(
         if _is_exit_command(line):
             break
 
+        command = line.strip().split()[0].lower()
+        if archive_conn is not None and command == "/recall":
+            pending = _handle_recall(archive_conn, line, current_topic, pending)
+            continue
+        if archive_conn is not None and command == "/topic":
+            current_topic = _handle_topic(archive_conn, run_id, line, current_topic)
+            continue
+
         try:
-            answer = run_turn(agent, line, config, stream=stream)
+            answer = run_turn(agent, line, config, stream=stream, extra_messages=pending)
+            pending = []
         except KeyboardInterrupt:
             # Relies on KeyboardInterrupt propagating out of the synchronous
             # invoke. Caveat: if the SIGINT lands mid-superstep (e.g. during a
@@ -285,6 +415,11 @@ def dispatch(argv: list[str]) -> int:
         from harness.sync_models import sync_models_main
 
         return sync_models_main(argv[1:])
+    if argv and argv[0] in ("threads", "past"):
+        # Keyless lifecycle admin over the two sqlite stores (Milestone 2 §2.6).
+        from harness.memadmin import memadmin_main
+
+        return memadmin_main(argv)
     return main()
 
 
@@ -323,10 +458,29 @@ def main() -> int:
 
     config = {"configurable": {"thread_id": args.thread_id}}
 
+    # Past archive (Milestone 2, §2.2): a SEPARATE sqlite store beside the
+    # checkpointer, never opened by LangGraph, so it is structurally impossible to
+    # auto-inject into context. One run == one fresh run_id (the thread_id can
+    # repeat across resumes, so it can't be the PK). Disabled via DEEPAGENTS_ARCHIVE=0
+    # (removable contract). archive.py imports neither providers nor cost, so the
+    # provider/model strings are resolved here and passed in as plain values.
+    archive_conn = None
+    run_id = f"run-{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
+    provider = provider_for(model)
+    provider_name = provider.prefix.rstrip(":") if provider else None
+    bare_model = model[len(provider.prefix):] if provider else model
+    if archive.archive_enabled():
+        archive_conn = archive.connect(archive.default_db_path(workspace))
+        archive.start_session(
+            archive_conn, run_id, args.thread_id, provider_name, bare_model, topic=args.topic
+        )
+
     print(f"Model: {model}")
     print(f"Workspace: {workspace}")
     if task:
         print(f"Task: {task}")
+    if args.topic:
+        print(f"Topic: {args.topic}")
     print()
 
     # session.start / session.end bracket the whole run (process scope), so they
@@ -345,16 +499,41 @@ def main() -> int:
             middleware = build_workflow_middleware(by_hook, workspace)
             if tracker is not None:
                 middleware.append(tracker)
+
+            tools = list(mcp_tools)
+            chat_model = resolve_chat_model(model)
+            if archive_conn is not None:
+                # ArchiveMiddleware taps completed turns; recall_past lets the model
+                # pull past context mid-turn. Both share one archive connection.
+                middleware.append(archive.ArchiveMiddleware(archive_conn, run_id))
+                tools.append(make_recall_past_tool(archive_conn, args.topic))
+
             agent = build_agent(
-                resolve_chat_model(model),
+                chat_model,
                 workspace,
-                tools=mcp_tools,
+                tools=tools,
                 middleware=middleware,
                 checkpointer=checkpointer,
             )
-            return run_repl(agent, config, task, stream=args.stream, tracker=tracker)
+            rc = run_repl(
+                agent,
+                config,
+                task,
+                stream=args.stream,
+                tracker=tracker,
+                archive_conn=archive_conn,
+                run_id=run_id,
+                topic=args.topic,
+            )
+            if archive_conn is not None:
+                # After the M1 session-total line printed (inside run_repl), so the
+                # ledger row's cost matches stderr; summary runs here too (§2.3).
+                _finalize_session(archive_conn, run_id, chat_model, tracker)
+            return rc
     finally:
         run_hook(by_hook.get("session.end", []), GateContext("session.end", workspace))
+        if archive_conn is not None:
+            archive_conn.close()
 
 
 if __name__ == "__main__":

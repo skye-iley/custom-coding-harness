@@ -1,6 +1,6 @@
 # Milestone 2 — Present / Past Memory
 
-> **Status:** ⬜ Planned. Successor to `design_doc_milestone1.md` (cost/token visibility + resource
+> **Status:** ✅ Built (`feat/milestone-2-memory`). Successor to `design_doc_milestone1.md` (cost/token visibility + resource
 > caps). Wins over `design_doc.md` for "what we build next" once Milestone 1 has landed. Lands the
 > `design_doc.md` status-matrix §12 rows **"Thread / checkpoint management"** (§12.5, via the §2.6
 > lifecycle commands) and a first slice of **"Cost / telemetry persistence"** (§12.7, via the per-session

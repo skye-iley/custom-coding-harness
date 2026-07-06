@@ -41,7 +41,9 @@ def test_parse_args_defaults(monkeypatch):
     ns = cli.parse_args()
     assert ns.task == []
     assert ns.model is None
-    assert ns.thread_id == "default"
+    # M2: no thread arg => a FRESH per-run present thread, not the literal "default".
+    assert ns.thread_id.startswith("session-")
+    assert ns.topic is None
     assert ns.workspace.endswith("workspace")
     assert ns.max_cost is None and ns.max_tokens is None
     assert ns.stream is False
@@ -219,3 +221,106 @@ def test_langsmith_disabled_stays_disabled(monkeypatch):
     # No flag set at all: guard is a no-op, does not create the var.
     cli._guard_langsmith()
     assert "LANGSMITH_TRACING" not in os.environ
+
+
+# --- Milestone 2: present/past wiring --------------------------------------
+
+archive = _load("harness.archive")
+
+
+def test_fresh_thread_id_differs_per_run(monkeypatch):
+    # Two parses with no thread arg / env should not collide on the literal
+    # "default" — each run gets its own present thread (Def-of-Done 1).
+    monkeypatch.delenv("DEEPAGENTS_THREAD_ID", raising=False)
+    _argv(monkeypatch)
+    ns = cli.parse_args()
+    assert ns.thread_id.startswith("session-")
+    assert ns.thread_id != "default"
+
+
+def test_thread_id_env_resumes_named(monkeypatch):
+    monkeypatch.setenv("DEEPAGENTS_THREAD_ID", "my-refactor")
+    _argv(monkeypatch)
+    assert cli.parse_args().thread_id == "my-refactor"
+
+
+def test_topic_from_env(monkeypatch):
+    monkeypatch.setenv("DEEPAGENTS_TOPIC", "auth")
+    _argv(monkeypatch)
+    assert cli.parse_args().topic == "auth"
+
+
+def test_topic_flag_overrides_env(monkeypatch):
+    monkeypatch.setenv("DEEPAGENTS_TOPIC", "auth")
+    _argv(monkeypatch, "--topic", "ui")
+    assert cli.parse_args().topic == "ui"
+
+
+def test_dispatch_routes_threads_and_past(monkeypatch):
+    import harness.memadmin as ma
+
+    seen = {}
+    # update() returns None => the lambda yields 0 (success), not the argv list.
+    monkeypatch.setattr(ma, "memadmin_main", lambda argv: seen.update(argv=argv) or 0)
+    monkeypatch.setattr(cli, "main", lambda: pytest.fail("agent loop must not run for admin"))
+    assert cli.dispatch(["past", "list"]) == 0
+    assert seen["argv"] == ["past", "list"]
+    seen.clear()
+    assert cli.dispatch(["threads", "rm", "x", "--yes"]) == 0
+    assert seen["argv"] == ["threads", "rm", "x", "--yes"]
+
+
+def test_handle_topic_sets_and_shows(tmp_path):
+    conn = archive.connect(tmp_path / "past.sqlite")
+    archive.start_session(conn, "run-1", "t", "p", "m")
+    new = cli._handle_topic(conn, "run-1", "/topic auth", None)
+    assert new == "auth"
+    assert archive.get_topic(conn, "run-1") == "auth"
+    # No-arg form shows current, does not change it.
+    assert cli._handle_topic(conn, "run-1", "/topic", "auth") == "auth"
+
+
+def test_handle_recall_stages_marked_slice(tmp_path):
+    conn = archive.connect(tmp_path / "past.sqlite")
+    archive.start_session(conn, "run-1", "t", "p", "m", topic=None)
+    archive.append_turn(conn, "run-1", [{"role": "user", "content": "the auth work"},
+                                        {"role": "ai", "content": "done"}])
+    archive.end_session(conn, "run-1", archive.summarize(conn, "run-1"))
+
+    pending = cli._handle_recall(conn, "/recall auth", None, [])
+    assert len(pending) == 1
+    msg = pending[0]
+    assert msg["role"] == "system"
+    assert msg["additional_kwargs"][archive.RECALL_MARK] is True
+    assert "the auth work" in msg["content"]
+
+
+def test_handle_recall_no_query_lists_without_staging(tmp_path):
+    conn = archive.connect(tmp_path / "past.sqlite")
+    archive.start_session(conn, "run-1", "t", "p", "m")
+    archive.end_session(conn, "run-1", "some summary")
+    # No query => list mode, nothing staged for injection.
+    assert cli._handle_recall(conn, "/recall", None, []) == []
+
+
+def test_cost_totals_null_without_tracker():
+    assert cli._cost_totals_for_row(None) == (None, None, None, None)
+
+
+def test_cost_totals_free_is_official_zero():
+    tracker = cli.build_cost_tracker("unknown:x", 1.0, None)  # budget => tracker built, Free pricing
+    tracker.session.input, tracker.session.output = 12, 3
+    inp, out, usd, prov = cli._cost_totals_for_row(tracker)
+    assert (inp, out, usd, prov) == (12, 3, 0.0, "official")
+
+
+def test_cost_totals_unpriced_floor_is_null(monkeypatch):
+    tracker = cli.build_cost_tracker("unknown:x", 1.0, None)
+    tracker.session.input = 10
+    tracker.session.unpriced_calls = 1  # a call we couldn't price
+    inp, out, usd, prov = cli._cost_totals_for_row(tracker)
+    # Free pricing short-circuits to official 0 only when pricing is Free; here we
+    # force the unpriced branch by swapping pricing to a non-Free stub.
+    monkeypatch.setattr(tracker, "_pricing", object())
+    inp, out, usd, prov = cli._cost_totals_for_row(tracker)
+    assert usd is None and prov is None
