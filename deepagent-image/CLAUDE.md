@@ -232,6 +232,15 @@ don't describe it as sandboxing. Verify with `docker inspect` (`NanoCpus`,
 
 - Secrets live in `project/.env` only. Don't commit them, don't `COPY` them into the image, don't
   echo them into logs.
+- **The agent's shell tool sees an env allowlist, not the harness env** (`_agent_shell_env`,
+  `harness/agent.py`): PATH/HOME/CONDA_*/MAMBA_*/GIT_*/locale + common shell vars pass; everything
+  else — provider keys and any other var — is withheld so a prompt-injected agent can't `printenv`
+  a credential onto the host-mounted workspace. It's an allowlist, not a secret-suffix denylist —
+  adding a feature that needs a new var in the *agent's* shell means adding it to
+  `_SHELL_ENV_ALLOW_EXACT`/`_SHELL_ENV_ALLOW_PREFIXES`, or telling the user to set
+  `DEEPAGENTS_SHELL_ENV_ALLOW` (comma/space list; trailing `*` = prefix). Host-side workflow
+  steps (git-branch/git-pr) use the full env via `GateContext.as_env`, so `GH_TOKEN` etc. still
+  reach them — this allowlist only narrows the *agent's* shell.
 - `resolve_workspace` (`harness/agent.py`) uses the `DEEPAGENTS_IN_CONTAINER` env marker to detect
   the harness image — don't swap it back to filesystem sniffing (e.g. checking for `/project`).
 - Conversation state persists at `<workspace>/.deepagents/checkpoints.sqlite`, keyed by

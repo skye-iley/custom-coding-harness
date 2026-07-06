@@ -15,27 +15,73 @@ from harness.providers import PROVIDERS
 
 DEFAULT_TASK = "inspect workspace, summarize structure."
 
-# Suffixes that mark an env var as a credential the agent's shell must not see.
-# Provider key names come from the PROVIDERS registry (single source of truth);
-# these suffixes catch any other secret the harness env happens to carry.
+# Env var allowlist for the agent's shell tool. The workspace is a host
+# bind-mount, so a prompt-injected agent that could read a credential via
+# `printenv` could write it to host disk (secrets hard-rule). Rather than guess
+# which vars are *secret* (a denylist misses any oddly-named key, e.g. GITHUB_PAT),
+# we pass through only vars known to be *safe* — everything else is dropped.
+# This replaces inherit_env=True, whose merge semantics would leak the whole env.
+#
+# Exact names: ordinary shell/session vars the agent's commands rely on.
+_SHELL_ENV_ALLOW_EXACT = frozenset({
+    "PATH", "HOME", "PWD", "OLDPWD", "SHELL", "SHLVL",
+    "USER", "LOGNAME", "HOSTNAME", "TERM",
+    "LANG", "LANGUAGE", "TZ",
+    "TMPDIR", "TMP", "TEMP",
+    "EDITOR", "VISUAL", "PAGER",
+    "COLUMNS", "LINES",
+})
+
+# Name prefixes whose whole family is allowed: locale (LC_*), the workspace
+# conda/mamba stack (CONDA_*/MAMBA_* — the two-stack env the agent builds in),
+# and git config (GIT_*). None of these families carry credentials in practice;
+# the secret-suffix backstop below still guards against a stray one.
+_SHELL_ENV_ALLOW_PREFIXES = ("LC_", "CONDA_", "MAMBA_", "GIT_")
+
+# User extension knob: a comma/space-separated list of additional vars to pass
+# through. A bare name is an exact allow; a trailing '*' makes it a prefix
+# (e.g. "MYAPP_URL,MYAPP_*"). Set it in project/.env like any other DEEPAGENTS_*.
+_SHELL_ENV_ALLOW_VAR = "DEEPAGENTS_SHELL_ENV_ALLOW"
+
+# Backstop applied to *prefix* and default matches only: a var that merely sits
+# under an allowed prefix must still not leak if it looks like a credential.
+# An explicitly user-named exact var overrides this (naming it is opt-in intent).
 _SECRET_ENV_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD")
 
 
-def _agent_shell_env() -> dict[str, str]:
-    """Env handed to the agent's shell tool.
+def _user_allowlist() -> tuple[frozenset[str], tuple[str, ...]]:
+    """Parse `DEEPAGENTS_SHELL_ENV_ALLOW` into (exact names, prefixes)."""
+    exact: set[str] = set()
+    prefixes: list[str] = []
+    for item in os.getenv(_SHELL_ENV_ALLOW_VAR, "").replace(",", " ").split():
+        if item.endswith("*"):
+            prefixes.append(item[:-1])
+        else:
+            exact.add(item)
+    return frozenset(exact), tuple(prefixes)
 
-    Starts from the harness process env so PATH/HOME/CONDA_*/GIT_* still work,
-    but strips provider credentials. The workspace is a host bind-mount, so a
-    prompt-injected agent that could read ANTHROPIC_API_KEY/OPENAI_API_KEY/etc.
-    via `printenv` could write them to host disk — scrub the keys before they
-    ever reach the shell (secrets hard-rule). This replaces inherit_env=True,
-    whose merge semantics would otherwise leak the whole environment.
+
+def _agent_shell_env() -> dict[str, str]:
+    """Env handed to the agent's shell tool — an allowlist (see above).
+
+    A var passes if it is an allowed exact name or sits under an allowed prefix
+    (defaults plus anything the user added via DEEPAGENTS_SHELL_ENV_ALLOW).
+    Provider credentials and secret-suffixed vars are still dropped even when a
+    prefix would admit them, unless the user named that exact var explicitly.
     """
+    user_exact, user_prefixes = _user_allowlist()
+    allow_prefixes = _SHELL_ENV_ALLOW_PREFIXES + user_prefixes
     provider_keys = {p.api_key_env for p in PROVIDERS}
+
     env: dict[str, str] = {}
     for key, value in os.environ.items():
-        if key in provider_keys or key.endswith(_SECRET_ENV_SUFFIXES):
+        if key in user_exact:
+            env[key] = value  # explicit opt-in wins over the secret backstop
             continue
+        if key not in _SHELL_ENV_ALLOW_EXACT and not key.startswith(allow_prefixes):
+            continue
+        if key in provider_keys or key.endswith(_SECRET_ENV_SUFFIXES):
+            continue  # don't leak a credential that merely matched a prefix
         env[key] = value
     env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
     return env
