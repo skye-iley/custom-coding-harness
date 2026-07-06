@@ -10,6 +10,7 @@ the harness byte-for-byte MVP when nothing needs tracking (§2.5).
 
 from __future__ import annotations
 
+import os
 import sys
 
 import pytest
@@ -180,3 +181,41 @@ def test_tracker_built_for_energy_only_model(tmp_path, monkeypatch):
     monkeypatch.setattr(providers, "PROVIDERS", providers._load_providers(tmp_path))
     # Free pricing but an energy estimate -> still tracked.
     assert cli.build_cost_tracker("local:m1", None, None) is not None
+
+
+# --- LangSmith tracing guard -----------------------------------------------
+
+def _clear_langsmith(monkeypatch):
+    for var in (*cli._LANGSMITH_TRACING_VARS, *cli._LANGSMITH_KEY_VARS):
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_langsmith_enabled_without_key_is_disabled(monkeypatch):
+    _clear_langsmith(monkeypatch)
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    cli._guard_langsmith()
+    # Enabled but keyless -> flag disables tracing rather than connect.
+    assert os.environ["LANGSMITH_TRACING"] == "false"
+
+
+def test_langsmith_legacy_flag_without_key_is_disabled(monkeypatch):
+    _clear_langsmith(monkeypatch)
+    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "1")
+    cli._guard_langsmith()
+    assert os.environ["LANGCHAIN_TRACING_V2"] == "false"
+
+
+def test_langsmith_enabled_with_key_is_left_on(monkeypatch):
+    _clear_langsmith(monkeypatch)
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "ls-secret")
+    cli._guard_langsmith()
+    # Key present -> guard leaves tracing untouched.
+    assert os.environ["LANGSMITH_TRACING"] == "true"
+
+
+def test_langsmith_disabled_stays_disabled(monkeypatch):
+    _clear_langsmith(monkeypatch)
+    # No flag set at all: guard is a no-op, does not create the var.
+    cli._guard_langsmith()
+    assert "LANGSMITH_TRACING" not in os.environ
