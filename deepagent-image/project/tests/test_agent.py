@@ -58,29 +58,60 @@ def test_resolve_workspace_in_container_rejects_lookalike_prefix(monkeypatch):
 
 # --- _agent_shell_env (credential scrub before the shell tool) -------------
 
-def test_agent_shell_env_strips_secrets_keeps_normal(monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret")
-    monkeypatch.setenv("SOME_TOKEN", "t")
-    monkeypatch.setenv("DB_PASSWORD", "p")
-    monkeypatch.setenv("AWS_SECRET", "s")
-    monkeypatch.setenv("EDITOR", "vim")  # ordinary var must survive
+def test_agent_shell_env_allowlists_known_vars_drops_the_rest(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret")  # secret suffix
+    monkeypatch.setenv("SOME_TOKEN", "t")                  # secret suffix
+    monkeypatch.setenv("DB_PASSWORD", "p")                 # secret suffix
+    monkeypatch.setenv("GITHUB_PAT", "ghp_x")              # secret, no suffix
+    monkeypatch.setenv("RANDOM_UNLISTED", "x")             # not a secret, not allowed
+    monkeypatch.setenv("EDITOR", "vim")                    # allowlisted exact
+    monkeypatch.setenv("CONDA_PREFIX", "/opt/conda")       # allowlisted prefix
+    monkeypatch.setenv("LC_ALL", "C.UTF-8")                # allowlisted prefix
     env = agent._agent_shell_env()
-    assert "ANTHROPIC_API_KEY" not in env
-    assert "SOME_TOKEN" not in env
-    assert "DB_PASSWORD" not in env
-    assert "AWS_SECRET" not in env
+    # Anything not on the allowlist is gone — including a secret a suffix
+    # denylist would have missed (GITHUB_PAT) and a benign-but-unlisted var.
+    for dropped in ("ANTHROPIC_API_KEY", "SOME_TOKEN", "DB_PASSWORD", "GITHUB_PAT", "RANDOM_UNLISTED"):
+        assert dropped not in env
     assert env.get("EDITOR") == "vim"
+    assert env.get("CONDA_PREFIX") == "/opt/conda"
+    assert env.get("LC_ALL") == "C.UTF-8"
 
 
 def test_agent_shell_env_strips_registry_provider_keys(monkeypatch):
-    # Every provider's api_key_env must be scrubbed even if it didn't match a
-    # suffix. OPENAI_API_KEY is a registry key (and also *_API_KEY), so it's gone.
+    # Every provider's api_key_env must be scrubbed. OPENAI_API_KEY isn't on the
+    # allowlist anyway, but the explicit provider-key drop guards a user who
+    # allowlists a prefix that would otherwise admit it.
     monkeypatch.setenv("OPENAI_API_KEY", "sk-x")
     assert "OPENAI_API_KEY" not in agent._agent_shell_env()
 
 
+def test_agent_shell_env_user_can_add_exact_var(monkeypatch):
+    # A bare name in DEEPAGENTS_SHELL_ENV_ALLOW is passed through, even though it
+    # isn't a default and even though it looks like a secret — naming it exactly
+    # is explicit opt-in.
+    monkeypatch.setenv("MYAPP_URL", "https://x")
+    monkeypatch.setenv("MYAPP_API_KEY", "opted-in")
+    monkeypatch.setenv(agent._SHELL_ENV_ALLOW_VAR, "MYAPP_URL, MYAPP_API_KEY")
+    env = agent._agent_shell_env()
+    assert env.get("MYAPP_URL") == "https://x"
+    assert env.get("MYAPP_API_KEY") == "opted-in"
+
+
+def test_agent_shell_env_user_prefix_still_backstops_secrets(monkeypatch):
+    # A trailing '*' adds a prefix. Ordinary matches pass, but a credential that
+    # merely sits under that prefix is still dropped (only an exact name bypasses
+    # the backstop).
+    monkeypatch.setenv("MYAPP_REGION", "us")
+    monkeypatch.setenv("MYAPP_TOKEN", "leaky")
+    monkeypatch.setenv(agent._SHELL_ENV_ALLOW_VAR, "MYAPP_*")
+    env = agent._agent_shell_env()
+    assert env.get("MYAPP_REGION") == "us"
+    assert "MYAPP_TOKEN" not in env
+
+
 def test_agent_shell_env_always_sets_path(monkeypatch):
     monkeypatch.delenv("PATH", raising=False)
+    monkeypatch.delenv(agent._SHELL_ENV_ALLOW_VAR, raising=False)
     assert agent._agent_shell_env()["PATH"]  # falls back to a sane default
 
 
