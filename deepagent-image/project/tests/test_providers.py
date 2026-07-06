@@ -288,3 +288,37 @@ def test_resolve_openai_compatible_builds_client(tmp_path, monkeypatch):
     monkeypatch.delenv("COMPAT_API_KEY", raising=False)  # keyless -> placeholder key
     client = providers.resolve_chat_model("compat:m1")
     assert client.model_name == "m1"  # prefix stripped for the wire call
+
+
+# --- init_summary_model: always invokable (archive.summarize needs .invoke) --
+
+def test_init_summary_model_native_calls_init_chat_model(tmp_path, monkeypatch):
+    # Native providers pass through resolve_chat_model as a bare string; the
+    # summary model must instead be a real client, so init_chat_model is invoked
+    # with that spec (the same "<provider>:<model>" create_deep_agent uses).
+    lcm = pytest.importorskip("langchain.chat_models")
+    _write_provider(tmp_path, "openai", api_key_env="OPENAI_API_KEY",
+                    models=[("gpt", "")])
+    monkeypatch.setattr(providers, "PROVIDERS", providers._load_providers(tmp_path))
+    seen = {}
+    sentinel = object()
+
+    def fake_init(spec, *a, **k):
+        seen["spec"] = spec
+        return sentinel
+
+    monkeypatch.setattr(lcm, "init_chat_model", fake_init)
+    assert providers.init_summary_model("openai:gpt") is sentinel
+    assert seen["spec"] == "openai:gpt"
+
+
+def test_init_summary_model_openai_compatible_returns_client(tmp_path, monkeypatch):
+    # OpenAI-compatible providers already resolve to an invokable client — no
+    # init_chat_model round-trip needed.
+    pytest.importorskip("langchain_openai")
+    _write_provider(tmp_path, "compat", api_key_env="COMPAT_API_KEY",
+                    base_url_env="COMPAT_BASE_URL", models=[("m1", "")])
+    monkeypatch.setattr(providers, "PROVIDERS", providers._load_providers(tmp_path))
+    monkeypatch.setenv("COMPAT_BASE_URL", "http://localhost:1234/v1")
+    client = providers.init_summary_model("compat:m1")
+    assert hasattr(client, "invoke") and not isinstance(client, str)

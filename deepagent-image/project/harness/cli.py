@@ -34,7 +34,13 @@ from harness.cost import (
     format_session_total,
 )
 from harness.loaders import load_hooks, load_mcp_tools
-from harness.providers import choose_model, provider_for, resolve_chat_model, validate_credentials
+from harness.providers import (
+    choose_model,
+    init_summary_model,
+    provider_for,
+    resolve_chat_model,
+    validate_credentials,
+)
 from harness.workflows import (
     GateContext,
     build_workflow_middleware,
@@ -576,7 +582,12 @@ def main() -> int:
             if archive_conn is not None:
                 # After the M1 session-total line printed (inside run_repl), so the
                 # ledger row's cost matches stderr; summary runs here too (§2.3).
-                _finalize_session(archive_conn, run_id, chat_model, tracker)
+                # summarize() needs an *invokable* model — chat_model is a bare
+                # string for native providers (create_deep_agent resolves it, but a
+                # str has no .invoke), so hand finalize a real client.
+                _finalize_session(
+                    archive_conn, run_id, init_summary_model(model), tracker
+                )
             return rc
     finally:
         run_hook(by_hook.get("session.end", []), GateContext("session.end", workspace))

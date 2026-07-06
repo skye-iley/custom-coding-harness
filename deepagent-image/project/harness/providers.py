@@ -234,3 +234,20 @@ def resolve_chat_model(model: str):
             api_key=os.getenv(provider.api_key_env) or "not-needed",
         )
     return model
+
+
+def init_summary_model(model: str):
+    """Return an *invokable* chat model (has `.invoke`) for the given spec.
+
+    resolve_chat_model returns a bare string for native providers — fine for
+    create_deep_agent, which calls init_chat_model itself, but archive.summarize
+    needs a real client. OpenAI-compatible providers already resolve to a
+    ChatOpenAI object; native providers are initialized here via the same
+    init_chat_model path create_deep_agent uses (the "<provider>:<model>" prefix
+    doubles as init_chat_model's provider hint)."""
+    resolved = resolve_chat_model(model)
+    if not isinstance(resolved, str):
+        return resolved
+    from langchain.chat_models import init_chat_model
+
+    return init_chat_model(resolved)
