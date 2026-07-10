@@ -56,6 +56,33 @@ def test_append_and_recall_round_trip(tmp_path):
     assert "login" in hits[0].summary
 
 
+def test_recall_from_other_thread(tmp_path):
+    # The recall_past agent tool runs on a langgraph worker thread while the
+    # connection was opened on the main thread. connect() must open with
+    # check_same_thread=False or sqlite3 raises ProgrammingError cross-thread.
+    import threading
+
+    conn = _db(tmp_path)
+    archive.start_session(conn, "run-1", "thread-a", "openai", "gpt", topic=None)
+    archive.append_turn(conn, "run-1", _turn("the secret word is GIRAFFE", "ok"))
+    archive.end_session(conn, "run-1", archive.summarize(conn, "run-1"))
+
+    result: dict = {}
+
+    def _worker():
+        try:
+            result["hits"] = archive.recall(conn, "GIRAFFE")
+        except Exception as exc:  # pragma: no cover - failure path asserts below
+            result["error"] = exc
+
+    t = threading.Thread(target=_worker)
+    t.start()
+    t.join()
+
+    assert "error" not in result, f"cross-thread recall raised: {result.get('error')!r}"
+    assert [h.run_id for h in result["hits"]] == ["run-1"]
+
+
 def test_recall_empty_archive_returns_nothing(tmp_path):
     # The past never auto-loads: an unqueried / empty archive yields nothing.
     assert archive.recall(_db(tmp_path), "anything") == []

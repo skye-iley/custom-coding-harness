@@ -90,7 +90,13 @@ def connect(db_path: Path | str) -> sqlite3.Connection:
     """Open (creating parent dir + schema) the archive DB with row access."""
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
+    # check_same_thread=False: the single connection is created on the main
+    # thread (cli.main) but the recall_past agent tool reads it from a langgraph
+    # worker thread. Access stays effectively serialized — the agent runs one
+    # turn at a time, so no two threads touch the connection concurrently — but
+    # sqlite3's default same-thread guard would still reject the cross-thread
+    # read. This mirrors how langgraph's own SqliteSaver opens its DB.
+    conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
     conn.commit()
