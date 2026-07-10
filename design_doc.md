@@ -50,7 +50,7 @@ thread id), isolates workspace dependencies in a workspace-local conda env, and 
 | 2 | Per-agent network policy (`HarnessProfile.network`) | ⬜ Planned | NetJail is all-or-nothing per run; no per-agent *subtractive* egress / host-service / net-tool gating (Tier-1 env-based; §2) |
 | 2 | Config-driven allowlist selection (`@group` + `enabled.txt`) | ⬜ Planned | Entries enabled by hand-uncommenting; no group tags / machine-written selection for a startup menu (§2) |
 | 3 | Workflow engine — folder format + deterministic gates + side-effect steps | ✅ Built | `harness/workflows.py`: `workflows/<name>/` folders (`workflow.md` + `trigger.py`/`trigger.sh` gate + ordered steps), `WorkflowMiddleware`. `hooks.json` is the flat always-gate precursor, adapted into the same path |
-| 3 | Classifier-gated triggers + context-mutation / control-flow action tiers | ⬜ Planned | Deterministic predicate gates + the side-effect action tier are built (above); the classifier gate and the context-rewrite / control-flow tiers are not |
+| 3 | Classifier-gated triggers + context-mutation / control-flow / pause (HITL) action tiers | ⬜ Planned | Deterministic predicate gates + the side-effect action tier are built (above); the classifier gate and the context-rewrite / control-flow / human-in-the-loop pause tiers are not. Pause tier is the deterministic half of §9 HITL |
 | — | MCP tool loading (`.mcp.json`) | ✅ Built | `load_mcp_tools` (not a separate doc section) |
 | 3 | Git branch/commit/push/PR lifecycle | ✅ Built | `workflows/git-branch` (session.start) + `workflows/git-pr` (session.end): branch → persist session id → commit/push → `gh pr create`, never auto-merged. Safe no-op without a repo/remote/`GH_TOKEN` |
 | 5 | Multi-agent funnel (classifier→orchestrator→worker) | ⬜ Planned | Single `create_deep_agent` today |
@@ -59,16 +59,16 @@ thread id), isolates workspace dependencies in a workspace-local conda env, and 
 | 8 | Observability, telemetry, telemetry-to-PR | ⬜ Planned | No trace/metrics files written |
 | 9 | In-container interactive REPL (multi-turn session) | 🟡 MVP | Persistent `docker run -it` prompt loop in `harness/cli.py`: multi-turn on one `thread_id`, deterministic `/exit`, stage output — see `design_doc_mvp.md` §1a |
 | 9 | Host CLI frontend (Typer/Rich) + TUI | ⬜ Planned | No `harness` CLI/TUI; interactive use is the in-container REPL above |
-| 9 | HITL autonomy config (`.harness-config.yaml`) | ⬜ Planned | — |
+| 9 | Human-in-the-loop (interrupt spine + `ask_human` tool + `.harness-config.yaml`) | ⬜ Planned | LangGraph `interrupt()` over the **built** SqliteSaver checkpoint (row above); one human channel, 3 trigger sources — deterministic pause-workflow (§3 tier), agent `ask_human` tool, system events (missing-price/provider-error/permission). See §9 |
 | 10 | Security verification test suite | ⬜ Planned | Risk analysis is design-only |
 | 11 | Future extensions & roadmap | 🔬 Research | By definition |
 | 12 | CI pipeline for the harness repo | ⬜ Planned | Suite exists (`pytest`/`verify`/`smoke`) but nothing runs it on push/PR; no `.github/workflows/` |
 | 12 | Config-validate / `harness doctor` | ⬜ Planned | `verify` checks imports only; no pre-flight check that the registry / `.mcp.json` / `hooks.json` / `workflow.md` are coherent |
 | 12 | Headless one-shot-to-PR mode | ⬜ Planned | Non-TTY today only degrades to a single REPL turn; no structured-result batch entrypoint |
 | 12 | Provider resilience (retry/backoff + context-overflow fallback) | ⬜ Planned | No handling of 429/5xx/network blips mid-turn; no interim plan before §7 compression lands |
-| 12 | Thread / checkpoint management | ⬜ Planned | `checkpoints.sqlite` grows unbounded; no list/show/rm/prune of threads. Present/past split (fresh-by-default thread + separate on-demand archive) **and** the `harness threads`/`harness past` list/show/rm/prune lifecycle CLI specced in `design_doc_milestone2.md` (§2.6) |
-| 12 | Deepagents-native skills & memories wiring | ⬜ Planned | `project/agents/`,`skills/`,`memories/` are baked into the image but empty + unread by `build_agent` (dead scaffolding). Accumulating on-demand "past" memory specced in `design_doc_milestone2.md`, which (§2.7) **disambiguates** that bespoke `past.sqlite` archive from this native `memories/` surface and defers the native-wiring decision to here |
-| 12 | Cost / telemetry persistence | ⬜ Planned | Cost prints to stderr then vanishes; nothing on disk to feed §8 telemetry-to-PR or spend-over-time. First slice specced in `design_doc_milestone2.md` (§2.3): a per-session token/cost ledger on the `past.sqlite` `sessions` row |
+| 12 | Thread / checkpoint management | 🟡 Partial | **Shipped in Milestone 2** (`design_doc_milestone2.md`): fresh-by-default present thread + separate on-demand `past.sqlite` archive, **and** the `harness threads`/`harness past` list/show/rm/prune lifecycle CLI (§2.6). Automatic/policy-based GC still deferred (manual prune only) |
+| 12 | Deepagents-native skills & memories wiring | 🟡 Partial | **Milestone 2** shipped the accumulating on-demand "past" archive (`past.sqlite`) and (§2.7) **disambiguates** it from deepagents' native `memories/` surface — no dead scaffolding now implies M2 wired the latter. `project/agents/`,`skills/`,`memories/` native wiring (Option A/B) remains deferred to §12.6 |
+| 12 | Cost / telemetry persistence | 🟡 Partial | **Milestone 2** (§2.3) shipped the first slice: a per-session token/cost ledger on the `past.sqlite` `sessions` row (provenance-tagged, NULL when keyless). §8 telemetry-to-PR export of that ledger still deferred |
 | 13 | File-read middleware (per-file context shaping) | ⬜ Planned | No read-time transform seam; `read_file` serves whole files. Planned: pipeline on the backend `read()` override; tag add/omit + in-file progressive disclosure as instances |
 
 ---
@@ -344,6 +344,14 @@ first-party workflows on this one engine. A workflow is fully described by three
         — rather than the whole outgoing context.)
     *   **Control-flow** *(planned)* — alter dispatch: select/swap the model (model routing),
         short-circuit a turn, or veto a tool call.
+    *   **Human-in-the-loop (pause)** *(planned)* — suspend the run at this hook point, surface a
+        structured prompt to the human channel, and block until a typed reply returns, which the step
+        routes on (approve / deny / edit). Deterministic here: the **gate** decides *whether* to pause
+        (`always`, or a predicate — `*.env` touched, cost over budget, dirty `git status`), so a
+        workflow encodes "always confirm before X" with no model in the loop. Built on LangGraph
+        `interrupt()` + the SqliteSaver checkpoint, so the suspended turn is durable and resumable
+        across process restarts. This is the deterministic, workflow-bound half of HITL (§9); the
+        agent-initiated half is the `ask_human` tool.
 
 > **Built vs. planned.** Built: the folder format, the **deterministic** gate layer (predicate —
 > `trigger.py`/`trigger.sh`), and the **side-effect** action tier, on all seven events. Planned: the
@@ -761,14 +769,73 @@ Sandbox Stream and Cost Ticker panels below.
 *   **Pre-Flight Approval**: For `CRITICAL` tasks, the CLI intercepts the orchestrator's plan and requires a `Y/N` confirmation before the agent executes commands in the sandbox.
 *   **Manual Override**: Capability to manually trigger a `cloud-fallback` if the local orchestrator is stuck in a loop.
 
-#### HITL Customized Settings
-Users can configure their level of autonomy via a `.harness-config.yaml` file:
-*   **`autonomy_level`**:
-    *   `strict`: Human approval required for *every* tool call (high safety, low speed).
-    *   `guided`: Approval required only for `CRITICAL` tasks and filesystem deletions (balanced).
-    *   `autonomous`: Human approval only required for the final PR submission (high speed, lower safety).
-*   **`review_triggers`**: Customizable list of keywords or file patterns that force a human intervention regardless of the `autonomy_level` (e.g., `*.env`, `auth_logic.py`).
-*   **`interruption_policy`**: Define if the agent should pause and wait for input or continue in a "shadow mode" and present a batch of changes for review later.
+### Human-in-the-Loop (HITL)
+> **Status:** ⬜ Planned.
+
+HITL is not a feature bolted onto the CLI — it is **one interrupt spine** with three trigger
+sources feeding a single **human channel**. The spine is LangGraph's `interrupt()` over the
+SqliteSaver checkpoint already in place (status row: "Conversation checkpoint"): any point in the
+graph can suspend, persist the exact state to `checkpoints.sqlite`, surface a structured prompt,
+and resume on the human's typed reply — durably, across process restarts. The human channel is
+wherever the human is: the in-container REPL prompt today (the MVP loop above), the Rich prompt /
+batched review panel in the host TUI later.
+
+An **interrupt request** is a small structured object —
+`{kind, prompt, options, context, default, timeout_policy}`, `kind ∈ {approve, choose, input,
+resolve}`. `options` carries the approve/deny pair or a fixed choice set; `context` carries the
+salient state (the diff, the command, the price gap). The human's response resumes the graph and,
+for a workflow step, is the value the step routes on.
+
+**Three trigger sources, one spine:**
+
+1.  **Deterministic — workflow-bound (the pause action tier, §3).** A workflow whose gate is a
+    predicate (`always` or a condition) and whose action is *pause*. The gate decides *whether* to
+    interrupt with no model in the loop: `always` before a PR push, or a predicate — a
+    `review_triggers` path match (`*.env`, `auth_logic.py`), a dirty `git status`, a turn/cost
+    counter over threshold. This is where `autonomy_level` lives: the presets below just install
+    different sets of these pause workflows. Fires at any of the hook points — most usefully
+    `tool.start` (gate a tool call) and `session.end` (gate the PR).
+2.  **Agent-initiated — the `ask_human` tool.** A Deep Agents tool the agent calls when *it* decides
+    it is blocked: ambiguous requirements, a missing credential, a design fork it should not guess.
+    Same interrupt object, same channel; the difference is the model chooses to raise it rather than
+    a predicate. Non-deterministic by design — the agent's escape hatch, complementary to the
+    deterministic gates.
+3.  **System-event — raised by the harness itself.** Existing failure/uncertainty points promote to
+    an interrupt instead of a silent log or a hard crash:
+    *   **Missing price warning** (Milestone 1). When a model has no `[pricing]` entry the cost
+        ledger records NULL and today proceeds keyless. With HITL on, an interrupt surfaces *"model
+        X has no price — continue untracked / abort / enter a rate?"* before spend accrues.
+    *   **Provider errors** (§12 resilience). A 429/5xx/context-overflow that exhausts retry/backoff
+        raises to the human — *"retry / switch provider / abort"* — instead of failing the turn.
+    *   **Permission / security gates** (§2, §10). A path-guard rejection, a NetJail-blocked egress,
+        or a bwrap denial becomes a resolvable prompt — *"this command wants to write outside
+        /workspace — allow once / deny"* — rather than an opaque failure.
+
+**Autonomy presets & policy.** Users configure defaults via `.harness-config.yaml`:
+*   **`autonomy_level`** — preset pause-workflow set:
+    *   `strict`: human approval for *every* tool call (high safety, low speed).
+    *   `guided`: approval only for `CRITICAL` tasks and filesystem deletions (balanced).
+    *   `autonomous`: approval only for the final PR submission (high speed, lower safety).
+*   **`review_triggers`** — keyword/path patterns that force a pause regardless of `autonomy_level`.
+*   **`interruption_policy`** — how a pause presents: **blocking** (stop and wait at the interrupt
+    point) or **shadow** (agent continues in a change-batched mode; all pending interrupts collect
+    into one review pass at `agent.end`/`session.end`).
+*   **`system_interrupts`** — which harness events (source 3) raise vs. log/crash.
+
+Each interrupt request may carry a `timeout_policy` (fall through to `default`, or hold) so an
+unattended headless run (§12) has defined behavior when no human is present.
+
+```yaml
+autonomy_level: guided            # strict | guided | autonomous — preset pause-workflow set
+review_triggers:                  # force a pause regardless of level
+  - "*.env"
+  - "auth_logic.py"
+interruption_policy: blocking     # blocking | shadow
+system_interrupts:                # which harness events raise (vs. log/crash)
+  missing_price: true
+  provider_error: true
+  permission_denied: true
+```
 
 ---
 

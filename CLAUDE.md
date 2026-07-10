@@ -10,7 +10,11 @@ secret-safe containers.
 - `design_doc_milestone1.md` — the planned successor to the MVP (cost/token visibility + resource
   caps). Wins over `design_doc.md` for "what we build next."
 - `design_doc_milestone2.md` — successor to Milestone 1: present/past memory (fresh-by-default
-  thread + a separate, on-demand archive that accumulates across sessions). Spec, not built.
+  thread + a separate, on-demand archive that accumulates across sessions). **Built** — see the
+  "Present / past memory" section in `deepagent-image/CLAUDE.md`.
+- `design_doc_milestone3.md` — successor to Milestone 2: human-in-the-loop (one `interrupt()` spine,
+  three trigger sources — deterministic workflow pause, agent `ask_human` tool, system events).
+  **Stub** — schedules the `design_doc.md` §9 / §3 HITL design into build slices; not yet spec-complete.
 - `deepagent-image/` — the actual harness (Dockerfile, `project/main.py`, `scripts/`). It has its
   own `CLAUDE.md` with detailed guidance — **read it before editing anything under
   `deepagent-image/`.** Do not duplicate that content here.

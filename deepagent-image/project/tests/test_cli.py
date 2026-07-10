@@ -41,7 +41,9 @@ def test_parse_args_defaults(monkeypatch):
     ns = cli.parse_args()
     assert ns.task == []
     assert ns.model is None
-    assert ns.thread_id == "default"
+    # M2: no thread arg => a FRESH per-run present thread, not the literal "default".
+    assert ns.thread_id.startswith("session-")
+    assert ns.topic is None
     assert ns.workspace.endswith("workspace")
     assert ns.max_cost is None and ns.max_tokens is None
     assert ns.stream is False
@@ -219,3 +221,210 @@ def test_langsmith_disabled_stays_disabled(monkeypatch):
     # No flag set at all: guard is a no-op, does not create the var.
     cli._guard_langsmith()
     assert "LANGSMITH_TRACING" not in os.environ
+
+
+# --- Milestone 2: present/past wiring --------------------------------------
+
+archive = _load("harness.archive")
+
+
+def test_fresh_thread_id_differs_per_run(monkeypatch):
+    # Two parses with no thread arg / env should not collide on the literal
+    # "default" — each run gets its own present thread (Def-of-Done 1).
+    monkeypatch.delenv("DEEPAGENTS_THREAD_ID", raising=False)
+    _argv(monkeypatch)
+    ns = cli.parse_args()
+    assert ns.thread_id.startswith("session-")
+    assert ns.thread_id != "default"
+
+
+def test_thread_id_env_resumes_named(monkeypatch):
+    monkeypatch.setenv("DEEPAGENTS_THREAD_ID", "my-refactor")
+    _argv(monkeypatch)
+    assert cli.parse_args().thread_id == "my-refactor"
+
+
+def test_topic_from_env(monkeypatch):
+    monkeypatch.setenv("DEEPAGENTS_TOPIC", "auth")
+    _argv(monkeypatch)
+    assert cli.parse_args().topic == "auth"
+
+
+def test_topic_flag_overrides_env(monkeypatch):
+    monkeypatch.setenv("DEEPAGENTS_TOPIC", "auth")
+    _argv(monkeypatch, "--topic", "ui")
+    assert cli.parse_args().topic == "ui"
+
+
+def test_dispatch_routes_threads_and_past(monkeypatch):
+    import harness.memadmin as ma
+
+    seen = {}
+    # update() returns None => the lambda yields 0 (success), not the argv list.
+    monkeypatch.setattr(ma, "memadmin_main", lambda argv: seen.update(argv=argv) or 0)
+    monkeypatch.setattr(cli, "main", lambda: pytest.fail("agent loop must not run for admin"))
+    assert cli.dispatch(["past", "list"]) == 0
+    assert seen["argv"] == ["past", "list"]
+    seen.clear()
+    assert cli.dispatch(["threads", "rm", "x", "--yes"]) == 0
+    assert seen["argv"] == ["threads", "rm", "x", "--yes"]
+
+
+def test_handle_topic_sets_and_shows(tmp_path):
+    conn = archive.connect(tmp_path / "past.sqlite")
+    archive.start_session(conn, "run-1", "t", "p", "m")
+    new = cli._handle_topic(conn, "run-1", "/topic auth", None)
+    assert new == "auth"
+    assert archive.get_topic(conn, "run-1") == "auth"
+    # No-arg form shows current, does not change it.
+    assert cli._handle_topic(conn, "run-1", "/topic", "auth") == "auth"
+
+
+def test_handle_recall_stages_marked_slice(tmp_path):
+    conn = archive.connect(tmp_path / "past.sqlite")
+    archive.start_session(conn, "run-1", "t", "p", "m", topic=None)
+    archive.append_turn(conn, "run-1", [{"role": "user", "content": "the auth work"},
+                                        {"role": "ai", "content": "done"}])
+    archive.end_session(conn, "run-1", archive.summarize(conn, "run-1"))
+
+    pending = cli._handle_recall(conn, "/recall auth", None, [])
+    assert len(pending) == 1
+    msg = pending[0]
+    assert msg["role"] == "system"
+    assert msg["additional_kwargs"][archive.RECALL_MARK] is True
+    assert "the auth work" in msg["content"]
+
+
+def test_handle_recall_no_query_lists_without_staging(tmp_path):
+    conn = archive.connect(tmp_path / "past.sqlite")
+    archive.start_session(conn, "run-1", "t", "p", "m")
+    archive.end_session(conn, "run-1", "some summary")
+    # No query => list mode, nothing staged for injection.
+    assert cli._handle_recall(conn, "/recall", None, []) == []
+
+
+def test_cost_totals_null_without_tracker():
+    assert cli._cost_totals_for_row(None) == (None, None, None, None)
+
+
+def test_cost_totals_free_is_official_zero():
+    tracker = cli.build_cost_tracker("unknown:x", 1.0, None)  # budget => tracker built, Free pricing
+    tracker.session.input, tracker.session.output = 12, 3
+    inp, out, usd, prov = cli._cost_totals_for_row(tracker)
+    assert (inp, out, usd, prov) == (12, 3, 0.0, "official")
+
+
+def test_cost_totals_unpriced_floor_is_null(monkeypatch):
+    tracker = cli.build_cost_tracker("unknown:x", 1.0, None)
+    tracker.session.input = 10
+    tracker.session.unpriced_calls = 1  # a call we couldn't price
+    inp, out, usd, prov = cli._cost_totals_for_row(tracker)
+    # Free pricing short-circuits to official 0 only when pricing is Free; here we
+    # force the unpriced branch by swapping pricing to a non-Free stub.
+    monkeypatch.setattr(tracker, "_pricing", object())
+    inp, out, usd, prov = cli._cost_totals_for_row(tracker)
+    assert usd is None and prov is None
+
+
+# --- run_repl resilience: a turn error must not crash the session -----------
+
+class _BoomAgent:
+    """Agent whose every invoke raises, standing in for a transient provider
+    error (e.g. Gemini `ServerError: 500 INTERNAL`) surfaced out of invoke."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def invoke(self, *args, **kwargs):
+        self.calls += 1
+        raise RuntimeError("500 INTERNAL")
+
+
+def test_run_repl_turn_error_non_interactive_closes_cleanly(monkeypatch):
+    # A one-shot (non-TTY) run whose only turn hits a provider error must not
+    # propagate the exception out of run_repl — otherwise main() skips archive
+    # finalization and the container dies with a traceback. It should close with
+    # rc 0 so main() still finalizes the session row.
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    agent = _BoomAgent()
+    rc = cli.run_repl(agent, {}, "do the thing")
+    assert rc == 0
+    assert agent.calls == 1
+
+
+def test_run_repl_turn_error_interactive_survives_to_next_prompt(monkeypatch):
+    # In an interactive session a failed turn is reported and the loop keeps
+    # going: the user gets the prompt back to retry, the session is not killed.
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    prompts = iter(["hello"])  # one prompt, then EOF ends the loop
+
+    def fake_input(_prompt=""):
+        try:
+            return next(prompts)
+        except StopIteration:
+            raise EOFError
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    agent = _BoomAgent()
+    rc = cli.run_repl(agent, {}, "")  # no initial task; the loop drives the turn
+    assert rc == 0
+    assert agent.calls == 1  # the failing turn ran and was caught, not re-raised
+
+
+# --- _dump_partial: surface accumulated turn state on error (DEEPAGENTS_DEBUG) ---
+
+class _Msg:
+    def __init__(self, type_, content, tool_calls=None):
+        self.type = type_
+        self.content = content
+        if tool_calls is not None:
+            self.tool_calls = tool_calls
+
+
+class _Snap:
+    def __init__(self, messages):
+        self.values = {"messages": messages}
+
+
+class _StatefulAgent:
+    def __init__(self, snap=None, raises=None):
+        self._snap = snap
+        self._raises = raises
+
+    def get_state(self, config):
+        if self._raises is not None:
+            raise self._raises
+        return self._snap
+
+
+def test_dump_partial_silent_without_debug(monkeypatch, capsys):
+    monkeypatch.delenv("DEEPAGENTS_DEBUG", raising=False)
+    agent = _StatefulAgent(_Snap([_Msg("ai", "hi")]))
+    cli._dump_partial(agent, {})
+    assert capsys.readouterr().err == ""  # gated off, no state pull at all
+
+
+def test_dump_partial_prints_messages_and_tool_calls(monkeypatch, capsys):
+    monkeypatch.setenv("DEEPAGENTS_DEBUG", "1")
+    snap = _Snap([
+        _Msg("human", "test"),
+        _Msg("ai", "reasoning about the task", tool_calls=[{"name": "write_file"}]),
+    ])
+    cli._dump_partial(_StatefulAgent(snap), {})
+    err = capsys.readouterr().err
+    assert "partial turn state (2 msg" in err
+    assert "reasoning about the task" in err
+    assert "tool_calls=['write_file']" in err
+
+
+def test_dump_partial_no_messages_reports_none(monkeypatch, capsys):
+    monkeypatch.setenv("DEEPAGENTS_DEBUG", "1")
+    cli._dump_partial(_StatefulAgent(_Snap([])), {})
+    assert "failed before any step was checkpointed" in capsys.readouterr().err
+
+
+def test_dump_partial_never_raises_when_get_state_fails(monkeypatch, capsys):
+    monkeypatch.setenv("DEEPAGENTS_DEBUG", "1")
+    agent = _StatefulAgent(raises=RuntimeError("checkpointer gone"))
+    cli._dump_partial(agent, {})  # must not raise out of an error handler
+    assert "partial state unavailable" in capsys.readouterr().err
