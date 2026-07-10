@@ -83,6 +83,33 @@ def test_recall_from_other_thread(tmp_path):
     assert [h.run_id for h in result["hits"]] == ["run-1"]
 
 
+def test_append_from_other_thread(tmp_path):
+    # The write tap (ArchiveMiddleware -> append_turn) can also fire off a
+    # langgraph worker thread while the connection was opened on the main
+    # thread. The same check_same_thread=False guard must keep writes working
+    # cross-thread, not just reads.
+    import threading
+
+    conn = _db(tmp_path)
+    archive.start_session(conn, "run-1", "thread-a", "openai", "gpt", topic=None)
+
+    result: dict = {}
+
+    def _worker():
+        try:
+            archive.append_turn(conn, "run-1", _turn("logged off-thread", "ok"))
+        except Exception as exc:  # pragma: no cover - failure path asserts below
+            result["error"] = exc
+
+    t = threading.Thread(target=_worker)
+    t.start()
+    t.join()
+
+    assert "error" not in result, f"cross-thread append raised: {result.get('error')!r}"
+    # The worker-thread write is durable and readable from the main thread.
+    assert archive.get_turns(conn, "run-1")[0]["content"] == "logged off-thread"
+
+
 def test_recall_empty_archive_returns_nothing(tmp_path):
     # The past never auto-loads: an unqueried / empty archive yields nothing.
     assert archive.recall(_db(tmp_path), "anything") == []
