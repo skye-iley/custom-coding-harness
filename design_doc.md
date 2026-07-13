@@ -54,10 +54,10 @@ thread id), isolates workspace dependencies in a workspace-local conda env, and 
 | — | MCP tool loading (`.mcp.json`) | ✅ Built | `load_mcp_tools` (not a separate doc section) |
 | 3 | Git branch/commit/push/PR lifecycle | ✅ Built | `workflows/git-branch` (session.start) + `workflows/git-pr` (session.end): branch → persist session id → commit/push → `gh pr create`, never auto-merged. Safe no-op without a repo/remote/`GH_TOKEN` |
 | 5 | Multi-agent funnel (classifier→orchestrator→worker) | ⬜ Planned | Single `create_deep_agent` today |
-| 6 | Token/cost tracker | ✅ Built (Milestone 1) | `harness/cost.py` (`CostTrackerMiddleware`); pricing in the `providers/` TOML registry (`[pricing]` per model, strategy per provider), not a `prices.json`. Optional energy estimate + budgets. See `design_doc_milestone1.md` |
+| 6 | Token/cost tracker | ✅ Built (Milestone 1) | `harness/cost.py` (`CostTrackerMiddleware`); pricing in the `providers/` TOML registry (`[pricing]` per model, strategy per provider), not a `prices.json`. Optional energy estimate + budgets. See `docs/milestones/milestone1.md` |
 | 7 | Headroom / Caveman / caching pipeline | ⬜ Planned | Nothing integrated |
 | 8 | Observability, telemetry, telemetry-to-PR | ⬜ Planned | No trace/metrics files written |
-| 9 | In-container interactive REPL (multi-turn session) | 🟡 MVP | Persistent `docker run -it` prompt loop in `harness/cli.py`: multi-turn on one `thread_id`, deterministic `/exit`, stage output — see `design_doc_mvp.md` §1a |
+| 9 | In-container interactive REPL (multi-turn session) | 🟡 MVP | Persistent `docker run -it` prompt loop in `harness/cli.py`: multi-turn on one `thread_id`, deterministic `/exit`, stage output — see `docs/milestones/mvp.md` §1a |
 | 9 | Host CLI frontend (Typer/Rich) + TUI | ⬜ Planned | No `harness` CLI/TUI; interactive use is the in-container REPL above |
 | 9 | Human-in-the-loop (interrupt spine + `ask_human` tool + `.harness-config.yaml`) | ⬜ Planned | LangGraph `interrupt()` over the **built** SqliteSaver checkpoint (row above); one human channel, 3 trigger sources — deterministic pause-workflow (§3 tier), agent `ask_human` tool, system events (missing-price/provider-error/permission). See §9 |
 | 10 | Security verification test suite | ⬜ Planned | Risk analysis is design-only |
@@ -66,7 +66,7 @@ thread id), isolates workspace dependencies in a workspace-local conda env, and 
 | 12 | Config-validate / `harness doctor` | ⬜ Planned | `verify` checks imports only; no pre-flight check that the registry / `.mcp.json` / `hooks.json` / `workflow.md` are coherent |
 | 12 | Headless one-shot-to-PR mode | ⬜ Planned | Non-TTY today only degrades to a single REPL turn; no structured-result batch entrypoint |
 | 12 | Provider resilience (retry/backoff + context-overflow fallback) | ⬜ Planned | No handling of 429/5xx/network blips mid-turn; no interim plan before §7 compression lands |
-| 12 | Thread / checkpoint management | 🟡 Partial | **Shipped in Milestone 2** (`design_doc_milestone2.md`): fresh-by-default present thread + separate on-demand `past.sqlite` archive, **and** the `harness threads`/`harness past` list/show/rm/prune lifecycle CLI (§2.6). Automatic/policy-based GC still deferred (manual prune only) |
+| 12 | Thread / checkpoint management | 🟡 Partial | **Shipped in Milestone 2** (`docs/milestones/milestone2.md`): fresh-by-default present thread + separate on-demand `past.sqlite` archive, **and** the `harness threads`/`harness past` list/show/rm/prune lifecycle CLI (§2.6). Automatic/policy-based GC still deferred (manual prune only) |
 | 12 | Deepagents-native skills & memories wiring | 🟡 Partial | **Milestone 2** shipped the accumulating on-demand "past" archive (`past.sqlite`) and (§2.7) **disambiguates** it from deepagents' native `memories/` surface — no dead scaffolding now implies M2 wired the latter. `project/agents/`,`skills/`,`memories/` native wiring (Option A/B) remains deferred to §12.6 |
 | 12 | Cost / telemetry persistence | 🟡 Partial | **Milestone 2** (§2.3) shipped the first slice: a per-session token/cost ledger on the `past.sqlite` `sessions` row (provenance-tagged, NULL when keyless). §8 telemetry-to-PR export of that ledger still deferred |
 | 13 | File-read middleware (per-file context shaping) | ⬜ Planned | No read-time transform seam; `read_file` serves whole files. Planned: pipeline on the backend `read()` override; tag add/omit + in-file progressive disclosure as instances |
@@ -167,7 +167,7 @@ network: NetworkPolicy = NetworkPolicy()
 *   `allow_net_tools=False` → omit http/fetch and network-transport MCP tools from that agent's
     toolset entirely.
 
-> **This is a policy, not a cage — same trust caveat as the MVP shell (`design_doc_mvp.md` §5).**
+> **This is a policy, not a cage — same trust caveat as the MVP shell (`docs/milestones/mvp.md` §5).**
 > All subagents run in-process, sharing one network namespace and one proxy. Env-withholding stops a
 > *cooperative* agent and a prompt-injected one that only knows the documented env, but an agent that
 > hardcodes the proxy IP or a forwarder address can still reach it. It is meaningful **only while
@@ -246,7 +246,7 @@ def validate_path(target_path: str, base_dir: str = "/workspace") -> str:
 > resolve-and-hold a file descriptor rather than re-deriving the path after the check.
 
 ### Workspace Visibility & Secret Masking
-> **Status:** ⬜ Planned. Full spec: **`design_doc_workspace_visibility.md`**.
+> **Status:** ⬜ Planned. Full spec: **`docs/features/workspace_visibility.md`**.
 
 The bind mount exposes the *whole* workspace tree — including secrets the user's own repo carries
 (`.env`, `id_rsa`, `.aws/credentials`) — to the agent's file **and** shell tools. A policy +
@@ -268,7 +268,7 @@ enforcement stack restricts agent-visible paths:
     `sandbox-exec`, verify nested userns first); (3) **overlayfs view** — optional, tool-agnostic
     true absence + upper-diff write-back.
 
-See `design_doc_workspace_visibility.md` for the tier table, config format, scanner, and sequencing.
+See `docs/features/workspace_visibility.md` for the tier table, config format, scanner, and sequencing.
 
 ### Workspace Environment Isolation
 To prevent dependency conflicts between the orchestrator runtime and the target project:
@@ -301,7 +301,7 @@ This guarantees agent session state, Git identity, and accumulated metrics survi
 > **Status:** 🟡 Partial (Milestone 1) — CPU / memory / PID caps are **built**:
 > `run-docker.{sh,ps1}` pass `--cpus`/`--memory`/`--pids-limit` (defaults
 > 2/4g/512, overridable). Disk quota and wall-clock timeouts below remain
-> **planned**. Docker host-boundary control, not a sandbox (`design_doc_mvp.md` §5).
+> **planned**. Docker host-boundary control, not a sandbox (`docs/milestones/mvp.md` §5).
 
 Isolation is not just filesystem/network — an agent loop can also exhaust host resources. Apply
 hard caps at container start (independent of bubblewrap):
@@ -608,7 +608,7 @@ way `git-branch` / `git-pr` are instances of the side-effect tier.
 > per-model `[pricing]` table incl. split cache prices), not a `prices.json`. A
 > priced model with no rate is loud (warn-once + floor), never silent `$0`. An
 > optional per-model energy estimate is tracked (measured local-device energy is
-> specified, not built — see `ENERGY_SPEC.md`). See `design_doc_milestone1.md`.
+> specified, not built — see `docs/milestones/ENERGY_SPEC.md`). See `docs/milestones/milestone1.md`.
 
 ### Callback Implementation
 Deep Agents provides hooks to monitor execution streams:
@@ -758,7 +758,7 @@ Local dictionary for calculating financial cost of session:
 ## 9. CLI Frontend & User Interface
 > **Status:** 🟡 Partial — an **in-container interactive REPL** is now in MVP scope (persistent
 > `docker run -it` prompt loop in `harness/cli.py`: multi-turn on one `thread_id`, deterministic
-> `/exit`, lifecycle stage output — see `design_doc_mvp.md` §1a). The **host-side** Typer/Rich
+> `/exit`, lifecycle stage output — see `docs/milestones/mvp.md` §1a). The **host-side** Typer/Rich
 > `harness` CLI, the TUI, and `.harness-config.yaml` below remain ⬜ Planned. See the status matrix above.
 
 ### MVP precursor: in-container interactive loop
@@ -1040,7 +1040,7 @@ returns to the prompt without killing the session; a simulated context-overflow 
 once and is labelled interim.
 
 ### 12.5 Thread / checkpoint management
-> Specced in `design_doc_milestone2.md` §2.6 (present/past split + `harness threads`/`harness past`
+> Specced in `docs/milestones/milestone2.md` §2.6 (present/past split + `harness threads`/`harness past`
 > lifecycle CLI). The design below is the source the milestone pulls from.
 
 *Why.* Conversation state persists in `<workspace>/.deepagents/checkpoints.sqlite`, keyed by
@@ -1061,7 +1061,7 @@ wiring, `test_threads.py` against a tmp sqlite. No change to the run path.
 guarded against deleting everything without explicit confirmation.
 
 ### 12.6 Deepagents-native skills & memories — wire or document
-> `design_doc_milestone2.md` §2.7 disambiguates this native `memories/` surface from that milestone's
+> `docs/milestones/milestone2.md` §2.7 disambiguates this native `memories/` surface from that milestone's
 > bespoke `past.sqlite` archive and defers the wire-or-document decision below to here.
 
 *Why.* The Dockerfile bakes `project/agents/`, `project/skills/`, `project/memories/` into the
@@ -1087,7 +1087,7 @@ the agent) or removed, and `deepagent-image/CLAUDE.md` states which and why — 
 scaffolding.
 
 ### 12.7 Cost / telemetry persistence
-> First slice specced in `design_doc_milestone2.md` §2.3: a per-session token/cost ledger on the
+> First slice specced in `docs/milestones/milestone2.md` §2.3: a per-session token/cost ledger on the
 > `past.sqlite` `sessions` row. The `usage.jsonl` sink below remains the fuller, still-planned form.
 
 *Why.* The cost tracker (§6 / M1) prints per-turn + session usage to stderr, then it is gone. There

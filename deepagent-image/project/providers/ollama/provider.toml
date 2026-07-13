@@ -2,7 +2,7 @@
 # so it is never auto-selected — set DEEPAGENTS_MODEL=ollama:<model> explicitly.
 # Local/self-hosted: no API charge (cost=0). Energy is still trackable per-model
 # via a models/<model>.toml [energy] table; measured device energy is specced
-# (not built) in ENERGY_SPEC.md — set [energy] source = "nvidia_smi"|"rapl"|...
+# (not built) in docs/milestones/ENERGY_SPEC.md — set [energy] source = "nvidia_smi"|"rapl"|...
 api_key_env = "OLLAMA_API_KEY"
 requires_key = false
 priority = 5

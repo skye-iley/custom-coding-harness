@@ -3,7 +3,7 @@
 Rate and energy *data* live in the on-disk registry (``providers/<p>/models/
 <m>.toml`` ``[pricing]`` / ``[energy]`` tables, read by ``providers.py``); this
 module only does arithmetic on the numbers that file feeds it. See
-``design_doc_milestone1.md`` §2.3.
+``docs/milestones/milestone1.md`` §2.3.
 
 Three pieces:
   * ``Pricing`` strategies (``Free`` | ``ReportedCost`` | ``RateTable``) with one
@@ -57,7 +57,7 @@ class ModelRates:
     Energy fields are watt-hours PER TOKEN (optional, best-effort estimates).
     ``energy_per_token`` is a single blended figure; the per-input/per-output
     pair, when set, wins over it. ``energy_source`` names the (not-yet-built)
-    local-device measurement method for self-hosted models — see ENERGY_SPEC.md.
+    local-device measurement method for self-hosted models — see docs/milestones/ENERGY_SPEC.md.
     """
 
     input: float | None = None         # USD / Mtok, fresh (non-cached) input
@@ -248,7 +248,7 @@ def estimate_energy_wh(usage: dict, rates: ModelRates | None) -> float | None:
     Energy is independent of the pricing strategy: a Free (local) model can
     still carry an energy estimate. For locally-hosted models a *measured*
     figure (sampling device power across the model-call window) is the intended
-    successor to this estimate — specced, not implemented (see ENERGY_SPEC.md).
+    successor to this estimate — specced, not implemented (see docs/milestones/ENERGY_SPEC.md).
     """
     if rates is None or not rates.has_energy:
         return None
@@ -265,7 +265,7 @@ def estimate_energy_wh(usage: dict, rates: ModelRates | None) -> float | None:
 def measure_local_energy_wh(*_args, **_kwargs) -> float:
     """Measured local-device energy over the model-call window — NOT IMPLEMENTED.
 
-    Specification (ENERGY_SPEC.md): wrap the model call (``before_model`` /
+    Specification (docs/milestones/ENERGY_SPEC.md): wrap the model call (``before_model`` /
     ``after_model`` timestamps), sample device power draw across that window, and
     integrate to watt-hours. Backends keyed by ``ModelRates.energy_source``:
       * ``nvidia_smi``  -> ``nvidia-smi --query-gpu=power.draw`` polling
@@ -275,7 +275,7 @@ def measure_local_energy_wh(*_args, **_kwargs) -> float:
     """
     raise NotImplementedError(
         "local-device energy measurement is specified but not implemented; "
-        "see ENERGY_SPEC.md and ModelRates.energy_source"
+        "see docs/milestones/ENERGY_SPEC.md and ModelRates.energy_source"
     )
 
 
