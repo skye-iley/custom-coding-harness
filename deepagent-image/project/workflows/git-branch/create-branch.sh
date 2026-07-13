@@ -26,11 +26,14 @@ else
 fi
 BASE="$(git rev-parse HEAD)"
 
-mkdir -p .deepagents
+# State dir defaults under the workspace, but DEEPAGENTS_STATE_DIR relocates it
+# out of the agent's reach (kept in sync with archive.state_dir on the Python side).
+STATE_DIR="${DEEPAGENTS_STATE_DIR:-.deepagents}"
+mkdir -p "$STATE_DIR"
 {
   echo "DEEPAGENTS_SESSION_BRANCH=$BRANCH"
   echo "DEEPAGENTS_SESSION_ID=$SID"
   echo "DEEPAGENTS_SESSION_BASE=$BASE"
-} > .deepagents/session.env
+} > "$STATE_DIR/session.env"
 
 echo "[workflow git-branch] checked out $BRANCH" >&2

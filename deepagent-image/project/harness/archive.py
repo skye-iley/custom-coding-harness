@@ -38,6 +38,17 @@ except ModuleNotFoundError:  # pragma: no cover
 # Env knob: DEEPAGENTS_ARCHIVE=0 disables the past archive entirely (§3).
 ARCHIVE_ENV = "DEEPAGENTS_ARCHIVE"
 
+# Env knob: relocate the harness-private state root (past.sqlite,
+# checkpoints.sqlite, session.env) OUT of the agent's workspace. The agent's file
+# and shell tools are rooted at the workspace (agent.py `_WorkspaceShellBackend`,
+# virtual_mode), so state kept under it is readable/corruptible by the agent's own
+# tool calls — the past archive's structural isolation only holds at the
+# checkpointer layer, not the tool layer. Pointing this at a directory outside the
+# workspace bind-mount closes that: the file tools cannot escape their root, and a
+# future bwrap jail that binds only the workspace hides it from the shell too.
+# Unset falls back to `<workspace>/.deepagents` (bare-host + test layout).
+STATE_DIR_ENV = "DEEPAGENTS_STATE_DIR"
+
 # Sentinel that marks a message as injected recall context (not a genuine turn).
 # Placed in a message's additional_kwargs/metadata by the recall path so the tap
 # can skip it and never re-archive recalled slices (§2.3 no-re-archiving gap fix).
@@ -78,8 +89,17 @@ def archive_enabled() -> bool:
     return os.getenv(ARCHIVE_ENV, "1").strip() != "0"
 
 
+def state_dir(workspace: Path | str) -> Path:
+    """Root for harness-private stores (past.sqlite, checkpoints.sqlite,
+    session.env). Honors DEEPAGENTS_STATE_DIR (see STATE_DIR_ENV); otherwise
+    defaults to `<workspace>/.deepagents` for the in-workspace layout used on
+    bare hosts and in tests."""
+    override = os.getenv(STATE_DIR_ENV)
+    return Path(override) if override else Path(workspace) / ".deepagents"
+
+
 def default_db_path(workspace: Path | str) -> Path:
-    return Path(workspace) / ".deepagents" / "past.sqlite"
+    return state_dir(workspace) / "past.sqlite"
 
 
 def _now_iso() -> str:

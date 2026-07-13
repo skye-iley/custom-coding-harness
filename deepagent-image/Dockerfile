@@ -72,6 +72,7 @@ RUN chmod +x /usr/local/bin/conda-init-workspace \
     && chmod +x /project/workspace/scripts/run-in-env.sh \
     && chmod +x /project/workspace-seed/scripts/run-in-env.sh \
     && mkdir -p /project/workspace \
+    && mkdir -p /project/state \
     && chown -R agent:agent /project /opt/venv /opt/conda
 
 # Explicit marker so main.py knows it runs inside the harness image

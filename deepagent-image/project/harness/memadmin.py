@@ -47,7 +47,7 @@ def _guard(action: str, yes: bool, what: str) -> bool:
 def _checkpoints_path(args) -> Path:
     if args.db:
         return Path(args.db)
-    return Path(args.workspace) / ".deepagents" / "checkpoints.sqlite"
+    return archive.state_dir(args.workspace) / "checkpoints.sqlite"
 
 
 def _thread_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:

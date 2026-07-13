@@ -2,11 +2,13 @@
 # git-pr step 1: stage, commit, push the session branch (§3 teardown).
 set -eu
 cd "${DEEPAGENTS_WORKSPACE:-.}"
-. ./.deepagents/session.env
+. "${DEEPAGENTS_STATE_DIR:-.deepagents}/session.env"
 
 git add -A
-# Never commit harness state (checkpoints DB, session.env live under .deepagents)
-# or telemetry — §3 excludes these from the agent's mutations.
+# Never commit harness state (checkpoints DB, session.env) or telemetry — §3
+# excludes these from the agent's mutations. With DEEPAGENTS_STATE_DIR set the
+# state lives outside the workspace and never enters the index at all; the reset
+# still guards the default in-workspace `.deepagents` layout.
 git reset -q -- .deepagents .agent_telemetry 2>/dev/null || true
 
 if git diff --cached --quiet; then

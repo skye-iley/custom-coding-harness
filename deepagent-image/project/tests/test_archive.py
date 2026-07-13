@@ -275,6 +275,25 @@ def test_archive_enabled_honors_env(monkeypatch):
     assert archive.archive_enabled() is True
 
 
+# --- state dir isolation (option 2: state out of the agent's workspace) -------
+
+def test_state_dir_defaults_under_workspace(monkeypatch, tmp_path):
+    monkeypatch.delenv(archive.STATE_DIR_ENV, raising=False)
+    assert archive.state_dir(tmp_path) == tmp_path / ".deepagents"
+    assert archive.default_db_path(tmp_path) == tmp_path / ".deepagents" / "past.sqlite"
+
+
+def test_state_dir_override_relocates_out_of_workspace(monkeypatch, tmp_path):
+    ws = tmp_path / "workspace"
+    state = tmp_path / "state"
+    monkeypatch.setenv(archive.STATE_DIR_ENV, str(state))
+    # The past DB lands under the override, NOT under the agent's workspace root,
+    # so file/shell tools rooted at the workspace cannot reach it.
+    db = archive.default_db_path(ws)
+    assert db == state / "past.sqlite"
+    assert ws not in db.parents
+
+
 # --- middleware tap ----------------------------------------------------------
 
 def test_archive_middleware_taps_completed_turn(tmp_path):

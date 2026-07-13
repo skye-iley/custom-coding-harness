@@ -183,8 +183,15 @@ never import `providers.py` (the import goes providers → cost, §2.4).
 
 ## Present / past memory (Milestone 2)
 
-The harness keeps **two** stores under `<workspace>/.deepagents/`, split so the
-past can never leak into context by accident:
+The harness keeps **two** stores in the harness **state dir** (`archive.state_dir`),
+split so the past can never leak into context by accident. The state dir defaults
+to `<workspace>/.deepagents/`, but `DEEPAGENTS_STATE_DIR` relocates it **out of the
+workspace** — `run-docker` sets it to `/project/state` (a second, per-workspace host
+mount outside the workspace bind-mount) so the agent's own file/shell tools, rooted
+at the workspace, cannot read `past.sqlite` or corrupt the live `checkpoints.sqlite`.
+(The past archive's isolation was previously structural only at the checkpointer
+layer; this extends it to the tool layer. A future bwrap jail binding only the
+workspace hides the state from the shell too.) `session.env` follows the same dir:
 
 - **Present** — `checkpoints.sqlite`, the LangGraph `SqliteSaver` (one live
   thread, auto-loaded). `--thread-id` now defaults to a **fresh `session-<ts>`
@@ -298,7 +305,9 @@ don't describe it as sandboxing. Verify with `docker inspect` (`NanoCpus`,
   reach them — this allowlist only narrows the *agent's* shell.
 - `resolve_workspace` (`harness/agent.py`) uses the `DEEPAGENTS_IN_CONTAINER` env marker to detect
   the harness image — don't swap it back to filesystem sniffing (e.g. checking for `/project`).
-- Present conversation state persists at `<workspace>/.deepagents/checkpoints.sqlite`, keyed by
+- Present conversation state persists at `<state-dir>/checkpoints.sqlite` (state dir =
+  `archive.state_dir`: `<workspace>/.deepagents/` by default, or `DEEPAGENTS_STATE_DIR` when set —
+  `run-docker` points it at `/project/state`, outside the agent's workspace root), keyed by
   the present `thread_id`. Since Milestone 2 the id defaults to a **fresh `session-<ts>` per run**
   (fresh context by default); set `--thread-id`/`DEEPAGENTS_THREAD_ID` to a prior id to resume that
   thread. The separate `past.sqlite` archive beside it is **never** opened by the checkpointer (see

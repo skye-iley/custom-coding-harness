@@ -13,6 +13,7 @@ project/.mypy_cache/
 project/.ruff_cache/
 project/suggestions/
 project/workspace/.conda/
+project/state/
 .dockerignore
 .cursorignore
 Dockerfile

@@ -504,10 +504,13 @@ def main() -> int:
     )
     by_hook = workflows_by_hook(all_workflows)
 
-    # Checkpointer DB lives under the workspace so it rides the same host mount
-    # the workspace does: thread state (conversation memory) survives across
-    # --rm runs. Resume a thread by reusing its --thread-id / DEEPAGENTS_THREAD_ID.
-    checkpoint_db = workspace / ".deepagents" / "checkpoints.sqlite"
+    # Checkpointer DB lives in the harness state dir (archive.state_dir): under
+    # the workspace by default so thread state (conversation memory) rides the
+    # same host mount and survives --rm runs, or relocated out of the workspace
+    # via DEEPAGENTS_STATE_DIR so the agent's own file/shell tools can't corrupt
+    # it (run-docker sets it to a second host mount). Resume a thread by reusing
+    # its --thread-id / DEEPAGENTS_THREAD_ID.
+    checkpoint_db = archive.state_dir(workspace) / "checkpoints.sqlite"
     checkpoint_db.parent.mkdir(parents=True, exist_ok=True)
 
     config = {"configurable": {"thread_id": args.thread_id}}
