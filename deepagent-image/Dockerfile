@@ -45,6 +45,15 @@ ENV CONDA_ROOT=/opt/conda
 ENV MAMBA_ROOT_PREFIX=/opt/conda
 
 RUN useradd --create-home --uid 10001 agent
+# chown the big, source-independent trees here (once, cached). /opt/conda alone is
+# tens of thousands of files, so keeping this out of the source-dependent layer
+# below avoids a full recursive chown on every project edit. This layer is
+# downstream of the venv/conda installs, so a requirements.txt or conda change
+# still re-runs it. GUARDRAIL: any future RUN that writes to /opt/venv or
+# /opt/conda as root *after* this line (and before USER agent) must chown its own
+# output — this sweep no longer runs last. (The test stage installs as USER agent,
+# so its files are already agent-owned.)
+RUN chown -R agent:agent /opt/venv /opt/conda
 
 WORKDIR /project
 # Enumerated COPY of the project/ top level *minus* tests/ — keeps test code out
@@ -73,7 +82,7 @@ RUN chmod +x /usr/local/bin/conda-init-workspace \
     && chmod +x /project/workspace-seed/scripts/run-in-env.sh \
     && mkdir -p /project/workspace \
     && mkdir -p /project/state \
-    && chown -R agent:agent /project /opt/venv /opt/conda
+    && chown -R agent:agent /project
 
 # Explicit marker so main.py knows it runs inside the harness image
 # (resolve_workspace uses this instead of sniffing the filesystem).
