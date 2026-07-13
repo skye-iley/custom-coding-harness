@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from _artifacts import resolve_artifact_dir
+
 # Committed fixture registry mirroring the real provider layout
 # (<provider>/provider.toml + models/<model>.toml). Resolved from this conftest's
 # location so it works regardless of pytest's invocation cwd.
@@ -76,6 +78,18 @@ def workspace_sandbox(tmp_path, monkeypatch):
     workspace.mkdir()
     monkeypatch.chdir(tmp_path)
     return workspace
+
+
+@pytest.fixture
+def artifact_dir(request, tmp_path):
+    """A writable dir for a test to drop files it wants to inspect after the run.
+
+    Default: pytest's `tmp_path` — deleted when the session ends. Under smoke's
+    `-KeepArtifacts` / `KEEP_ARTIFACTS=1` (which sets
+    `DEEPAGENTS_TEST_ARTIFACTS_DIR` and bind-mounts it to a host folder), the dir
+    is a per-test subdir of that path, so the files are shipped out and survive
+    the disposable container. See tests/_artifacts.py."""
+    return resolve_artifact_dir(request.node.name, tmp_path)
 
 
 @pytest.fixture

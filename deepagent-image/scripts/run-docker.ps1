@@ -6,7 +6,9 @@
 #   .\run-docker.ps1 "your task here"
 #   .\run-docker.ps1 test task here
 #   .\run-docker.ps1 -WorkspacePath C:\path\to\repo "your task here"
-#   .\run-docker.ps1 -NetJail "task"      # deny-all-egress jail + allowlist
+#   .\run-docker.ps1 -NetJail "task"         # deny-all-egress jail + allowlist
+#   .\run-docker.ps1 -Ephemeral "task"       # revert all workspace changes on close
+#   .\run-docker.ps1 -SaveWorkspace "task"   # ephemeral + snapshot to workspace-logs\<ts>\
 [CmdletBinding()]
 param(
     [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
@@ -23,7 +25,14 @@ param(
     # network with no route to host or internet, punching only the holes declared
     # in netjail\host-services.txt (host ports) and netjail\allowed-domains.txt
     # (egress domains). Default off = the agent keeps normal bridge networking.
-    [switch]$NetJail
+    [switch]$NetJail,
+    # Ephemeral workspace: mount a throwaway COPY of the workspace, so every change
+    # the agent makes is reverted on close (the real workspace is never touched).
+    # -SaveWorkspace additionally snapshots the post-run copy to workspace-logs\<ts>\
+    # before it is discarded, and implies -Ephemeral. The rebuildable conda env
+    # (.conda) is excluded from the copy so a run doesn't clone gigabytes.
+    [switch]$Ephemeral,
+    [switch]$SaveWorkspace
 )
 
 $ErrorActionPreference = "Stop"
@@ -83,7 +92,35 @@ function Seed-Workspace {
 }
 
 $SeedSource = $DefaultWorkspace
-Seed-Workspace -Target $WorkspacePath -SeedSource $SeedSource
+
+# Copy $Src -> $Dst, excluding the heavy, rebuildable workspace conda env (.conda).
+# robocopy /E mirrors the tree; exit codes 0-7 are success, >=8 is a real failure.
+function Copy-Workspace {
+    param([string]$Src, [string]$Dst)
+    New-Item -ItemType Directory -Force -Path $Dst | Out-Null
+    & robocopy $Src $Dst /E /XD (Join-Path $Src ".conda") /NFL /NDL /NJH /NJS /NP | Out-Null
+    $rc = $LASTEXITCODE
+    $global:LASTEXITCODE = 0   # robocopy's success codes (1-7) aren't errors
+    if ($rc -ge 8) { throw "workspace copy failed (robocopy exit $rc): $Src -> $Dst" }
+}
+
+# ---------------------------------------------------------------------------
+# Ephemeral workspace (-Ephemeral / -SaveWorkspace): mount a throwaway COPY instead
+# of the real workspace, so all changes revert on close. The state dir (keyed to
+# the REAL workspace path) is left persistent. -SaveWorkspace implies -Ephemeral and
+# snapshots the post-run copy before it is discarded.
+if ($SaveWorkspace) { $Ephemeral = $true }
+$Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$MountWorkspace = $WorkspacePath
+$EphemeralDir = $null
+if ($Ephemeral) {
+    $EphemeralDir = Join-Path $Root ".ephemeral\$Stamp"
+    Copy-Workspace -Src $WorkspacePath -Dst $EphemeralDir
+    $MountWorkspace = $EphemeralDir
+    Write-Host "Ephemeral: on - changes revert on close (copy at $EphemeralDir)"
+}
+
+Seed-Workspace -Target $MountWorkspace -SeedSource $SeedSource
 
 # ---------------------------------------------------------------------------
 # NetJail: deny-all-egress network jail with an explicit, config-driven allowlist.
@@ -229,7 +266,7 @@ $dockerArgs = @(
     "--env-file", $EnvFile,
     "-e", "AGENT_WORKSPACE=/project/workspace",
     "-e", "DEEPAGENTS_STATE_DIR=/project/state",
-    "-v", "${WorkspacePath}:/project/workspace",
+    "-v", "${MountWorkspace}:/project/workspace",
     "-v", "${StateHostDir}:/project/state"
 )
 
@@ -254,9 +291,19 @@ if ($TaskParts.Count -gt 0) {
     Write-Host "Task: $($TaskParts -join ' ')"
 }
 
-if ($NetJail) {
-    try { & docker @dockerArgs }
-    finally { Netjail-Down }
-} else {
+try {
     & docker @dockerArgs
+} finally {
+    if ($NetJail) { Netjail-Down }
+    if ($Ephemeral) {
+        if ($SaveWorkspace) {
+            $LogDir = Join-Path $Root "workspace-logs\$Stamp"
+            Copy-Workspace -Src $MountWorkspace -Dst $LogDir
+            Write-Host "Workspace snapshot saved under $LogDir"
+        }
+        if ($EphemeralDir -and (Test-Path $EphemeralDir)) {
+            Remove-Item -Recurse -Force $EphemeralDir
+        }
+        Write-Host "Ephemeral: workspace changes discarded."
+    }
 }

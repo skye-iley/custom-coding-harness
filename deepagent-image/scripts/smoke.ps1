@@ -3,13 +3,16 @@
 # then runs the whole suite via pytest discovery on the test image.
 #
 # Usage:
-#   .\smoke.ps1            # normal (bridge networking)
-#   .\smoke.ps1 -NetJail   # run the import check + pytest INSIDE the NetJail
-#                          # (--internal net + allowlisted egress proxy). Proves
-#                          # the harness boots and the suite passes with no direct
-#                          # egress, and that the jail plumbing stands up fail-closed.
+#   .\smoke.ps1                 # normal (bridge networking)
+#   .\smoke.ps1 -NetJail        # run the import check + pytest INSIDE the NetJail
+#                               # (--internal net + allowlisted egress proxy). Proves
+#                               # the harness boots and the suite passes with no direct
+#                               # egress, and that the jail plumbing stands up fail-closed.
+#   .\smoke.ps1 -KeepArtifacts  # ship files that tests write via the `artifact_dir`
+#                               # fixture out to test-artifacts\<timestamp>\ on the host
+#                               # (default: they go to the container's tmp and vanish).
 [CmdletBinding()]
-param([switch]$NetJail)
+param([switch]$NetJail, [switch]$KeepArtifacts)
 
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
@@ -142,6 +145,20 @@ if ($NetJail) {
     Write-Host "NetJail: on (deny-all egress + allowlist)"
 }
 
+# Test-artifact capture: when -KeepArtifacts is set, bind-mount a fresh host
+# folder to /artifacts (OUTSIDE /project, so the conftest artifact-guard leaves it
+# alone) and point DEEPAGENTS_TEST_ARTIFACTS_DIR at it, so files tests write via
+# the `artifact_dir` fixture survive the disposable container. Off = the fixture
+# falls back to the container's tmp_path and everything is deleted with the container.
+$ArtifactArgs = @()
+$ArtifactHostDir = $null
+if ($KeepArtifacts) {
+    $ArtifactHostDir = Join-Path $Root "test-artifacts\$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+    New-Item -ItemType Directory -Force -Path $ArtifactHostDir | Out-Null
+    $ArtifactArgs = @("-v", "${ArtifactHostDir}:/artifacts", "-e", "DEEPAGENTS_TEST_ARTIFACTS_DIR=/artifacts")
+    Write-Host "KeepArtifacts: on -> $ArtifactHostDir"
+}
+
 try {
     # Bare-runtime import smoke: third-party deps + the harness package (incl. the
     # cost tracker, so a providers<->cost import cycle fails here). Runs against the
@@ -155,9 +172,10 @@ try {
     # Full suite via pytest discovery on the test image. -v names every test case
     # (file::test PASSED/FAILED); -ra recaps non-passing tests at the end. Failures
     # print the failing test id, file:line, and asserted values by default.
-    $pytestArgs = @("run", "--rm") + $NetArgs + $ProxyEnv + @("deepagent-harness-test", "python3", "-m", "pytest", "tests/", "-v", "-ra")
+    $pytestArgs = @("run", "--rm") + $NetArgs + $ProxyEnv + $ArtifactArgs + @("deepagent-harness-test", "python3", "-m", "pytest", "tests/", "-v", "-ra")
     & docker @pytestArgs
     if ($LASTEXITCODE -ne 0) { throw "pytest suite failed" }
 } finally {
     if ($NetJail) { Netjail-Down }
+    if ($ArtifactHostDir) { Write-Host "Test artifacts saved under $ArtifactHostDir" }
 }
