@@ -15,6 +15,10 @@ secret-safe containers.
 - `design_doc_milestone3.md` — successor to Milestone 2: human-in-the-loop (one `interrupt()` spine,
   three trigger sources — deterministic workflow pause, agent `ask_human` tool, system events).
   **Stub** — schedules the `design_doc.md` §9 / §3 HITL design into build slices; not yet spec-complete.
+- `design_doc_workspace_visibility.md` — **named feature plan** (not a numbered milestone): restrict
+  which workspace paths an agent can see (`.agentignore` policy, designated-secret floor, docker-mask
+  → bwrap fs-tool jail → optional overlayfs). **Planned** — summarized in `design_doc.md` §2
+  (Workspace Visibility & Secret Masking).
 - `deepagent-image/` — the actual harness (Dockerfile, `project/main.py`, `scripts/`). It has its
   own `CLAUDE.md` with detailed guidance — **read it before editing anything under
   `deepagent-image/`.** Do not duplicate that content here.
