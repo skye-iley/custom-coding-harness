@@ -69,6 +69,15 @@ the container with `-it` so the in-container REPL (`harness/cli.py:run_repl`) ha
 stdin (CI, piped smoke runs) drops `-t` and the harness itself degrades to a single non-interactive
 turn (see `design_doc_mvp.md` §1a).
 
+**Ephemeral workspace (`-Ephemeral` / `EPHEMERAL=1`).** Instead of mounting the real workspace,
+run-docker mounts a throwaway COPY of it (under `deepagent-image/.ephemeral/<ts>/`), so **every
+change the agent makes reverts on close** — the real workspace is never touched. `-SaveWorkspace` /
+`SAVE_WORKSPACE=1` snapshots the post-run copy to `deepagent-image/workspace-logs/<ts>/` before it
+is discarded, and implies `-Ephemeral`. The copy **excludes `.conda`** (the rebuildable workspace
+conda env) so a run doesn't clone gigabytes — an ephemeral run rebuilds the env. Harness **state**
+(`checkpoints.sqlite` / `past.sqlite`, keyed to the *real* workspace path) stays persistent across
+ephemeral runs; only the workspace tree is throwaway. Both output dirs are gitignored.
+
 ## Two Python stacks — do not mix
 
 | Stack | Location | For |
@@ -268,6 +277,14 @@ Conventions for new tests:
 - **All filesystem writes go to `tmp_path`** (or the `workspace_sandbox` fixture,
   which is a tmp workspace with CWD pointed at it). Nothing a test writes may
   reach the repo or the host-mounted workspace.
+- **To keep a file for post-run inspection, take the `artifact_dir` fixture**
+  (`conftest.py` → `tests/_artifacts.py`). By default it is `tmp_path` (deleted
+  with the session). Under smoke's `-KeepArtifacts` / `KEEP_ARTIFACTS=1` — which
+  sets `DEEPAGENTS_TEST_ARTIFACTS_DIR` and bind-mounts a host folder at
+  `/artifacts` (**outside `/project`**, so the artifact-guard leaves it alone) —
+  it becomes a per-test subdir there, so files are shipped out to
+  `test-artifacts/<timestamp>/` on the host and survive the disposable container.
+  `tests/test_artifacts.py` exercises both modes.
 - A session-scoped autouse guard in `conftest.py` (`_clean_repo_artifacts`)
   diffs the `project/` tree and removes anything a test leaves behind, unless
   `DEEPAGENTS_KEEP_TEST_ARTIFACTS=1` is set (debug escape hatch). It's a backstop

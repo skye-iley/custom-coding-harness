@@ -26,7 +26,6 @@
 # of the workspace at /project/state by run-docker (DEEPAGENTS_STATE_DIR).
 deepagent-image/project/state/
 
-
 # Host-side run outputs (all gitignored, all under deepagent-image/):
 #  - test-artifacts/  : files tests ship out under smoke -KeepArtifacts / KEEP_ARTIFACTS=1
 #  - .ephemeral/      : throwaway workspace copies for run-docker -Ephemeral (deleted on close)

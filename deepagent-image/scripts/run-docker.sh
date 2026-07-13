@@ -2,6 +2,10 @@
 # Run the harness container. Requires project/.env (copy from project/.env.example).
 # Consumes the `deepagent-harness` runtime image built by build.sh
 # (`docker build --target runtime`) — no test code, no pytest.
+#
+# Ephemeral workspace:
+#   EPHEMERAL=1 ./run-docker.sh "task"        # revert all workspace changes on close
+#   SAVE_WORKSPACE=1 ./run-docker.sh "task"   # ephemeral + snapshot to workspace-logs/<ts>/
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="$ROOT/project/.env"
@@ -143,6 +147,35 @@ netjail_up() {
   fi
 }
 
+# Copy $1 -> $2, excluding the heavy, rebuildable workspace conda env (.conda).
+# dotglob so dotfiles (.git, .gitignore) are copied; nullglob so an empty dir
+# doesn't leave a literal '*'.
+copy_workspace() {
+  local src="$1" dst="$2" entry base
+  mkdir -p "$dst"
+  shopt -s dotglob nullglob
+  for entry in "$src"/*; do
+    base="$(basename "$entry")"
+    [[ "$base" == ".conda" ]] && continue
+    cp -a "$entry" "$dst/"
+  done
+  shopt -u dotglob nullglob
+}
+
+# Ephemeral teardown: optionally snapshot the throwaway copy, then discard it so
+# every workspace change reverts. Idempotent (clears EPHEMERAL_DIR after running).
+ephemeral_cleanup() {
+  [[ -n "${EPHEMERAL:-}" && -n "${EPHEMERAL_DIR:-}" ]] || return 0
+  if [[ -n "${SAVE_WORKSPACE:-}" ]]; then
+    local logdir="$ROOT/workspace-logs/$STAMP"
+    copy_workspace "$EPHEMERAL_DIR" "$logdir"
+    echo "Workspace snapshot saved under $logdir"
+  fi
+  [[ -d "$EPHEMERAL_DIR" ]] && rm -rf "$EPHEMERAL_DIR"
+  EPHEMERAL_DIR=""
+  echo "Ephemeral: workspace changes discarded."
+}
+
 seed_workspace() {
   local target="$1"
   local seed="$2"
@@ -166,7 +199,23 @@ fi
 
 mkdir -p "$WORKSPACE"
 WORKSPACE="$(cd "$WORKSPACE" && pwd)"
-seed_workspace "$WORKSPACE" "$SEED_SOURCE"
+
+# Ephemeral workspace: mount a throwaway copy so changes revert on close. The state
+# dir below is keyed to the REAL workspace path and stays persistent. SAVE_WORKSPACE
+# implies EPHEMERAL and snapshots the copy before it is discarded (ephemeral_cleanup).
+EPHEMERAL="${EPHEMERAL:-}"
+SAVE_WORKSPACE="${SAVE_WORKSPACE:-}"
+[[ -n "$SAVE_WORKSPACE" ]] && EPHEMERAL=1
+STAMP="$(date +%Y%m%d-%H%M%S)"
+EPHEMERAL_DIR=""
+MOUNT_WORKSPACE="$WORKSPACE"
+if [[ -n "$EPHEMERAL" ]]; then
+  EPHEMERAL_DIR="$ROOT/.ephemeral/$STAMP"
+  copy_workspace "$WORKSPACE" "$EPHEMERAL_DIR"
+  MOUNT_WORKSPACE="$EPHEMERAL_DIR"
+  echo "Ephemeral: on - changes revert on close (copy at $EPHEMERAL_DIR)"
+fi
+seed_workspace "$MOUNT_WORKSPACE" "$SEED_SOURCE"
 
 # Harness state (checkpoints.sqlite + past.sqlite + session.env) lives OUTSIDE the
 # workspace mount, at /project/state, so the agent's file/shell tools (rooted at
@@ -205,7 +254,7 @@ build_agent_run() {
     ${PROXY_ENV[@]+"${PROXY_ENV[@]}"}
     -e AGENT_WORKSPACE=/project/workspace
     -e DEEPAGENTS_STATE_DIR=/project/state
-    -v "$WORKSPACE:/project/workspace"
+    -v "$MOUNT_WORKSPACE:/project/workspace"
     -v "$STATE_HOST_DIR:/project/state"
     ${GIT_MOUNT[@]+"${GIT_MOUNT[@]}"}
     deepagent-harness)
@@ -220,11 +269,19 @@ if [[ "${NET_JAIL:-}" == "1" ]]; then
   netjail_up
   build_agent_run "$@"
   "${AGENT_RUN[@]}"
-  exit $?
+  rc=$?
+  ephemeral_cleanup   # netjail's own EXIT trap handles the sidecars
+  exit $rc
 fi
 
 # Default (no jail): host-gateway on the bridge, no proxy.
 NET_ARGS=("${HOST_GW[@]}")
 PROXY_ENV=()
 build_agent_run "$@"
+if [[ -n "$EPHEMERAL" ]]; then
+  # Can't exec: the copy must be reverted (and optionally saved) after the run.
+  trap ephemeral_cleanup EXIT INT TERM
+  "${AGENT_RUN[@]}"
+  exit $?
+fi
 exec "${AGENT_RUN[@]}"

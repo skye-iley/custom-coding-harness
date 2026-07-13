@@ -4,15 +4,19 @@
 # then runs the whole suite via pytest discovery on the test image.
 #
 # Usage:
-#   ./smoke.sh              # normal (bridge networking)
-#   NET_JAIL=1 ./smoke.sh   # run the import check + pytest INSIDE the NetJail
-#                           # (--internal net + allowlisted egress proxy). Proves
-#                           # the harness boots and the suite passes with no direct
-#                           # egress, and that the jail plumbing stands up fail-closed.
+#   ./smoke.sh                  # normal (bridge networking)
+#   NET_JAIL=1 ./smoke.sh       # run the import check + pytest INSIDE the NetJail
+#                               # (--internal net + allowlisted egress proxy). Proves
+#                               # the harness boots and the suite passes with no direct
+#                               # egress, and that the jail plumbing stands up fail-closed.
+#   KEEP_ARTIFACTS=1 ./smoke.sh # ship files that tests write via the `artifact_dir`
+#                               # fixture out to test-artifacts/<timestamp>/ on the host
+#                               # (default: they go to the container's tmp and vanish).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NETJAIL_DIR="$ROOT/netjail"
 NET_JAIL="${NET_JAIL:-}"
+KEEP_ARTIFACTS="${KEEP_ARTIFACTS:-}"
 
 # ---------------------------------------------------------------------------
 # NetJail plumbing — mirror of run-docker.sh's NET_JAIL path. Kept in sync with
@@ -122,6 +126,20 @@ if [[ -n "$NET_JAIL" ]]; then
   echo "NetJail: on (deny-all egress + allowlist)"
 fi
 
+# Test-artifact capture: when KEEP_ARTIFACTS=1, bind-mount a fresh host folder to
+# /artifacts (OUTSIDE /project, so the conftest artifact-guard leaves it alone) and
+# point DEEPAGENTS_TEST_ARTIFACTS_DIR at it, so files tests write via the
+# `artifact_dir` fixture survive the disposable container. Off = the fixture falls
+# back to the container's tmp_path and everything is deleted with the container.
+ARTIFACT_ARGS=()
+ARTIFACT_HOST_DIR=""
+if [[ -n "$KEEP_ARTIFACTS" ]]; then
+  ARTIFACT_HOST_DIR="$ROOT/test-artifacts/$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$ARTIFACT_HOST_DIR"
+  ARTIFACT_ARGS=(-v "$ARTIFACT_HOST_DIR:/artifacts" -e "DEEPAGENTS_TEST_ARTIFACTS_DIR=/artifacts")
+  echo "KeepArtifacts: on -> $ARTIFACT_HOST_DIR"
+fi
+
 # Bare-runtime import smoke: third-party deps + the harness package (incl. the
 # cost tracker, so a providers<->cost import cycle fails here). Runs against the
 # plain runtime image — NO test layer — so a runtime import the test layer would
@@ -133,4 +151,7 @@ docker run --rm ${NET_ARGS[@]+"${NET_ARGS[@]}"} ${PROXY_ENV[@]+"${PROXY_ENV[@]}"
 # (file::test PASSED/FAILED); -ra recaps non-passing tests at the end. Failures
 # print the failing test id, file:line, and asserted values by default.
 docker run --rm ${NET_ARGS[@]+"${NET_ARGS[@]}"} ${PROXY_ENV[@]+"${PROXY_ENV[@]}"} \
+  ${ARTIFACT_ARGS[@]+"${ARTIFACT_ARGS[@]}"} \
   deepagent-harness-test python3 -m pytest tests/ -v -ra
+
+[[ -n "$ARTIFACT_HOST_DIR" ]] && echo "Test artifacts saved under $ARTIFACT_HOST_DIR"
