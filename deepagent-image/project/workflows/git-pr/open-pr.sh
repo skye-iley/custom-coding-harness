@@ -3,7 +3,7 @@
 # Safe no-op when gh / GH_TOKEN are absent so a keyless run still ends cleanly.
 set -eu
 cd "${DEEPAGENTS_WORKSPACE:-.}"
-. ./.deepagents/session.env
+. "${DEEPAGENTS_STATE_DIR:-.deepagents}/session.env"
 
 command -v gh >/dev/null 2>&1 || {
   echo "[workflow git-pr] gh not installed; skipping PR" >&2

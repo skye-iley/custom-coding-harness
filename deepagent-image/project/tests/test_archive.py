@@ -56,6 +56,60 @@ def test_append_and_recall_round_trip(tmp_path):
     assert "login" in hits[0].summary
 
 
+def test_recall_from_other_thread(tmp_path):
+    # The recall_past agent tool runs on a langgraph worker thread while the
+    # connection was opened on the main thread. connect() must open with
+    # check_same_thread=False or sqlite3 raises ProgrammingError cross-thread.
+    import threading
+
+    conn = _db(tmp_path)
+    archive.start_session(conn, "run-1", "thread-a", "openai", "gpt", topic=None)
+    archive.append_turn(conn, "run-1", _turn("the secret word is GIRAFFE", "ok"))
+    archive.end_session(conn, "run-1", archive.summarize(conn, "run-1"))
+
+    result: dict = {}
+
+    def _worker():
+        try:
+            result["hits"] = archive.recall(conn, "GIRAFFE")
+        except Exception as exc:  # pragma: no cover - failure path asserts below
+            result["error"] = exc
+
+    t = threading.Thread(target=_worker)
+    t.start()
+    t.join()
+
+    assert "error" not in result, f"cross-thread recall raised: {result.get('error')!r}"
+    assert [h.run_id for h in result["hits"]] == ["run-1"]
+
+
+def test_append_from_other_thread(tmp_path):
+    # The write tap (ArchiveMiddleware -> append_turn) can also fire off a
+    # langgraph worker thread while the connection was opened on the main
+    # thread. The same check_same_thread=False guard must keep writes working
+    # cross-thread, not just reads.
+    import threading
+
+    conn = _db(tmp_path)
+    archive.start_session(conn, "run-1", "thread-a", "openai", "gpt", topic=None)
+
+    result: dict = {}
+
+    def _worker():
+        try:
+            archive.append_turn(conn, "run-1", _turn("logged off-thread", "ok"))
+        except Exception as exc:  # pragma: no cover - failure path asserts below
+            result["error"] = exc
+
+    t = threading.Thread(target=_worker)
+    t.start()
+    t.join()
+
+    assert "error" not in result, f"cross-thread append raised: {result.get('error')!r}"
+    # The worker-thread write is durable and readable from the main thread.
+    assert archive.get_turns(conn, "run-1")[0]["content"] == "logged off-thread"
+
+
 def test_recall_empty_archive_returns_nothing(tmp_path):
     # The past never auto-loads: an unqueried / empty archive yields nothing.
     assert archive.recall(_db(tmp_path), "anything") == []
@@ -219,6 +273,25 @@ def test_archive_enabled_honors_env(monkeypatch):
     assert archive.archive_enabled() is False
     monkeypatch.setenv(archive.ARCHIVE_ENV, "1")
     assert archive.archive_enabled() is True
+
+
+# --- state dir isolation (option 2: state out of the agent's workspace) -------
+
+def test_state_dir_defaults_under_workspace(monkeypatch, tmp_path):
+    monkeypatch.delenv(archive.STATE_DIR_ENV, raising=False)
+    assert archive.state_dir(tmp_path) == tmp_path / ".deepagents"
+    assert archive.default_db_path(tmp_path) == tmp_path / ".deepagents" / "past.sqlite"
+
+
+def test_state_dir_override_relocates_out_of_workspace(monkeypatch, tmp_path):
+    ws = tmp_path / "workspace"
+    state = tmp_path / "state"
+    monkeypatch.setenv(archive.STATE_DIR_ENV, str(state))
+    # The past DB lands under the override, NOT under the agent's workspace root,
+    # so file/shell tools rooted at the workspace cannot reach it.
+    db = archive.default_db_path(ws)
+    assert db == state / "past.sqlite"
+    assert ws not in db.parents
 
 
 # --- middleware tap ----------------------------------------------------------

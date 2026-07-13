@@ -38,6 +38,17 @@ except ModuleNotFoundError:  # pragma: no cover
 # Env knob: DEEPAGENTS_ARCHIVE=0 disables the past archive entirely (§3).
 ARCHIVE_ENV = "DEEPAGENTS_ARCHIVE"
 
+# Env knob: relocate the harness-private state root (past.sqlite,
+# checkpoints.sqlite, session.env) OUT of the agent's workspace. The agent's file
+# and shell tools are rooted at the workspace (agent.py `_WorkspaceShellBackend`,
+# virtual_mode), so state kept under it is readable/corruptible by the agent's own
+# tool calls — the past archive's structural isolation only holds at the
+# checkpointer layer, not the tool layer. Pointing this at a directory outside the
+# workspace bind-mount closes that: the file tools cannot escape their root, and a
+# future bwrap jail that binds only the workspace hides it from the shell too.
+# Unset falls back to `<workspace>/.deepagents` (bare-host + test layout).
+STATE_DIR_ENV = "DEEPAGENTS_STATE_DIR"
+
 # Sentinel that marks a message as injected recall context (not a genuine turn).
 # Placed in a message's additional_kwargs/metadata by the recall path so the tap
 # can skip it and never re-archive recalled slices (§2.3 no-re-archiving gap fix).
@@ -78,8 +89,17 @@ def archive_enabled() -> bool:
     return os.getenv(ARCHIVE_ENV, "1").strip() != "0"
 
 
+def state_dir(workspace: Path | str) -> Path:
+    """Root for harness-private stores (past.sqlite, checkpoints.sqlite,
+    session.env). Honors DEEPAGENTS_STATE_DIR (see STATE_DIR_ENV); otherwise
+    defaults to `<workspace>/.deepagents` for the in-workspace layout used on
+    bare hosts and in tests."""
+    override = os.getenv(STATE_DIR_ENV)
+    return Path(override) if override else Path(workspace) / ".deepagents"
+
+
 def default_db_path(workspace: Path | str) -> Path:
-    return Path(workspace) / ".deepagents" / "past.sqlite"
+    return state_dir(workspace) / "past.sqlite"
 
 
 def _now_iso() -> str:
@@ -90,7 +110,13 @@ def connect(db_path: Path | str) -> sqlite3.Connection:
     """Open (creating parent dir + schema) the archive DB with row access."""
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
+    # check_same_thread=False: the single connection is created on the main
+    # thread (cli.main) but the recall_past agent tool reads it from a langgraph
+    # worker thread. Access stays effectively serialized — the agent runs one
+    # turn at a time, so no two threads touch the connection concurrently — but
+    # sqlite3's default same-thread guard would still reject the cross-thread
+    # read. This mirrors how langgraph's own SqliteSaver opens its DB.
+    conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
     conn.commit()

@@ -46,6 +46,21 @@ if (-not (Test-Path $WorkspacePath)) {
 }
 $WorkspacePath = (Resolve-Path $WorkspacePath).Path
 
+# Harness state (checkpoints.sqlite + past.sqlite + session.env) lives OUTSIDE the
+# workspace mount, at /project/state, so the agent's file/shell tools (rooted at
+# /project/workspace) can't read the past archive or corrupt the live DBs. Backed
+# by a host dir under the harness repo, keyed per-workspace so distinct repos keep
+# separate archives (mirrors the old per-workspace <workspace>/.deepagents split).
+# The Python side reads DEEPAGENTS_STATE_DIR via archive.state_dir. Mirror in run-docker.sh.
+$sha256 = [System.Security.Cryptography.SHA256]::Create()
+$WsKey = [System.BitConverter]::ToString(
+    $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($WorkspacePath))
+).Replace("-", "").Substring(0, 12).ToLower()
+$StateHostDir = Join-Path $Root "project\state\$WsKey"
+if (-not (Test-Path $StateHostDir)) {
+    New-Item -ItemType Directory -Force -Path $StateHostDir | Out-Null
+}
+
 function Seed-Workspace {
     param([string]$Target, [string]$SeedSource)
     if (-not (Test-Path $SeedSource)) { return }
@@ -213,7 +228,9 @@ $dockerArgs = @(
 ) + $NetArgs + $ProxyEnv + @(
     "--env-file", $EnvFile,
     "-e", "AGENT_WORKSPACE=/project/workspace",
-    "-v", "${WorkspacePath}:/project/workspace"
+    "-e", "DEEPAGENTS_STATE_DIR=/project/state",
+    "-v", "${WorkspacePath}:/project/workspace",
+    "-v", "${StateHostDir}:/project/state"
 )
 
 # Git identity: mount host .gitconfig read-only into the agent user's home (uid 10001 -> /home/agent),

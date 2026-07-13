@@ -168,6 +168,16 @@ mkdir -p "$WORKSPACE"
 WORKSPACE="$(cd "$WORKSPACE" && pwd)"
 seed_workspace "$WORKSPACE" "$SEED_SOURCE"
 
+# Harness state (checkpoints.sqlite + past.sqlite + session.env) lives OUTSIDE the
+# workspace mount, at /project/state, so the agent's file/shell tools (rooted at
+# /project/workspace) can't read the past archive or corrupt the live DBs. Backed
+# by a host dir under the harness repo, keyed per-workspace so distinct repos keep
+# separate archives (mirrors the old per-workspace <workspace>/.deepagents split).
+# The Python side reads DEEPAGENTS_STATE_DIR via archive.state_dir. Mirror in run-docker.ps1.
+WS_KEY="$(printf '%s' "$WORKSPACE" | sha256sum | cut -c1-12)"
+STATE_HOST_DIR="$ROOT/project/state/$WS_KEY"
+mkdir -p "$STATE_HOST_DIR"
+
 # Git identity: mount host .gitconfig read-only into the agent user's home (uid 10001 -> /home/agent),
 # not /root (container runs USER agent). Never mount ~/.ssh into an autonomous-agent container -
 # use a scoped, per-session deploy key or a short-lived token for pushes instead.
@@ -194,7 +204,9 @@ build_agent_run() {
     --env-file "$ENV_FILE"
     ${PROXY_ENV[@]+"${PROXY_ENV[@]}"}
     -e AGENT_WORKSPACE=/project/workspace
+    -e DEEPAGENTS_STATE_DIR=/project/state
     -v "$WORKSPACE:/project/workspace"
+    -v "$STATE_HOST_DIR:/project/state"
     ${GIT_MOUNT[@]+"${GIT_MOUNT[@]}"}
     deepagent-harness)
   if [[ $# -gt 0 ]]; then

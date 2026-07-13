@@ -21,3 +21,7 @@
 
 # Compound Engineering machine-local config
 .compound-engineering/*.local.yaml
+
+# Harness-private state (checkpoints + past archive + session.env), mounted out
+# of the workspace at /project/state by run-docker (DEEPAGENTS_STATE_DIR).
+deepagent-image/project/state/
