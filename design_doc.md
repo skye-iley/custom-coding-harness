@@ -883,7 +883,24 @@ system_interrupts:                # which harness events raise (vs. log/crash)
 *   **Long-Term Project Memory**: Integrate a vector database (e.g., Qdrant or ChromaDB) to store a persistent, compressed index of the entire project history and decision logs.
 
 ### Framework Enhancements
-*   **Automated Benchmarking Suite**: Build a "Gold Set" of coding tasks with known correct outcomes to quantitatively measure the impact of new compression algorithms or routing logic.
+*   **Automated Benchmarking Suite**: Quantitatively measure the harness (routing, compression, memory) against known-correct coding tasks. Budget is tight — full SWE-bench (2294 instances) is out of reach — so the plan is a cost-tiered ladder, cheapest signal first, built on a shared batch driver.
+
+    **Benchmark tiers (cheapest first):**
+    1.  *Gold set (free, CI regression).* A small pinned set (5–20) of bug-fix tasks — each `{id, repo/dir, base_commit, task_prompt, fail_to_pass[]}` — run against **local/free models** (ollama/lmstudio, already in the provider registry) for **$0**. This is the primary regression signal for "did a harness change break the loop." Built first.
+    2.  *Aider polyglot (cheap agentic).* The Exercism-based exercise set: self-contained stub+test dirs, no clone-at-commit, exercises the real edit→run-tests loop cheaply.
+    3.  *SWE-bench Lite / Verified subset (reportable, spend deliberately).* Run a fixed **25–50 instance sample** (not the full set) with a cheap model as the reportable configuration; prefer **Verified** (human-validated, fewer broken instances) for signal-per-dollar.
+
+    **Harness gaps to close (not yet built):**
+    -   *Batch eval driver* (`harness/bench/`, host-runnable/stdlib): iterate a dataset, prep each instance's workspace, run the harness **headless** (the existing non-TTY single-turn path), capture the result.
+    -   *Prediction/patch output mode* (`--emit-patch`): emit a clean `git diff` prediction (jsonl `{instance_id, model_name_or_path, model_patch}`) **excluding** harness artifacts (`.deepagents/`, `.agent_telemetry/`, and the workspace `.conda/` env). The current git lifecycle produces a commit→PR, not a scorable patch.
+    -   *Per-instance hard stop* (`--max-turns` + session wall-clock): the M1 cost/token caps don't bound a stuck instance on a **free/local** model (cost never accrues), so a turn/time bound is required to cap runaway instances.
+
+    **Decided approaches (design forks, resolved):**
+    -   *Scoring:* **reuse the official evaluation harnesses** (SWE-bench eval harness, Aider runner). The only contract the harness must satisfy is the predictions jsonl — no bespoke scorer, keeping numbers standard-comparable.
+    -   *Anti-cheat network posture:* run the solve under **NetJail** with a **minimal allowlist** (pypi/registry only) so the agent cannot fetch the upstream fix from GitHub. Any egress the instance setup needs must be granted in `netjail/*.txt` or it fails closed.
+    -   *Per-instance environment setup:* **adopt SWE-bench's per-instance Docker images** (repo + deps at `base_commit`) and inject the agent into them, rather than remapping every repo into the workspace conda model. This deliberately bypasses the two-stack conda convention **for the benchmark path only**. Open detail to pin before this tier: confirm the harness venv (`/opt/venv`, runs `main.py`) can ride inside those images without colliding with the instance interpreter (mount, or install the harness to a fixed path).
+
+    Tiers 1–2 need only the batch driver + patch output + hard stop; the network and image decisions apply at the SWE-bench tier.
 *   **Self-Tuning Classifier**: Implement a feedback loop where the orchestrator reports the "correctness" of the initial routing decision, used to fine-tune the local classifier model via DPO or RLHF.
 *   **Classifier Knowledge Distillation**: Use a high-reasoning "Teacher" model (e.g., Claude 3.5 Opus or GPT-4o) to label a large dataset of prompt-category pairs. Fine-tune the lightweight local classifier (the "Student") using this high-quality synthetic data to align its routing decisions with the teacher's reasoning.
 *   **IDE Integration**: Develop a VS Code extension to allow the harness to be controlled directly from the editor, providing inline "agent-suggested" diffs.
