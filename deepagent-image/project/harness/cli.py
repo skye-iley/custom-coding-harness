@@ -114,6 +114,89 @@ def _env_int(name: str) -> int | None:
 
 EXIT_TOKENS = {"/exit", "/quit"}
 
+# Slash commands offered in the interactive prompt's completion menu, each with a
+# one-line description shown as the completion's meta (the "preview"). Kept as a
+# pure map so the candidate set is host-testable without a terminal. /recall and
+# /topic only exist when the past archive is on (Milestone 2), so they are gated.
+_SLASH_META_BASE = {
+    "/exit": "end the session",
+    "/quit": "end the session",
+}
+_SLASH_META_ARCHIVE = {
+    "/recall": "stage prior-session context for the next turn ( /recall [query] [--all] )",
+    "/topic": "show or set the continual-topic label ( /topic [name] )",
+}
+
+
+def slash_commands(archive_on: bool) -> dict[str, str]:
+    """The slash-command -> description map offered by prompt completion. Pure
+    (no I/O) so tests assert the menu without building a terminal. Archive-only
+    commands are folded in only when the past archive is enabled."""
+    meta = dict(_SLASH_META_BASE)
+    if archive_on:
+        meta.update(_SLASH_META_ARCHIVE)
+    return meta
+
+
+def _completion_candidates(text: str, commands: dict[str, str]) -> list[tuple[str, str]]:
+    """The (command, description) pairs whose command matches the typed first
+    token. Empty for a non-slash prompt, or once an argument is being typed (a
+    space is present) — so ordinary prompts and command arguments get no menu.
+    Pure (no prompt_toolkit, no terminal) so it is host-testable directly."""
+    if not text.startswith("/") or " " in text:
+        return []
+    return [(cmd, meta) for cmd, meta in commands.items() if cmd.startswith(text)]
+
+
+def _make_prompt_session(archive_on: bool, history_path: Path | None):
+    """A line-oriented `prompt_toolkit` session — persistent history, Ctrl-R
+    reverse search, and slash-command completion with a preview menu — or None
+    when prompt_toolkit is unavailable or can't attach to this terminal, so the
+    REPL degrades to plain `input()` instead of crashing.
+
+    Line-oriented on purpose (`multiline=False`): Enter still submits, so the
+    minimal `you>` feel is unchanged; bracketed paste still lets a multi-line
+    block (a diff/command) arrive as a single turn. The caller only builds this
+    for an interactive TTY (it gates on `sys.stdin.isatty()`)."""
+    try:
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.completion import Completer, Completion
+        from prompt_toolkit.history import FileHistory, InMemoryHistory
+
+        commands = slash_commands(archive_on)
+
+        class _SlashCompleter(Completer):
+            def get_completions(self, document, complete_event):
+                text = document.text_before_cursor
+                for cmd, meta in _completion_candidates(text, commands):
+                    yield Completion(
+                        cmd,
+                        start_position=-len(text),
+                        display=cmd,
+                        display_meta=meta,
+                    )
+
+        history = FileHistory(str(history_path)) if history_path else InMemoryHistory()
+        return PromptSession(
+            history=history,
+            completer=_SlashCompleter(),
+            complete_while_typing=True,
+            multiline=False,
+        )
+    except Exception:  # noqa: BLE001 - optional / terminal-dependent; fall back to input()
+        return None
+
+
+def _read_line(session, prompt_str: str) -> str:
+    """Read one input line: from the prompt_toolkit session when one was built,
+    else plain `input()` (non-TTY, or prompt_toolkit missing). The single seam
+    both paths funnel through, so tests stub here. Both `session.prompt` and
+    `input` raise EOFError / KeyboardInterrupt the same way, so the caller's
+    exit handling is identical either way."""
+    if session is None:
+        return input(prompt_str)
+    return session.prompt(prompt_str)
+
 
 def _stage(message: str) -> None:
     """Lifecycle marker. Written to stderr (not stdout) with a distinct prefix
@@ -351,6 +434,7 @@ def run_repl(
     archive_conn=None,
     run_id: str | None = None,
     topic: str | None = None,
+    history_path: Path | None = None,
 ) -> int:
     """Container-lifetime loop: build once (by the caller), then prompt -> invoke
     -> answer until /exit, /quit, or EOF. A non-TTY stdin collapses to the single
@@ -361,6 +445,11 @@ def run_repl(
     its after_model), caught here to end the session deterministically like
     /exit. When tracker is None the clause is inert (null = MVP, §2.5).
 
+    Interactive input goes through a line-oriented `prompt_toolkit` session
+    (history at `history_path`, reverse search, slash-command preview completion);
+    it degrades to plain `input()` when prompt_toolkit is absent or stdin is not a
+    TTY, so the non-interactive path is byte-for-byte the old behavior.
+
     When `archive_conn` is set, the `/recall` and `/topic` REPL commands operate
     on the past archive; `/recall <query>` stages a marked context slice consumed
     by the next turn. When it is None (archive off) both commands are inert.
@@ -368,6 +457,9 @@ def run_repl(
     interactive = sys.stdin.isatty()
     current_topic = topic
     pending: list = []  # recall slices staged for the next turn (marked)
+    # Rich line editing only for an interactive TTY; a non-TTY run never reaches
+    # the loop below. None => plain input() (prompt_toolkit missing / non-TTY).
+    session = _make_prompt_session(archive_conn is not None, history_path) if interactive else None
 
     if initial_task:
         try:
@@ -402,7 +494,7 @@ def run_repl(
     while True:
         _stage("reading prompt")
         try:
-            line = input("you> ")
+            line = _read_line(session, "you> ")
         except (EOFError, KeyboardInterrupt):
             # EOF (Ctrl-D), or Ctrl-C at an idle prompt: both end the session
             # deterministically (MVP §1a req 5 / decision on Ctrl-C).
@@ -581,6 +673,7 @@ def main() -> int:
                 archive_conn=archive_conn,
                 run_id=run_id,
                 topic=args.topic,
+                history_path=checkpoint_db.parent / "repl_history",
             )
             if archive_conn is not None:
                 # After the M1 session-total line printed (inside run_repl), so the
