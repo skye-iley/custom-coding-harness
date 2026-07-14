@@ -27,33 +27,38 @@ RUN apt-get update \
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 
-WORKDIR /tmp/build
-COPY project/requirements.txt .
-RUN uv venv /opt/venv --python python3 \
-    && uv pip install --index-url https://pypi.org/simple -r requirements.txt
-RUN python3 -c "import deepagents, langgraph, langgraph.checkpoint.sqlite, langchain_openai, langchain_deepseek, langchain_ollama"
+RUN useradd --create-home --uid 10001 agent
 
-# Miniforge for workspace-local conda envs (not on harness PATH).
+# Miniforge for workspace-local conda envs (not on harness PATH). Installed +
+# chowned here, ABOVE the requirements.txt COPY, because /opt/conda does not
+# depend on the harness deps at all. Keeping the big conda tree upstream of the
+# source-dependent layers means its recursive chown (tens of thousands of files —
+# the dominant cost of the old combined sweep) stays cached across requirements.txt
+# edits, re-running only when miniforge itself or the base image changes.
 RUN curl -fsSL https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh \
         -o /tmp/miniforge.sh \
     && bash /tmp/miniforge.sh -b -p /opt/conda \
     && rm /tmp/miniforge.sh \
     && /opt/conda/bin/conda config --system --set auto_activate_base false \
     && /opt/conda/bin/conda clean -a -y
+RUN chown -R agent:agent /opt/conda
 
 ENV CONDA_ROOT=/opt/conda
 ENV MAMBA_ROOT_PREFIX=/opt/conda
 
-RUN useradd --create-home --uid 10001 agent
-# chown the big, source-independent trees here (once, cached). /opt/conda alone is
-# tens of thousands of files, so keeping this out of the source-dependent layer
-# below avoids a full recursive chown on every project edit. This layer is
-# downstream of the venv/conda installs, so a requirements.txt or conda change
-# still re-runs it. GUARDRAIL: any future RUN that writes to /opt/venv or
-# /opt/conda as root *after* this line (and before USER agent) must chown its own
-# output — this sweep no longer runs last. (The test stage installs as USER agent,
-# so its files are already agent-owned.)
-RUN chown -R agent:agent /opt/venv /opt/conda
+WORKDIR /tmp/build
+COPY project/requirements.txt .
+# venv install chowns its OWN output inline (per the guardrail below): the conda
+# sweep above already ran and no longer trails the whole build, so this layer must
+# fix up ownership of what it writes. /opt/venv is small (a single Python env), so
+# re-running this on a requirements.txt change is cheap — unlike the conda tree.
+# GUARDRAIL: any future RUN that writes to /opt/venv or /opt/conda as root before
+# USER agent must chown its own output — there is no trailing catch-all sweep.
+# (The test stage installs as USER agent, so its files are already agent-owned.)
+RUN uv venv /opt/venv --python python3 \
+    && uv pip install --index-url https://pypi.org/simple -r requirements.txt \
+    && chown -R agent:agent /opt/venv
+RUN python3 -c "import deepagents, langgraph, langgraph.checkpoint.sqlite, langchain_openai, langchain_deepseek, langchain_ollama"
 
 WORKDIR /project
 # Enumerated COPY of the project/ top level *minus* tests/ — keeps test code out
