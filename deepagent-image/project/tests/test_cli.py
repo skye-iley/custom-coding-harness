@@ -356,6 +356,9 @@ def test_run_repl_turn_error_interactive_survives_to_next_prompt(monkeypatch):
     # In an interactive session a failed turn is reported and the loop keeps
     # going: the user gets the prompt back to retry, the session is not killed.
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    # Force the plain-input() fallback so the test drives the loop without a real
+    # terminal (prompt_toolkit's session.prompt would need one).
+    monkeypatch.setattr(cli, "_make_prompt_session", lambda *a, **k: None)
     prompts = iter(["hello"])  # one prompt, then EOF ends the loop
 
     def fake_input(_prompt=""):
@@ -369,6 +372,137 @@ def test_run_repl_turn_error_interactive_survives_to_next_prompt(monkeypatch):
     rc = cli.run_repl(agent, {}, "")  # no initial task; the loop drives the turn
     assert rc == 0
     assert agent.calls == 1  # the failing turn ran and was caught, not re-raised
+
+
+# --- prompt_toolkit REPL input ergonomics (M3 slice 6, PR-a) ---
+
+def test_slash_commands_gated_on_archive():
+    # /exit and /quit always available; /recall and /topic only when the past
+    # archive is on (they are inert otherwise, so must not appear in the menu).
+    base = cli.slash_commands(archive_on=False)
+    assert set(base) == {"/exit", "/quit"}
+
+    witharchive = cli.slash_commands(archive_on=True)
+    assert {"/recall", "/topic"} <= set(witharchive)
+    # Every command carries a non-empty description (the completion preview meta).
+    assert all(witharchive.values())
+
+
+def test_read_line_falls_back_to_input_without_session(monkeypatch):
+    # session=None => plain input(), so a non-TTY / prompt_toolkit-less run is
+    # byte-for-byte the old behavior.
+    monkeypatch.setattr("builtins.input", lambda prompt="": "typed line")
+    assert cli._read_line(None, "you> ") == "typed line"
+
+
+def test_read_line_uses_session_when_present():
+    # With a session, the read goes through session.prompt (not input()).
+    class _FakeSession:
+        def __init__(self):
+            self.seen = None
+
+        def prompt(self, prompt_str):
+            self.seen = prompt_str
+            return "from session"
+
+    sess = _FakeSession()
+    assert cli._read_line(sess, "you> ") == "from session"
+    assert sess.seen == "you> "
+
+
+def test_completion_candidates_match_typed_slash_token():
+    # The completion menu is derived from a pure function (no terminal needed):
+    # matching slash commands with their preview description, and nothing for a
+    # non-slash prompt or once an argument is typed.
+    cmds = cli.slash_commands(archive_on=True)
+
+    assert cli._completion_candidates("/re", cmds) == [("/recall", cmds["/recall"])]
+    assert sorted(c for c, _ in cli._completion_candidates("/", cmds)) == [
+        "/exit",
+        "/quit",
+        "/recall",
+        "/topic",
+    ]
+    # Every candidate carries a non-empty preview description.
+    assert all(meta for _, meta in cli._completion_candidates("/", cmds))
+    # A plain prompt, or a command with an argument, gets no menu (minimal feel).
+    assert cli._completion_candidates("fix the bug", cmds) == []
+    assert cli._completion_candidates("/recall foo", cmds) == []
+
+
+def test_repl_key_bindings_enter_submits_ctrl_j_and_alt_enter_newline():
+    # Enter submits; Ctrl-J and Alt+Enter insert a newline (typed multi-line).
+    # Shift+Enter is deliberately unbound (not portably distinguishable from Enter).
+    pytest.importorskip("prompt_toolkit")
+    from prompt_toolkit.keys import Keys
+
+    kb = cli._repl_key_bindings()
+    keysets = {tuple(b.keys) for b in kb.bindings}
+    assert (Keys.Enter,) in keysets
+    assert (Keys.ControlJ,) in keysets
+    assert (Keys.Escape, Keys.Enter) in keysets
+
+    def handler_for(keys):
+        for b in kb.bindings:
+            if tuple(b.keys) == keys:
+                return b.handler
+        raise AssertionError(f"no binding for {keys}")
+
+    class _CS:
+        def __init__(self, completion):
+            self.current_completion = completion
+
+    class _Buf:
+        def __init__(self, completion=None):
+            self.complete_state = _CS(completion) if completion else None
+            self.inserted = []
+            self.submitted = False
+            self.applied = None
+
+        def insert_text(self, text):
+            self.inserted.append(text)
+
+        def validate_and_handle(self):
+            self.submitted = True
+
+        def apply_completion(self, completion):
+            self.applied = completion
+
+    class _Ev:
+        def __init__(self, buf):
+            self.current_buffer = buf
+
+    # Ctrl-J inserts a newline, does not submit.
+    buf = _Buf()
+    handler_for((Keys.ControlJ,))(_Ev(buf))
+    assert buf.inserted == ["\n"] and not buf.submitted
+
+    # Enter with no open completion submits.
+    buf = _Buf()
+    handler_for((Keys.Enter,))(_Ev(buf))
+    assert buf.submitted and buf.inserted == []
+
+    # Enter with a navigated completion accepts it instead of submitting.
+    sentinel = object()
+    buf = _Buf(completion=sentinel)
+    handler_for((Keys.Enter,))(_Ev(buf))
+    assert buf.applied is sentinel and not buf.submitted
+
+
+def test_make_prompt_session_returns_none_when_prompt_toolkit_missing(monkeypatch):
+    # If prompt_toolkit can't be imported, the builder degrades to None so the
+    # REPL falls back to input() rather than crashing.
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _blocked(name, *args, **kwargs):
+        if name.startswith("prompt_toolkit"):
+            raise ImportError("blocked for test")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _blocked)
+    assert cli._make_prompt_session(archive_on=False, history_path=None) is None
 
 
 # --- _dump_partial: surface accumulated turn state on error (DEEPAGENTS_DEBUG) ---
