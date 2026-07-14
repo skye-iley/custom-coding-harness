@@ -51,6 +51,37 @@ Each slice is independently shippable. Detailed design lives in `design_doc.md` 
    - **Permission / security gate** (§2, §10) — path-guard / NetJail / bwrap denial.
 5. **Policy & headless behavior.** `interruption_policy` (`blocking` | `shadow`) and per-request
    `timeout_policy` so an unattended headless run (§12) has defined behavior with no human present.
+6. **REPL input ergonomics (`prompt_toolkit`).** Replace the bare `input("you> ")` in
+   `harness/cli.py:run_repl` with a `prompt_toolkit` `PromptSession` — still **line-oriented, not a
+   full-screen app** — so the stdout-answer / stderr-stage-marker split (M1 cost lines, stage
+   markers) is untouched. Adds:
+   - **Multi-line input** — submit a diff / command / heredoc as one task or interrupt reply,
+     addressing the large-`context` payload problem (§5 Channel & presentation).
+   - **`choose`-kind select** — a single-line arrow-key menu for `kind == choose` interrupt requests
+     (slices 1, 3), rather than typing an option index.
+   - **Slash-command completion with a preview menu** — a `/`-triggered dropdown listing `/recall`,
+     `/topic`, `/exit`/`/quit` (+ future `/approve` etc.), each with a `display_meta` one-liner
+     describing it (`complete_while_typing=True`). Makes the command surface discoverable.
+   - **Persistent history + reverse search** — up/down recall and Ctrl-R over a history file in the
+     M2 state dir (`<state-dir>/repl_history`), surviving container restarts like the other state.
+   **Degrade rule:** engage `prompt_toolkit` only when `sys.stdin.isatty()`; a non-TTY stdin keeps
+   the current single-turn plain-`input` fallback (MVP §1a) unchanged, and every `choose` menu falls
+   back to a numbered-text prompt. New harness dep in `project/requirements.txt` (line-editing only;
+   no full-screen runtime). **Defers** the full-screen host TUI — `textual` is the likely
+   implementation when that renderer lands (§5 Channel & presentation), reusing the same `kind`-keyed
+   request object so this slice's input contract carries forward.
+
+   **Build plan — two PRs** (the `choose` menu can't exist before slice 1 defines the request object):
+   - **PR-a (independent of the interrupt spine):** multi-line input, persistent history + reverse
+     search, slash-command preview completion. Touches only `run_repl` + `requirements.txt`.
+   - **PR-b (after slice 1):** the `choose`-kind select menu over the slice-1 request object.
+
+   **Test seam:** route the prompt read through one helper (`cli._read_prompt()`) that selects
+   `PromptSession` vs plain `input()` by `sys.stdin.isatty()`. Tests monkeypatch the **helper**, not
+   `input`, so the existing `test_cli` input stubs and the non-TTY single-turn fallback stay intact.
+   Keep the completion candidates + `display_meta` map a **pure function** so it is host-testable with
+   no terminal (no `prompt_toolkit` pipe-input harness needed for the common case). History file lives
+   in the M2 state dir (outside the workspace), so the agent's shell tool can't read operator prompts.
 
 ## 4. Config surface
 
@@ -75,7 +106,10 @@ by the slice they gate.
   unanswered interrupt, or does each interrupt carry its own resume point? Needs concrete UX before
   slice 5.
 - **Non-terminal-friendly rendering.** The `context` payload can be a large diff or command. Decide
-  a truncation/paging contract for the REPL so a big interrupt doesn't flood the `you>` prompt.
+  a truncation/paging contract for the REPL so a big interrupt doesn't flood the `you>` prompt. Slice
+  6's `prompt_toolkit` multi-line input covers the *collect* side; paging the *display* side is still
+  open. The deferred full-screen host TUI (likely `textual`) is where paged rendering ultimately
+  lands — slice 6 keeps the input contract line-oriented so that renderer is additive, not a rewrite.
 
 ### Interrupt identity & resume correctness (slice 1)
 
