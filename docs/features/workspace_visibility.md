@@ -113,7 +113,7 @@ expose a designated secret, and warns.
   bwrap is off/unwired.
 - **Frozen at launch:** scan + mounts computed host-side before `docker run`; agent runtime edits to
   any `.agentignore` cannot unmask the current session.
-- Not sandboxing — trust boundary is still the container (`design_doc_mvp.md` §5). Do not describe it
+- Not sandboxing — trust boundary is still the container (`docs/milestones/mvp.md` §5). Do not describe it
   as a sandbox.
 
 ### 4.2 bwrap fs-tool jail (the real allow-list boundary)

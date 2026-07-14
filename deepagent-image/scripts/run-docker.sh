@@ -15,7 +15,7 @@ NETJAIL_DIR="$ROOT/netjail"
 
 # Resource caps (Milestone 1 §3): a Docker host-boundary control so a runaway
 # agent can't exhaust the host CPU/RAM or fork-bomb it. NOT a sandbox (the trust
-# boundary is still the container; see design_doc_mvp.md §5). Override via env:
+# boundary is still the container; see docs/milestones/mvp.md §5). Override via env:
 #   CPUS=4 MEMORY=8g PIDS_LIMIT=1024 ./run-docker.sh "task"
 CPUS="${CPUS:-2}"
 MEMORY="${MEMORY:-4g}"

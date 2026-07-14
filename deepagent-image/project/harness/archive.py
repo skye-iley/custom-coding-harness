@@ -6,7 +6,7 @@ auto-inject into model context. Written every session (per-turn `turns` rows +
 one `sessions` row); read back only through explicit recall (`/recall`,
 `recall_past`).
 
-Two-stack purity (design_doc_milestone2.md §2.2 / §6):
+Two-stack purity (docs/milestones/milestone2.md §2.2 / §6):
 - Runs in the harness venv on **stdlib `sqlite3` only** — no new dependency.
 - Must **not** import `providers.py` or `cost.py` (acyclic graph, mirroring the
   `cost.py`-↛-siblings rule). The resolved model, the token/cost totals, and the

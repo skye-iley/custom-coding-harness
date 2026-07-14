@@ -406,7 +406,7 @@ with no per-file naming; the bare-runtime smoke runs against the runtime image;
 
 **Outside this change's identity (carried from origin):**
 - No change to the trust boundary; this does not add sandboxing (the boundary stays
-  the container, per `design_doc_mvp.md` §5).
+  the container, per `docs/milestones/mvp.md` §5).
 
 ---
 
@@ -478,4 +478,4 @@ with no per-file naming; the bare-runtime smoke runs against the runtime image;
 - No external research run: multi-stage Docker and pytest fixtures are settled patterns
   with strong local grounding; the request carried no external signal.
 - Conventions honored: `.ps1`/`.sh` pairs stay in sync; secrets stay in `project/.env`
-  (untouched here); trust boundary unchanged (`design_doc_mvp.md` §5).
+  (untouched here); trust boundary unchanged (`docs/milestones/mvp.md` §5).

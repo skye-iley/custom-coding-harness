@@ -5,17 +5,17 @@ coding agent against a mounted workspace, with provider-agnostic model selection
 secret-safe containers.
 
 - `design_doc.md` — full target vision (multi-agent, FSM routing, bubblewrap jail, telemetry-to-PR).
-- `design_doc_mvp.md` — **the current build target.** When the two disagree, the MVP doc wins for
+- `docs/milestones/mvp.md` — **the current build target.** When the two disagree, the MVP doc wins for
   "what we are building now."
-- `design_doc_milestone1.md` — the planned successor to the MVP (cost/token visibility + resource
+- `docs/milestones/milestone1.md` — the planned successor to the MVP (cost/token visibility + resource
   caps). Wins over `design_doc.md` for "what we build next."
-- `design_doc_milestone2.md` — successor to Milestone 1: present/past memory (fresh-by-default
+- `docs/milestones/milestone2.md` — successor to Milestone 1: present/past memory (fresh-by-default
   thread + a separate, on-demand archive that accumulates across sessions). **Built** — see the
   "Present / past memory" section in `deepagent-image/CLAUDE.md`.
-- `design_doc_milestone3.md` — successor to Milestone 2: human-in-the-loop (one `interrupt()` spine,
+- `docs/milestones/milestone3.md` — successor to Milestone 2: human-in-the-loop (one `interrupt()` spine,
   three trigger sources — deterministic workflow pause, agent `ask_human` tool, system events).
   **Stub** — schedules the `design_doc.md` §9 / §3 HITL design into build slices; not yet spec-complete.
-- `design_doc_workspace_visibility.md` — **named feature plan** (not a numbered milestone): restrict
+- `docs/features/workspace_visibility.md` — **named feature plan** (not a numbered milestone): restrict
   which workspace paths an agent can see (`.agentignore` policy, designated-secret floor, docker-mask
   → bwrap fs-tool jail → optional overlayfs). **Planned** — summarized in `design_doc.md` §2
   (Workspace Visibility & Secret Masking).
@@ -65,7 +65,7 @@ cd deepagent-image
 
 `run-docker` is a persistent multi-turn session, not a one-shot: the container stays up across
 turns until you type `/exit` or `/quit` at the `you>` prompt (or Ctrl-D). It needs a TTY (`-it`);
-piped/non-interactive stdin collapses to a single turn for CI/smoke. See `design_doc_mvp.md` §1a.
+piped/non-interactive stdin collapses to a single turn for CI/smoke. See `docs/milestones/mvp.md` §1a.
 
 `.sh` equivalents exist for each script — **keep the `.ps1` and `.sh` pairs in sync** when editing one.
 
@@ -78,7 +78,7 @@ piped/non-interactive stdin collapses to a single turn for CI/smoke. See `design
   workspace conda env at `<workspace>/.conda/env` (the agent's code/tests/installs). Harness changes
   go in `project/requirements.txt` + rebuild; never edit the harness to satisfy a workspace dep.
 - The MVP's trust boundary is the **Docker container, not bubblewrap** — the shell tool is not yet
-  routed through `sandbox-exec` (see `design_doc_mvp.md` §5). Don't claim sandboxing the MVP doesn't have.
+  routed through `sandbox-exec` (see `docs/milestones/mvp.md` §5). Don't claim sandboxing the MVP doesn't have.
 - `**/old/` and `**/suggestions/` are archived reference, not live code — ignore them.
 
 ## Conventions
