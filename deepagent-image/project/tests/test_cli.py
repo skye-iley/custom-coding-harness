@@ -430,6 +430,65 @@ def test_completion_candidates_match_typed_slash_token():
     assert cli._completion_candidates("/recall foo", cmds) == []
 
 
+def test_repl_key_bindings_enter_submits_ctrl_j_and_alt_enter_newline():
+    # Enter submits; Ctrl-J and Alt+Enter insert a newline (typed multi-line).
+    # Shift+Enter is deliberately unbound (not portably distinguishable from Enter).
+    pytest.importorskip("prompt_toolkit")
+    from prompt_toolkit.keys import Keys
+
+    kb = cli._repl_key_bindings()
+    keysets = {tuple(b.keys) for b in kb.bindings}
+    assert (Keys.Enter,) in keysets
+    assert (Keys.ControlJ,) in keysets
+    assert (Keys.Escape, Keys.Enter) in keysets
+
+    def handler_for(keys):
+        for b in kb.bindings:
+            if tuple(b.keys) == keys:
+                return b.handler
+        raise AssertionError(f"no binding for {keys}")
+
+    class _CS:
+        def __init__(self, completion):
+            self.current_completion = completion
+
+    class _Buf:
+        def __init__(self, completion=None):
+            self.complete_state = _CS(completion) if completion else None
+            self.inserted = []
+            self.submitted = False
+            self.applied = None
+
+        def insert_text(self, text):
+            self.inserted.append(text)
+
+        def validate_and_handle(self):
+            self.submitted = True
+
+        def apply_completion(self, completion):
+            self.applied = completion
+
+    class _Ev:
+        def __init__(self, buf):
+            self.current_buffer = buf
+
+    # Ctrl-J inserts a newline, does not submit.
+    buf = _Buf()
+    handler_for((Keys.ControlJ,))(_Ev(buf))
+    assert buf.inserted == ["\n"] and not buf.submitted
+
+    # Enter with no open completion submits.
+    buf = _Buf()
+    handler_for((Keys.Enter,))(_Ev(buf))
+    assert buf.submitted and buf.inserted == []
+
+    # Enter with a navigated completion accepts it instead of submitting.
+    sentinel = object()
+    buf = _Buf(completion=sentinel)
+    handler_for((Keys.Enter,))(_Ev(buf))
+    assert buf.applied is sentinel and not buf.submitted
+
+
 def test_make_prompt_session_returns_none_when_prompt_toolkit_missing(monkeypatch):
     # If prompt_toolkit can't be imported, the builder degrades to None so the
     # REPL falls back to input() rather than crashing.

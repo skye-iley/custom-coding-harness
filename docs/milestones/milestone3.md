@@ -56,7 +56,10 @@ Each slice is independently shippable. Detailed design lives in `design_doc.md` 
    full-screen app** — so the stdout-answer / stderr-stage-marker split (M1 cost lines, stage
    markers) is untouched. Adds:
    - **Multi-line input** — submit a diff / command / heredoc as one task or interrupt reply,
-     addressing the large-`context` payload problem (§5 Channel & presentation).
+     addressing the large-`context` payload problem (§5 Channel & presentation). Enter submits;
+     **Ctrl-J** (and **Alt+Enter**) insert a newline for typed multi-line, and bracketed paste drops
+     a multi-line block in as one turn. Shift+Enter is deliberately unbound — most terminals send the
+     same byte for it as Enter, so it isn't portably distinguishable (Ctrl-J is the reliable equivalent).
    - **`choose`-kind select** — a single-line arrow-key menu for `kind == choose` interrupt requests
      (slices 1, 3), rather than typing an option index.
    - **Slash-command completion with a preview menu** — a `/`-triggered dropdown listing `/recall`,

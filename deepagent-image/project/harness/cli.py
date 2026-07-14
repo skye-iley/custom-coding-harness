@@ -148,16 +148,45 @@ def _completion_candidates(text: str, commands: dict[str, str]) -> list[tuple[st
     return [(cmd, meta) for cmd, meta in commands.items() if cmd.startswith(text)]
 
 
-def _make_prompt_session(archive_on: bool, history_path: Path | None):
-    """A line-oriented `prompt_toolkit` session — persistent history, Ctrl-R
-    reverse search, and slash-command completion with a preview menu — or None
-    when prompt_toolkit is unavailable or can't attach to this terminal, so the
-    REPL degrades to plain `input()` instead of crashing.
+def _repl_key_bindings():
+    """Prompt key bindings: **Enter submits**, **Ctrl-J** and **Alt+Enter**
+    insert a newline so a turn can be typed across several lines (not only
+    pasted). Enter still accepts a navigated completion first, so the slash menu
+    keeps working. Shift+Enter is intentionally *not* bound — most terminals send
+    the same byte for it as Enter, so it can't be told apart portably; Ctrl-J is
+    the reliable equivalent. Imports prompt_toolkit lazily (optional dep)."""
+    from prompt_toolkit.key_binding import KeyBindings
 
-    Line-oriented on purpose (`multiline=False`): Enter still submits, so the
-    minimal `you>` feel is unchanged; bracketed paste still lets a multi-line
-    block (a diff/command) arrive as a single turn. The caller only builds this
-    for an interactive TTY (it gates on `sys.stdin.isatty()`)."""
+    kb = KeyBindings()
+
+    @kb.add("enter")
+    def _submit(event):
+        buf = event.current_buffer
+        # A navigated completion accepts on Enter; otherwise Enter submits.
+        if buf.complete_state and buf.complete_state.current_completion:
+            buf.apply_completion(buf.complete_state.current_completion)
+        else:
+            buf.validate_and_handle()
+
+    @kb.add("c-j")
+    @kb.add("escape", "enter")
+    def _newline(event):
+        event.current_buffer.insert_text("\n")
+
+    return kb
+
+
+def _make_prompt_session(archive_on: bool, history_path: Path | None):
+    """A `prompt_toolkit` session — persistent history, Ctrl-R reverse search,
+    slash-command completion with a preview menu, and typed multi-line input — or
+    None when prompt_toolkit is unavailable or can't attach to this terminal, so
+    the REPL degrades to plain `input()` instead of crashing.
+
+    Minimal feel preserved: **Enter submits** (see `_repl_key_bindings`), ordinary
+    prompts show no menu, and bracketed paste still drops a multi-line block in as
+    one turn. `multiline=True` only changes rendering + lets Ctrl-J/Alt+Enter add
+    newlines. The caller only builds this for an interactive TTY (it gates on
+    `sys.stdin.isatty()`)."""
     try:
         from prompt_toolkit import PromptSession
         from prompt_toolkit.completion import Completer, Completion
@@ -181,7 +210,9 @@ def _make_prompt_session(archive_on: bool, history_path: Path | None):
             history=history,
             completer=_SlashCompleter(),
             complete_while_typing=True,
-            multiline=False,
+            multiline=True,
+            key_bindings=_repl_key_bindings(),
+            prompt_continuation=lambda width, line_number, is_soft_wrap: "... ",
         )
     except Exception:  # noqa: BLE001 - optional / terminal-dependent; fall back to input()
         return None
