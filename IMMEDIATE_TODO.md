@@ -1,7 +1,9 @@
 # IMMEDIATE_TODO — Fix: native-Linux bind-mount permission failure (sqlite checkpointer)
 
-Status: **spec, not yet built.** Priority: high — harness does not run out-of-the-box on native
-(non-WSL) Linux.
+Status: **built.** Auto host-uid mapping on native Linux (`scripts/lib/hostmap.sh` +
+`run-docker.sh`), launcher-knobs docs, and the decision-matrix unit test
+(`project/tests/test_hostmap.py`) are in. Priority was: high — harness did not run out-of-the-box
+on native (non-WSL) Linux.
 
 ## Symptom
 
