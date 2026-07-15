@@ -4,9 +4,15 @@
 # Native Linux bind mounts preserve real host ownership, so a state/workspace dir
 # created by the host user (uid 1000) is unwritable to the image's `agent` user
 # (uid 10001) → the sqlite checkpointer crashes on turn 1. Mapping the container
-# to the host uid:gid fixes it. WSL2 / Docker Desktop / macOS squash mount
+# to the host uid:gid fixes it. WSL2 / Docker Desktop / OrbStack squash mount
 # ownership in their VM, so mapping there is unnecessary (and mildly harmful).
-# See IMMEDIATE_TODO.md for the full write-up.
+#
+# macOS (Darwin) is deliberately NOT auto-mapped: the daemon always runs in a
+# Linux VM whose uid namespace differs from the macOS host, so host-uid
+# passthrough is generally wrong. Docker Desktop/OrbStack squash ownership so no
+# map is needed anyway; a colima/lima mount driver that *preserves* ownership can
+# still hit the crash, but the fix there is a squashing driver / in-VM chown, not
+# this map. See IMMEDIATE_TODO.md for the full write-up.
 
 # _should_map_host_user <uname_s> <is_wsl:0|1> <docker_os> <map_host_user_env>
 # Echoes "1" (map to host uid) or "0" (don't). Precedence (explicit wins):

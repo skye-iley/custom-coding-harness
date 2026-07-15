@@ -37,15 +37,23 @@ HOST_GW=(--add-host=host.docker.internal:host-gateway)
 # keep host ownership and the image runs as uid 10001 (agent); a state/workspace
 # dir owned by your host uid is then unwritable to the agent (the sqlite
 # checkpointer crashes on turn 1). Mapping runs the container as your host uid:gid
-# so both host-owned mounts become writable. Not needed on Docker Desktop/WSL2/
-# macOS (their VM squashes mount ownership), where mapping is mildly harmful
-# (redirects HOME=/tmp, runs as a uid with no matching named user).
+# so both host-owned mounts become writable. Not needed on Docker Desktop / WSL2 /
+# OrbStack (their VM squashes mount ownership via virtiofs/gRPC-FUSE), where
+# mapping is mildly harmful (redirects HOME=/tmp, runs as a uid with no matching
+# named user).
+#
+# macOS caveat: auto-detect never maps on Darwin (host uid ≠ the daemon VM's uid,
+# so host-uid passthrough is generally wrong there). That is correct for Docker
+# Desktop/OrbStack, which squash ownership. A VM whose mount driver *preserves*
+# ownership (some colima/lima configs) can still hit the turn-1 crash; the real
+# fix there is a driver that squashes or an in-VM chown, not this host-uid map —
+# MAP_HOST_USER=1 maps to the macOS uid, which may not match the VM's.
 #
 # Precedence (MAP_HOST_USER, explicit wins): 1 → force on; 0 → force off;
-# unset → auto-map iff the engine is native Linux (not WSL, not Docker Desktop).
-# HOST_UID/HOST_GID override the detected id -u/-g. The decision is a pure
-# function (scripts/lib/hostmap.sh) so it can be unit-tested; here we only gather
-# its inputs (uname / /proc / docker info) and act on the result.
+# unset → auto-map iff the engine is native Linux (not WSL, not Docker Desktop,
+# not macOS). HOST_UID/HOST_GID override the detected id -u/-g. The decision is a
+# pure function (scripts/lib/hostmap.sh) so it can be unit-tested; here we only
+# gather its inputs (uname / /proc / docker info) and act on the result.
 USER_FLAGS=()
 HOME_DIR="/home/agent"
 _uname_s="$(uname -s 2>/dev/null || echo unknown)"

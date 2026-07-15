@@ -78,7 +78,7 @@ inline (`VAR=x ./scripts/run-docker.sh …`) on `.sh`, or via the named `.ps1` p
 
 | Env (`.sh`) | `.ps1` param | Default | Purpose |
 |-------------|--------------|---------|---------|
-| `MAP_HOST_USER` | — | unset → auto | Run the container as your host uid:gid so host-owned bind mounts (state dir + workspace) are writable. `1` force on, `0` force off; **unset auto-enables on a native-Linux engine** (not WSL/Docker Desktop/macOS, which squash mount ownership). Fixes the turn-1 sqlite `unable to open database file` / `readonly database` crash on bare Linux. Decision logic: `scripts/lib/hostmap.sh`. |
+| `MAP_HOST_USER` | — | unset → auto | Run the container as your host uid:gid so host-owned bind mounts (state dir + workspace) are writable. `1` force on, `0` force off; **unset auto-enables on a native-Linux engine only** (not WSL/Docker Desktop/OrbStack/macOS). Fixes the turn-1 sqlite `unable to open database file` / `readonly database` crash on bare Linux. Decision logic: `scripts/lib/hostmap.sh`. **macOS:** auto never maps (host uid ≠ the daemon VM's uid). Correct for Docker Desktop/OrbStack (they squash ownership); a colima/lima config whose mount driver *preserves* ownership can still hit the crash, and `MAP_HOST_USER=1` is not a reliable fix there (maps to the macOS uid, not the VM's) — use a squashing mount driver or an in-VM chown. |
 | `HOST_UID` / `HOST_GID` | — | `id -u` / `id -g` | Override the uid:gid used when mapping is active. |
 | `CPUS` | `-Cpus` | `2` | `--cpus` cap. |
 | `MEMORY` | `-Memory` | `4g` | `--memory` cap. |

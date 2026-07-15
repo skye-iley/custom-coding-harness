@@ -64,6 +64,15 @@ def test_auto_skips_squashed_engines(engine):
 
 
 @needs_bash
+def test_macos_never_auto_maps_regardless_of_docker_os():
+    # The Darwin gate must win before docker_os is consulted: even a colima/lima
+    # VM (reports a plain distro, not "Docker Desktop") must not auto-map, because
+    # the macOS host uid != the daemon VM's uid.
+    assert _decide("Darwin", "0", "Ubuntu 24.04", "") == "0"
+    assert _decide("Darwin", "0", "unknown", "") == "0"
+
+
+@needs_bash
 def test_detect_is_wsl_echoes_zero_or_one():
     # Smoke: the WSL probe runs and returns a clean boolean on this host.
     out = subprocess.run(
