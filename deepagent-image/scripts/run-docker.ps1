@@ -246,12 +246,15 @@ if ($NetJail) {
     # no-op. Set OLLAMA_HOST=http://host.docker.internal:11434 in project\.env
     # (inside the container `localhost` is the container, not the host).
     #
-    # NB: run-docker.sh also carries an opt-in host-uid remap (MAP_HOST_USER /
-    # HOST_UID / HOST_GID) to fix bind-mount permissions on native Linux, where
-    # mounts keep host ownership and the image runs as uid 10001. Intentionally
-    # omitted here: Docker Desktop's Windows/WSL2 bind mounts squash ownership,
-    # so the agent (uid 10001) can already write the mounted workspace, and
-    # `id -u` has no Windows equivalent.
+    # NB: run-docker.sh carries a host-uid remap (MAP_HOST_USER / HOST_UID /
+    # HOST_GID, decided by scripts/lib/hostmap.sh) to fix bind-mount permissions
+    # on native Linux, where mounts keep host ownership and the image runs as uid
+    # 10001. There it *auto-enables* on a native-Linux engine (precedence:
+    # MAP_HOST_USER=1 force on, =0 force off, unset → auto). Intentionally a no-op
+    # here: this script only ever runs under Docker Desktop on Windows, whose
+    # Windows/WSL2 bind mounts squash ownership (agent uid 10001 can already write
+    # the mounts), and `id -u` has no Windows equivalent. Kept in sync with the
+    # .sh so the pair doesn't drift; the mapping simply never applies on Windows.
     $NetArgs = @("--add-host=host.docker.internal:host-gateway")
     $ProxyEnv = @()
 }

@@ -69,6 +69,27 @@ the container with `-it` so the in-container REPL (`harness/cli.py:run_repl`) ha
 stdin (CI, piped smoke runs) drops `-t` and the harness itself degrades to a single non-interactive
 turn (see `docs/milestones/mvp.md` §1a).
 
+### Launcher environment (host-side, **not** `.env`)
+
+These configure `run-docker` *before* `docker run` — they are read by the launcher script on the
+host, not forwarded into the container. **Do not add them to `.env.example`**: `.env` is passed via
+`--env-file` into the container and would never reach the host-side code that reads these. Set them
+inline (`VAR=x ./scripts/run-docker.sh …`) on `.sh`, or via the named `.ps1` params.
+
+| Env (`.sh`) | `.ps1` param | Default | Purpose |
+|-------------|--------------|---------|---------|
+| `MAP_HOST_USER` | — | unset → auto | Run the container as your host uid:gid so host-owned bind mounts (state dir + workspace) are writable. `1` force on, `0` force off; **unset auto-enables on a native-Linux engine only** (not WSL/Docker Desktop/OrbStack/macOS). Fixes the turn-1 sqlite `unable to open database file` / `readonly database` crash on bare Linux. Decision logic: `scripts/lib/hostmap.sh`. **macOS:** auto never maps (host uid ≠ the daemon VM's uid). Correct for Docker Desktop/OrbStack (they squash ownership); a colima/lima config whose mount driver *preserves* ownership can still hit the crash, and `MAP_HOST_USER=1` is not a reliable fix there (maps to the macOS uid, not the VM's) — use a squashing mount driver or an in-VM chown. |
+| `HOST_UID` / `HOST_GID` | — | `id -u` / `id -g` | Override the uid:gid used when mapping is active. |
+| `CPUS` | `-Cpus` | `2` | `--cpus` cap. |
+| `MEMORY` | `-Memory` | `4g` | `--memory` cap. |
+| `PIDS_LIMIT` | `-PidsLimit` | `512` | `--pids-limit` cap (fork-bomb guard). |
+| `EPHEMERAL` | `-Ephemeral` | off | Mount a throwaway copy of the workspace; revert on close. |
+| `SAVE_WORKSPACE` | `-SaveWorkspace` | off | Snapshot the ephemeral copy before discard; implies ephemeral. |
+| `NET_JAIL` | `-NetJail` | off | Deny-all-egress network jail (see `netjail/`). |
+
+(`MAP_HOST_USER`/`HOST_UID`/`HOST_GID` are Linux-only mount-ownership knobs and have no `.ps1`
+param — Windows is always Docker Desktop, where mounts are already squashed.)
+
 **Ephemeral workspace (`-Ephemeral` / `EPHEMERAL=1`).** Instead of mounting the real workspace,
 run-docker mounts a throwaway COPY of it (under `deepagent-image/.ephemeral/<ts>/`), so **every
 change the agent makes reverts on close** — the real workspace is never touched. `-SaveWorkspace` /

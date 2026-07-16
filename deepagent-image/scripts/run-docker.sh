@@ -8,6 +8,8 @@
 #   SAVE_WORKSPACE=1 ./run-docker.sh "task"   # ephemeral + snapshot to workspace-logs/<ts>/
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=lib/hostmap.sh
+source "$ROOT/scripts/lib/hostmap.sh"   # _should_map_host_user / _detect_is_wsl
 ENV_FILE="$ROOT/project/.env"
 WORKSPACE="${WORKSPACE:-$ROOT/project/workspace}"
 SEED_SOURCE="$ROOT/project/workspace"
@@ -31,16 +33,40 @@ CAP_FLAGS=(--cpus "$CPUS" --memory "$MEMORY" --pids-limit "$PIDS_LIMIT")
 # a locked-down forwarder on an --internal network (see netjail/README.md).
 HOST_GW=(--add-host=host.docker.internal:host-gateway)
 
-# Optional host-uid mapping — fixes bind-mount permissions on native Linux, where
-# mounts keep host ownership and the image runs as uid 10001 (agent); a workspace
-# owned by your host uid is then unwritable to the agent. Opt in with
-# MAP_HOST_USER=1 (auto-detects id -u/-g) or set HOST_UID/HOST_GID explicitly, to
-# run the container as your uid:gid. Not needed on Docker Desktop/WSL2 (its VM
-# squashes ownership). When mapped, HOME is redirected to the world-writable /tmp
-# because /home/agent is owned by 10001 and unwritable to the remapped user.
+# Host-uid mapping — fixes bind-mount permissions on native Linux, where mounts
+# keep host ownership and the image runs as uid 10001 (agent); a state/workspace
+# dir owned by your host uid is then unwritable to the agent (the sqlite
+# checkpointer crashes on turn 1). Mapping runs the container as your host uid:gid
+# so both host-owned mounts become writable. Not needed on Docker Desktop / WSL2 /
+# OrbStack (their VM squashes mount ownership via virtiofs/gRPC-FUSE), where
+# mapping is mildly harmful (redirects HOME=/tmp, runs as a uid with no matching
+# named user).
+#
+# macOS caveat: auto-detect never maps on Darwin (host uid ≠ the daemon VM's uid,
+# so host-uid passthrough is generally wrong there). That is correct for Docker
+# Desktop/OrbStack, which squash ownership. A VM whose mount driver *preserves*
+# ownership (some colima/lima configs) can still hit the turn-1 crash; the real
+# fix there is a driver that squashes or an in-VM chown, not this host-uid map —
+# MAP_HOST_USER=1 maps to the macOS uid, which may not match the VM's.
+#
+# Precedence (MAP_HOST_USER, explicit wins): 1 → force on; 0 → force off;
+# unset → auto-map iff the engine is native Linux (not WSL, not Docker Desktop,
+# not macOS). HOST_UID/HOST_GID override the detected id -u/-g. The decision is a
+# pure function (scripts/lib/hostmap.sh) so it can be unit-tested; here we only
+# gather its inputs (uname / /proc / docker info) and act on the result.
 USER_FLAGS=()
 HOME_DIR="/home/agent"
-if [[ "${MAP_HOST_USER:-}" == "1" ]]; then
+_uname_s="$(uname -s 2>/dev/null || echo unknown)"
+_is_wsl="$(_detect_is_wsl)"
+# docker info distinguishes a native-Linux engine from Docker Desktop, and is
+# only consulted on the auto-detect path for a non-WSL Linux host — skip the
+# daemon round-trip when MAP_HOST_USER is explicit, or on macOS/WSL where the
+# uname/proc checks already decide the outcome.
+_docker_os="unknown"
+if [[ -z "${MAP_HOST_USER:-}" && "$_uname_s" == "Linux" && "$_is_wsl" != "1" ]]; then
+  _docker_os="$(docker info --format '{{.OperatingSystem}}' 2>/dev/null || echo unknown)"
+fi
+if [[ "$(_should_map_host_user "$_uname_s" "$_is_wsl" "$_docker_os" "${MAP_HOST_USER:-}")" == "1" ]]; then
   HOST_UID="${HOST_UID:-$(id -u)}"
   HOST_GID="${HOST_GID:-$(id -g)}"
 fi
