@@ -332,8 +332,9 @@ API keys and tokens must reach the orchestrator without leaking to the agent or 
 > `workflows/<name>/` folder format, predicate gates (`trigger.py` in-process / `trigger.sh`
 > subprocess), the side-effect action tier, and the git branch/commit/push/PR lifecycle below (the
 > canonical workflow, shipped as the paired `git-branch` + `git-pr` folders). `hooks.json` survives as
-> the flat always-gate precursor, adapted into the same engine. Still **planned**: the classifier gate
-> and the context-mutation / control-flow action tiers. See the status matrix above.
+> the flat always-gate precursor, adapted into the same engine. Still **planned**: the classifier gate,
+> the context-mutation / control-flow action tiers, and the multi-stage `stages:` format (bundled with
+> context-mutation — see "Multi-stage workflows" below). See the status matrix above.
 
 ### Workflow Engine (the general abstraction)
 A **custom workflow** is a user-defined unit that runs at a chosen point in the session lifecycle.
@@ -438,11 +439,64 @@ flat precursor (one event → one unconditional command, no folder, no gate), ad
 always-gate workflow so both run on one path. The git lifecycle below is the first workflow expressed
 this way.
 
+### Multi-stage workflows (`stages:`) — planned
+> **Status:** 🔴 Planned. Bundle with the **context-mutation action tier** above — it is the tier
+> that makes multi-stage necessary (in-memory hand-off between stages), and it requires the same
+> middleware change (hooks that *return* a value the engine applies). Until it lands, the
+> paired-folder pattern below is the stopgap.
+
+**The gap.** A workflow today binds to **one** hook point (`hook:` is a single scalar). A logical
+task that touches several points in the lifecycle — inject context at `model.start`, *then* emit a
+follow-up at `model.end`/`agent.end`; branch at `session.start`, *then* PR at `session.end` — has no
+single-folder representation. It must ship as **two independent folders** coordinating through a file
+(`session.env`), even though the design already names such a set **one** workflow (see the git
+lifecycle below, which the code splits into `git-branch` + `git-pr`). The terminology and the
+structure disagree.
+
+**The model.** One folder = one workflow = an **ordered list of stages**, each stage being the
+existing trigger × hook × action triple. The folder name is the workflow (`git-session-lifecycle`);
+a **stage** is one hook × gate × steps within it. The single-hook frontmatter stays valid as sugar
+for a one-stage list — shipped folders don't change.
+
+```markdown
+---
+name: git-session-lifecycle       # == folder name; the workflow
+stages:                           # ordered; each stage is one hook × gate × steps
+  - hook: session.start
+    gate: branch.trigger.py       # per-stage gate (basename no longer fixed)
+    steps: [./create-branch.sh]
+  - hook: session.end
+    gate: pr.trigger.py
+    steps: [./open-pr.sh]
+---
+Branch at session start, open a PR at session end. Never auto-merges.
+```
+
+**Why it's cheap.** The internal representation does not change. `_load_workflow` returns a
+**`list[Workflow]`** (one per stage) instead of one `Workflow`, each with a synthesized name
+(`git-session-lifecycle:session.start`) and a `group` field = folder name for telemetry/provenance.
+Everything downstream — `workflows_by_hook`, `run_hook`, `WorkflowMiddleware` — already operates on a
+**flat `list[Workflow]`**, so dispatch and the middleware are untouched. The change lives entirely in
+the loader + frontmatter parser.
+
+**The one invariant that relaxes.** The fixed-basename gate (`_resolve_gate`: exactly one
+`./trigger.{py,sh}` per folder) becomes **per-stage** — each stage names its `gate:`, defaulting to
+`trigger.py`/`trigger.sh` for the single-stage sugar form so existing folders resolve unchanged.
+
+**State hand-off — the real payoff.** Paired folders can only share **on-disk** state (`session.env`
+via `GateContext.as_env`), which is fine for side-effect subprocess steps but not for in-process
+context-mutation stages that pass live objects (the injected context an earlier stage stashed for a
+later follow-up). Co-locating stages in one folder gives them a natural shared namespace — a sibling
+module the stages import — instead of marshaling live state through a file. This is why multi-stage
+and the context-mutation tier land together.
+
 ### Canonical workflow: Git session lifecycle
 A deterministic workflow whose body is git side-effects — the worked example the engine generalizes.
-Because a workflow binds to **one** hook point, it ships as a **paired set of two folders** that share
-state via `<workspace>/.deepagents/session.env` (written at start, reused at end):
-`git-branch` on `session.start` and `git-pr` on `session.end`. Each is a safe no-op without its
+Because a workflow binds to **one** hook point *today*, it ships as a **paired set of two folders**
+that share state via `<workspace>/.deepagents/session.env` (written at start, reused at end):
+`git-branch` on `session.start` and `git-pr` on `session.end`. This is the stopgap for the
+multi-stage gap above — once `stages:` lands the pair collapses into one `git-session-lifecycle`
+folder with two stages. Each is a safe no-op without its
 prerequisites (a git repo / a clean tree / a remote / `gh` + `GH_TOKEN`).
 
 ### Deterministic Branching
