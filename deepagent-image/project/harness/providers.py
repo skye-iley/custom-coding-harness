@@ -19,7 +19,7 @@ from pathlib import Path
 
 # cost.py holds the Pricing types + rate math. The import is one-directional
 # (providers -> cost) on purpose: cost.py must never import providers, so the
-# two don't form a cycle (docs/milestones/milestone1.md §2.4).
+# two don't form a cycle (docs/milestones/complete/milestone1.md §2.4).
 from harness.cost import (
     ModelRates,
     Pricing,

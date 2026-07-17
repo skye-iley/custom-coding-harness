@@ -146,12 +146,12 @@ per_input_token = 0.0002
 per_output_token = 0.0006
 # or one blended figure (the split pair wins when both present):
 # per_token = 0.0004
-source = "estimate"   # or a local-device backend name; see docs/milestones/ENERGY_SPEC.md
+source = "estimate"   # or a local-device backend name; see docs/specs/energy.md
 ```
 
 The committed estimates are placeholders. For locally-hosted models, `source`
 names the (specified, not-yet-built) device-measurement backend — see
-`docs/milestones/ENERGY_SPEC.md`.
+`docs/specs/energy.md`.
 
 Local/keyless providers (ollama, lmstudio) and ones with no chosen default
 (openrouter) have no model files and no `default_model`; add a model file +

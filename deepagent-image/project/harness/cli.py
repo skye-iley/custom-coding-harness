@@ -312,7 +312,7 @@ def build_cost_tracker(
     Built only when the resolved model can report a non-zero cost (non-Free
     pricing), carries an energy estimate, or a budget ceiling is set. Otherwise
     return None and main() appends no middleware — byte-for-byte MVP behavior
-    (docs/milestones/milestone1.md §2.5 "remove-without-functional-change").
+    (docs/milestones/complete/milestone1.md §2.5 "remove-without-functional-change").
     """
     provider = provider_for(model)
     pricing = provider.pricing if provider else Free()

@@ -3,7 +3,7 @@
 `harness.cost` holds the cost/energy math and must NEVER import another harness
 module — above all `harness.providers`. The dependency runs providers -> cost, so
 if cost ever imported providers (or anything that does) the two would form a
-cycle (docs/milestones/milestone1.md §2.4 / CLAUDE.md "Cost / token / energy
+cycle (docs/milestones/complete/milestone1.md §2.4 / CLAUDE.md "Cost / token / energy
 tracking"). This is the invariant under test, and it holds in every environment.
 
 Note this does NOT forbid langchain/langgraph: cost.py optionally imports the

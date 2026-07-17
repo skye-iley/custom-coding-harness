@@ -1,6 +1,6 @@
 # Milestone 3 — Human-in-the-Loop (HITL) — *stub*
 
-> **Status:** 🔬 Stub — scope sketch, not a full spec. Successor to `docs/milestones/milestone2.md`
+> **Status:** 🔬 Stub — scope sketch, not a full spec. Successor to `docs/milestones/complete/milestone2.md`
 > (present/past memory, ✅ Built). Wins over `design_doc.md` for "what we build next" once a fuller
 > spec lands here. This milestone promotes the `design_doc.md` **§9 Human-in-the-Loop** design and
 > the **§3 pause action tier** from planned prose into a built, tested slice.

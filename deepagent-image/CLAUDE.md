@@ -67,7 +67,7 @@ on user code inside a separate **workspace** conda env. `project/main.py` is the
 the container with `-it` so the in-container REPL (`harness/cli.py:run_repl`) has a TTY for its
 `you>` prompt loop — the container stays up across turns until `/exit`/`/quit`/Ctrl-D. A redirected
 stdin (CI, piped smoke runs) drops `-t` and the harness itself degrades to a single non-interactive
-turn (see `docs/milestones/mvp.md` §1a).
+turn (see `docs/milestones/complete/mvp.md` §1a).
 
 **Ephemeral workspace (`-Ephemeral` / `EPHEMERAL=1`).** Instead of mounting the real workspace,
 run-docker mounts a throwaway COPY of it (under `deepagent-image/.ephemeral/<ts>/`), so **every
@@ -158,7 +158,7 @@ cap a session. It is one `AgentMiddleware` (`harness/cost.py:CostTrackerMiddlewa
 appended in `cli.py:main` **only when there's something to track** — non-`free`
 pricing, an energy estimate, or a budget. Otherwise nothing is appended and the
 harness behaves byte-for-byte like the MVP (the "removable" contract,
-`docs/milestones/milestone1.md` §2.5). `harness/cost.py` holds the math only; it must
+`docs/milestones/complete/milestone1.md` §2.5). `harness/cost.py` holds the math only; it must
 never import `providers.py` (the import goes providers → cost, §2.4).
 
 - **Pricing lives in the registry, not Python.** `provider.toml` declares
@@ -178,7 +178,7 @@ never import `providers.py` (the import goes providers → cost, §2.4).
 - **Energy** is an optional per-model `[energy]` estimate (Wh/token), tracked for
   any provider incl. local `free` ones; `DEEPAGENTS_ELECTRICITY_RATE` (USD/kWh)
   turns it into an electricity cost. Measured local-device energy is **specified,
-  not built** — see `docs/milestones/ENERGY_SPEC.md` and `cost.py:measure_local_energy_wh`.
+  not built** — see `docs/specs/energy.md` and `cost.py:measure_local_energy_wh`.
 - **Budgets:** `--max-cost` / `--max-tokens` (or `DEEPAGENTS_MAX_COST` /
   `DEEPAGENTS_MAX_TOKENS`) end the REPL with `[harness] budget exceeded` once a
   cumulative total crosses, then print the session total — same deterministic
@@ -303,7 +303,7 @@ Conventions for new tests:
 by default — a Docker host-boundary control so a runaway agent can't exhaust the
 host or fork-bomb it. Override via env (`CPUS`/`MEMORY`/`PIDS_LIMIT`) in the `.sh`
 or params (`-Cpus`/`-Memory`/`-PidsLimit`) in the `.ps1`. This is **not** a
-sandbox — the trust boundary is still the container (`docs/milestones/mvp.md` §5);
+sandbox — the trust boundary is still the container (`docs/milestones/complete/mvp.md` §5);
 don't describe it as sandboxing. Verify with `docker inspect` (`NanoCpus`,
 `Memory`, `PidsLimit`).
 

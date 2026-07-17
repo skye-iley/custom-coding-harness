@@ -1,8 +1,10 @@
 # Milestone 1 Plan: Cost/Token Visibility + Resource Caps
 
-**Status:** Planned. Successor to the MVP (interactive multi-turn REPL, validated core loop).
+**Status:** ✅ Built. Successor to the MVP (interactive multi-turn REPL, validated core loop).
+Cost/token tracker (`harness/cost.py`), per-session budgets, and `run-docker` resource caps
+(`--cpus`/`--memory`/`--pids-limit`) all shipped — see `design_doc.md` §6 status row.
 **Maps to:** `design_doc.md` §6 (Token Usage & Cost Tracker) and §2 (Resource Limits).
-**Closes Known Limitations** (`docs/milestones/mvp.md` §9): "pays provider rates blind", "no per-session
+**Closes Known Limitations** (`docs/milestones/complete/mvp.md` §9): "pays provider rates blind", "no per-session
 turn or token ceiling", "runaway agent can consume host CPU/memory".
 
 When this doc and `design_doc.md` disagree on *what we build next*, this doc wins (same rule the MVP
@@ -195,7 +197,7 @@ gains matching flags or env vars. Defaults live in one place near the top of eac
 | `design_doc.md` §2 / status matrix | flip Resource Limits ⬜ → ✅ when shipped |
 
 These are a Docker boundary control, not a sandbox — do not describe them as sandboxing
-(`docs/milestones/mvp.md` §5 / repo CLAUDE.md hard rule).
+(`docs/milestones/complete/mvp.md` §5 / repo CLAUDE.md hard rule).
 
 ---
 
