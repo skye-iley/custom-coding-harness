@@ -157,3 +157,153 @@ def test_loop_headless_abort_propagates(tmp_path):
             _result_with(r), lambda v: pytest.fail("no resume"),
             channel=None, headless=True, config=_cfg("strict", "blocking"), workspace=tmp_path,
         )
+
+
+# --- PauseMiddleware field extraction / gate (S2) ----------------------------
+# Regression: the live langchain request carries the call under `.tool_call`
+# ({"name","args","id"}), not top-level `.tool_name`/`.args`. Reading the wrong
+# place made `command`/`name` always None, so under a non-strict preset the
+# review_triggers gate matched nothing and `rm -rf` ran ungated.
+
+
+class _FakeToolCallRequest:
+    """Mirror langchain's ToolCallRequest.tool_call shape (name/args/id dict)."""
+
+    def __init__(self, name, args, id="call-1"):
+        self.tool_call = {"name": name, "args": args, "id": id}
+
+
+def _cfg_with_triggers(*items, level="guided", on_deny="continue"):
+    lines = [f"autonomy_level: {level}", f"on_deny: {on_deny}", "review_triggers:"]
+    lines += [f"  - {{ on: {on}, pattern: {pat!r} }}" for on, pat in items]
+    return cfg.parse_config("\n".join(lines) + "\n")
+
+
+def test_tool_call_fields_reads_tool_call_dict():
+    req = _FakeToolCallRequest("execute", {"command": "rm -rf /project/workspace"})
+    name, values, command = hitl._tool_call_fields(req)
+    assert name == "execute"
+    assert command == "rm -rf /project/workspace"
+    assert "rm -rf /project/workspace" in values
+
+
+def test_command_trigger_gates_rm_rf_under_guided():
+    # The shipped .harness-config.yaml trigger: { on: command, pattern: "rm -rf*" }.
+    config = _cfg_with_triggers(("command", "rm -rf*"))
+    mw = hitl.PauseMiddleware(config)
+    req = _FakeToolCallRequest("execute", {"command": "rm -rf /project/workspace"})
+    name, values, command = hitl._tool_call_fields(req)
+    gated, hit = mw._should_gate(name, values, command)
+    assert gated is True and hit is not None
+
+
+def test_benign_command_not_gated_under_guided():
+    config = _cfg_with_triggers(("command", "rm -rf*"))
+    mw = hitl.PauseMiddleware(config)
+    req = _FakeToolCallRequest("execute", {"command": "ls -la"})
+    name, values, command = hitl._tool_call_fields(req)
+    gated, _ = mw._should_gate(name, values, command)
+    assert gated is False
+
+
+def test_wrap_tool_call_denies_gated_call(monkeypatch, capsys):
+    # A denied gate must NOT run the handler (the rm -rf must not execute).
+    config = _cfg_with_triggers(("command", "rm -rf*"))
+    mw = hitl.PauseMiddleware(config)
+    monkeypatch.setattr(hitl.interrupt, "raise_interrupt", lambda req: False)
+    monkeypatch.setattr(hitl, "_blocked_result", lambda request, name: ("BLOCKED", name))
+    ran = {"handler": False}
+
+    def handler(_req):
+        ran["handler"] = True
+        return "TOOL RAN"
+
+    req = _FakeToolCallRequest("execute", {"command": "rm -rf /project/workspace"})
+    out = mw.wrap_tool_call(req, handler)
+    assert out == ("BLOCKED", "execute")
+    assert ran["handler"] is False
+    # ground-truth stderr line so a lying model can't mask the block
+    err = capsys.readouterr().err
+    assert "DENIED" in err and "rm -rf /project/workspace" in err
+
+
+def test_wrap_tool_call_halt_on_deny_raises(monkeypatch):
+    # Default on_deny=halt: a deny raises HaltTurn (turn ends) instead of returning
+    # a blocked result that the ReAct loop would continue from.
+    config = _cfg_with_triggers(("command", "rm -rf*"), on_deny="halt")
+    mw = hitl.PauseMiddleware(config)
+    monkeypatch.setattr(hitl.interrupt, "raise_interrupt", lambda req: False)
+    ran = {"handler": False}
+
+    req = _FakeToolCallRequest("execute", {"command": "rm -rf x"}, id="c7")
+    with pytest.raises(hitl.HaltTurn) as ei:
+        mw.wrap_tool_call(req, lambda _r: ran.__setitem__("handler", True))
+    assert ran["handler"] is False
+    assert ei.value.tool_name == "execute"
+    assert ei.value.tool_message.tool_call_id == "c7"  # carries repair message
+
+
+def test_on_deny_defaults_to_halt():
+    assert cfg.parse_config("autonomy_level: guided\n").on_deny == "halt"
+
+
+def test_wrap_tool_call_approves_gated_call(monkeypatch):
+    config = _cfg_with_triggers(("command", "rm -rf*"))
+    mw = hitl.PauseMiddleware(config)
+    monkeypatch.setattr(hitl.interrupt, "raise_interrupt", lambda req: True)
+
+    req = _FakeToolCallRequest("execute", {"command": "rm -rf /tmp/scratch"})
+    out = mw.wrap_tool_call(req, lambda _req: "TOOL RAN")
+    assert out == "TOOL RAN"
+
+
+def test_blocked_result_is_stop_and_report():
+    # The deny message must NOT invite a workaround (that drove the rmdir bypass).
+    req = _FakeToolCallRequest("execute", {"command": "rm -rf x"}, id="c9")
+    msg = hitl._blocked_result(req, "execute")
+    text = msg.content.lower()
+    assert "denied" in text
+    assert "choose another approach" not in text
+    assert "workaround" in text and "stop" in text  # stop-and-report intent
+    assert msg.tool_call_id == "c9"
+
+
+def test_approval_prompt_includes_params(monkeypatch):
+    # The prompt + context must surface the tool's PARAMETERS, not just its name.
+    config = _cfg_with_triggers(("tool_name", "write_file"))
+    mw = hitl.PauseMiddleware(config)
+    captured = {}
+    monkeypatch.setattr(hitl.interrupt, "raise_interrupt",
+                        lambda req: captured.update(req=req) or True)
+
+    req = _FakeToolCallRequest("write_file", {"file_path": "a.py", "content": "print(1)"})
+    mw.wrap_tool_call(req, lambda _req: "ok")
+    r = captured["req"]
+    assert "file_path=a.py" in r.prompt          # params on the prompt line
+    assert "write_file" in r.prompt
+    assert "content" in (r.context or "")        # full args in expandable context
+
+
+def test_format_call_params_caps_long_values():
+    long = "x" * 500
+    line = hitl._format_call_params({"content": long}, None)
+    assert line.startswith("content=") and "…" in line and len(line) < 300
+
+
+# --- error-detail rendering (full error surfacing) ---------------------------
+
+
+def test_err_detail_walks_cause_chain():
+    import importlib.util
+    if importlib.util.find_spec("langchain") is None:
+        pytest.skip("cli import needs langchain")
+    _cli = _load("harness.cli")
+    try:
+        raise ValueError("real 429 quota exceeded")
+    except ValueError as root:
+        wrapper = RuntimeError("ChatGoogleGenerativeAIError")
+        wrapper.__cause__ = root
+        detail = _cli._err_detail(wrapper)
+    assert "ChatGoogleGenerativeAIError" in detail
+    assert "429 quota exceeded" in detail          # underlying cause surfaced
+    assert "<-" in detail

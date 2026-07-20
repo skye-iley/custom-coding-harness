@@ -173,6 +173,92 @@ def test_retry_exhausts_and_reraises_last():
     assert len(slept) == 2  # max_retries backoffs, then re-raise
 
 
+# --- retry_after_seconds (reactive: honor the server's wait) -----------------
+
+import datetime as _dt
+
+
+class _RetryDelayAttr(Exception):
+    def __init__(self, msg, retry_delay):
+        super().__init__(msg)
+        self.retry_delay = retry_delay
+        self.status_code = 429
+
+
+class _Duration:  # protobuf-Duration-like
+    def __init__(self, seconds):
+        self.seconds = seconds
+
+
+class _HeaderResp:
+    def __init__(self, headers):
+        self.headers = headers
+
+
+class _WithHeaders(Exception):
+    def __init__(self, msg, headers):
+        super().__init__(msg)
+        self.response = _HeaderResp(headers)
+        self.status_code = 429
+
+
+def test_retry_after_from_timedelta_attr():
+    exc = _RetryDelayAttr("quota", _dt.timedelta(seconds=47))
+    assert res.retry_after_seconds(exc) == 47.0
+
+
+def test_retry_after_from_protobuf_duration():
+    exc = _RetryDelayAttr("quota", _Duration(seconds=12))
+    assert res.retry_after_seconds(exc) == 12.0
+
+
+def test_retry_after_from_numeric_attr():
+    exc = _RetryDelayAttr("quota", 8)
+    assert res.retry_after_seconds(exc) == 8.0
+
+
+def test_retry_after_from_header():
+    assert res.retry_after_seconds(_WithHeaders("429", {"Retry-After": "30"})) == 30.0
+
+
+def test_retry_after_from_google_proto_text():
+    msg = "429 Resource exhausted. retry_delay { seconds: 53 }"
+    assert res.retry_after_seconds(_Statused(msg, 429)) == 53.0
+
+
+def test_retry_after_from_phrase():
+    assert res.retry_after_seconds(_Statused("Rate limited, retry in 19s", 429)) == 19.0
+
+
+def test_retry_after_none_when_absent():
+    assert res.retry_after_seconds(_Statused("boom", 500)) is None
+
+
+def test_retry_call_uses_server_delay_over_jitter():
+    slept = []
+    state = {"n": 0}
+
+    def fn():
+        state["n"] += 1
+        if state["n"] < 2:
+            raise _RetryDelayAttr("quota", _dt.timedelta(seconds=17))
+        return "ok"
+
+    out = res.retry_call(fn, max_retries=3, base=0.5, sleep=slept.append, rand=lambda: 1.0)
+    assert out == "ok"
+    assert slept == [17.0]  # server delay, not the 0.5 jittered backoff
+
+
+def test_retry_call_caps_absurd_server_delay():
+    def fn():
+        raise _RetryDelayAttr("quota", _Duration(seconds=99999))
+
+    slept = []
+    with pytest.raises(_RetryDelayAttr):
+        res.retry_call(fn, max_retries=1, base=0.5, sleep=slept.append)
+    assert slept == [120.0]  # _SERVER_DELAY_CAP_SECONDS
+
+
 def test_non_retryable_propagates_immediately():
     slept = []
     calls = []

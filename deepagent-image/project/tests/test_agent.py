@@ -196,3 +196,68 @@ def test_build_agent_without_agents_md_uses_base_prompt(workspace_sandbox, monke
     monkeypatch.setattr(agent, "create_deep_agent", lambda **kw: captured.update(kw))
     agent.build_agent("model:x", workspace_sandbox)
     assert captured["system_prompt"] == agent.BASE_SYSTEM_PROMPT
+
+
+# --- optional tool-shedding (DEEPAGENTS_LEAN_TOOLS / _EXCLUDE_TOOLS) ----------
+
+def test_excluded_tools_env_off_by_default():
+    assert agent.excluded_tools_from_env(env={}) == frozenset()
+
+
+def test_lean_tools_flag_sheds_task_and_todos():
+    got = agent.excluded_tools_from_env(env={"DEEPAGENTS_LEAN_TOOLS": "1"})
+    assert got == frozenset({"task", "write_todos"})
+
+
+def test_explicit_exclude_list_and_lean_combine():
+    got = agent.excluded_tools_from_env(
+        env={"DEEPAGENTS_LEAN_TOOLS": "true", "DEEPAGENTS_EXCLUDE_TOOLS": "grep, glob"}
+    )
+    assert got == frozenset({"task", "write_todos", "grep", "glob"})
+
+
+class _FakeModelRequest:
+    def __init__(self, tools):
+        self.tools = tools
+    def override(self, *, tools):
+        return _FakeModelRequest(tools)
+
+
+class _NamedTool:
+    def __init__(self, name):
+        self.name = name
+
+
+def test_exclude_middleware_filters_named_tools():
+    mw = agent._ExcludeToolsMiddleware(frozenset({"task", "write_todos"}))
+    req = _FakeModelRequest([_NamedTool("execute"), _NamedTool("task"),
+                             _NamedTool("write_todos"), {"function": {"name": "grep"}}])
+    seen = {}
+    def handler(r):
+        seen["names"] = [agent._tool_display_name(t) for t in r.tools]
+        return "resp"
+    out = mw.wrap_model_call(req, handler)
+    assert out == "resp"
+    assert seen["names"] == ["execute", "grep"]  # task + write_todos stripped
+
+
+def test_exclude_middleware_noop_when_empty():
+    mw = agent._ExcludeToolsMiddleware(frozenset())
+    req = _FakeModelRequest([_NamedTool("execute")])
+    mw.wrap_model_call(req, lambda r: r.tools)
+    # empty exclusion must not touch the request
+    assert [agent._tool_display_name(t) for t in req.tools] == ["execute"]
+
+
+def test_build_agent_appends_exclusion_middleware_when_env_set(workspace_sandbox, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(agent, "create_deep_agent", lambda **kw: captured.update(kw) or "AGENT")
+    monkeypatch.setenv("DEEPAGENTS_LEAN_TOOLS", "1")
+    agent.build_agent("model:x", workspace_sandbox)
+    mw = captured["middleware"]
+    assert any(isinstance(m, agent._ExcludeToolsMiddleware) for m in mw)
+    # and absent when the knob is off
+    captured.clear()
+    monkeypatch.delenv("DEEPAGENTS_LEAN_TOOLS", raising=False)
+    agent.build_agent("model:x", workspace_sandbox)
+    assert not any(isinstance(m, agent._ExcludeToolsMiddleware) for m in captured["middleware"])

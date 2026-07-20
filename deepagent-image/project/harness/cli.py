@@ -21,12 +21,13 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 import json
 
-from harness import archive, audit, config as hitl_config, hitl, interrupt, resilience
+from harness import archive, audit, config as hitl_config, hitl, interrupt, refresh, resilience
 from harness.agent import (
     DEFAULT_TASK,
     build_agent,
     final_message_text,
     make_recall_past_tool,
+    make_refresh_workspace_tool,
     resolve_workspace,
 )
 from harness.cost import (
@@ -137,15 +138,20 @@ _SLASH_META_ARCHIVE = {
     "/recall": "stage prior-session context for the next turn ( /recall [query] [--all] )",
     "/topic": "show or set the continual-topic label ( /topic [name] )",
 }
+_SLASH_META_REFRESH = {
+    "/refresh": "pull live host edits into the ephemeral workspace copy ( /refresh [subpath] )",
+}
 
 
-def slash_commands(archive_on: bool) -> dict[str, str]:
+def slash_commands(archive_on: bool, refresh_on: bool = False) -> dict[str, str]:
     """The slash-command -> description map offered by prompt completion. Pure
     (no I/O) so tests assert the menu without building a terminal. Archive-only
-    commands are folded in only when the past archive is enabled."""
+    and refresh-only commands are folded in only when their feature is enabled."""
     meta = dict(_SLASH_META_BASE)
     if archive_on:
         meta.update(_SLASH_META_ARCHIVE)
+    if refresh_on:
+        meta.update(_SLASH_META_REFRESH)
     return meta
 
 
@@ -187,7 +193,7 @@ def _repl_key_bindings():
     return kb
 
 
-def _make_prompt_session(archive_on: bool, history_path: Path | None):
+def _make_prompt_session(archive_on: bool, history_path: Path | None, refresh_on: bool = False):
     """A `prompt_toolkit` session — persistent history, Ctrl-R reverse search,
     slash-command completion with a preview menu, and typed multi-line input — or
     None when prompt_toolkit is unavailable or can't attach to this terminal, so
@@ -203,7 +209,7 @@ def _make_prompt_session(archive_on: bool, history_path: Path | None):
         from prompt_toolkit.completion import Completer, Completion
         from prompt_toolkit.history import FileHistory, InMemoryHistory
 
-        commands = slash_commands(archive_on)
+        commands = slash_commands(archive_on, refresh_on)
 
         class _SlashCompleter(Completer):
             def get_completions(self, document, complete_event):
@@ -245,6 +251,44 @@ def _stage(message: str) -> None:
     so it stays out of the agent's reply stream and can be grepped/suppressed
     independently (MVP §1a req 6)."""
     print(f"[harness] {message}", file=sys.stderr)
+
+
+def _err_detail(exc: Exception) -> str:
+    """A one-line, length-capped rendering of an exception's message for a stage
+    marker. Collapses whitespace so a multi-line provider payload stays on one
+    line; capped at 500 chars unless DEEPAGENTS_DEBUG is set (then uncapped). Walks
+    the ``__cause__``/``__context__`` chain because provider wrappers (e.g.
+    ChatGoogleGenerativeAIError) often carry an empty ``str()`` while the real
+    HTTP/quota detail sits on the underlying cause."""
+    parts = []
+    seen = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        msg = " ".join(str(cur).split())
+        label = type(cur).__name__
+        parts.append(f"{label}: {msg}" if msg else label)
+        cur = cur.__cause__ or cur.__context__
+    detail = " <- ".join(parts)
+    debug = os.environ.get("DEEPAGENTS_DEBUG", "").strip().lower() in _TRUTHY
+    if not debug and len(detail) > 500:
+        detail = detail[:500] + " …(set DEEPAGENTS_DEBUG=1 for full error + traceback)"
+    return detail
+
+
+def _dump_error(exc: Exception) -> None:
+    """Print the full traceback for a failed turn when DEEPAGENTS_DEBUG is set.
+
+    The one-line ``turn failed: …`` marker is enough for normal use; the full
+    traceback (with the provider's underlying cause chain) is what you need to tell
+    a rate-limit/quota 429 from a bad key or a genuine bug. Best-effort — never
+    raises out of an error handler."""
+    if os.environ.get("DEEPAGENTS_DEBUG", "").strip().lower() not in _TRUTHY:
+        return
+    import traceback
+
+    print("[harness] --- full traceback (DEEPAGENTS_DEBUG) ---", file=sys.stderr)
+    traceback.print_exception(type(exc), exc, exc.__traceback__)
 
 
 def _dump_partial(agent, config: dict) -> None:
@@ -374,16 +418,27 @@ def run_turn(
         for event in agent.stream(inputs, config=config):
             pprint(event)
         return None
-    result = _invoke_resilient(agent, inputs, config)
-    if hitl_ctx is not None:
-        result = hitl.run_interrupt_loop(
-            result,
-            lambda value: _invoke_resilient(agent, hitl.resume_command(value), config),
-            channel=hitl_ctx.channel,
-            headless=hitl_ctx.headless,
-            config=hitl_ctx.config,
-            workspace=hitl_ctx.workspace,
-        )
+    try:
+        result = _invoke_resilient(agent, inputs, config)
+        if hitl_ctx is not None:
+            result = hitl.run_interrupt_loop(
+                result,
+                lambda value: _invoke_resilient(agent, hitl.resume_command(value), config),
+                channel=hitl_ctx.channel,
+                headless=hitl_ctx.headless,
+                config=hitl_ctx.config,
+                workspace=hitl_ctx.workspace,
+            )
+    except hitl.HaltTurn as halt:
+        # on_deny='halt': the gate abandoned the turn on a deny. Pair the dangling
+        # tool_call in checkpoint state so the next turn doesn't resume with an
+        # unanswered call, then return to the human prompt with no model reply.
+        try:
+            agent.update_state(config, {"messages": [halt.tool_message]})
+        except Exception as exc:  # noqa: BLE001 - repair is best-effort, never fatal
+            _stage(f"halt: could not repair tool_call state ({type(exc).__name__}: {exc})")
+        _stage(f"tool call '{halt.tool_name}' denied — turn halted; back to you")
+        return None
     return final_message_text(result)
 
 
@@ -405,7 +460,7 @@ def _invoke_resilient(agent, inputs: dict, config: dict):
 
     def _note(attempt: int, exc: Exception, delay: float) -> None:
         _stage(
-            f"provider error ({type(exc).__name__}); retry {attempt} in {delay:.1f}s"
+            f"provider error ({_err_detail(exc)}); retry {attempt} in {delay:.1f}s"
         )
 
     try:
@@ -468,6 +523,24 @@ def _handle_topic(conn, run_id: str, line: str, current_topic: str | None) -> st
     archive.set_topic(conn, run_id, name)
     _stage(f"topic set to {name!r}")
     return name
+
+
+def _handle_refresh(workspace: Path | None, line: str) -> None:
+    """`/refresh [subpath]`: pull live host edits from the read-only source mount
+    into the ephemeral workspace copy (source wins on conflict). Prints an
+    "unavailable" note on a normal run (no source mount) instead of acting."""
+    src = refresh.workspace_src()
+    if src is None or workspace is None:
+        _stage("refresh: unavailable (only in an ephemeral run; no source mount)")
+        return
+    subpath = " ".join(line.split()[1:]).strip() or None
+    try:
+        written = refresh.refresh_into(workspace, src, subpath)
+    except (ValueError, FileNotFoundError) as exc:
+        _stage(f"refresh: {exc}")
+        return
+    scope = f" under {subpath!r}" if subpath else ""
+    _stage(f"refresh: updated {len(written)} file(s) from the host{scope}")
 
 
 def _cost_totals_for_row(tracker: CostTrackerMiddleware | None):
@@ -551,7 +624,7 @@ def _run_turn_hitl(agent, text, config, *, stream, extra_messages, hitl_ctx):
                 raise
             req = interrupt.new_request(
                 interrupt.KIND_CHOOSE,
-                f"Provider error after retries ({type(exc).__name__}: {exc}). What now?",
+                f"Provider error after retries ({_err_detail(exc)}). What now?",
                 options=("retry", "abort"),
                 default="abort",
                 source=interrupt.SOURCE_SYSTEM,
@@ -618,7 +691,12 @@ def run_repl(
     pending: list = []  # recall slices staged for the next turn (marked)
     # Rich line editing only for an interactive TTY; a non-TTY run never reaches
     # the loop below. None => plain input() (prompt_toolkit missing / non-TTY).
-    session = _make_prompt_session(archive_conn is not None, history_path) if interactive else None
+    refresh_on = refresh.workspace_src() is not None
+    session = (
+        _make_prompt_session(archive_conn is not None, history_path, refresh_on)
+        if interactive
+        else None
+    )
     # HITL context (S1). channel = the REPL renderer when a human is present;
     # None (headless, §6 fail-closed) on a non-TTY run. None entirely when no
     # .harness-config.yaml (MVP path — run_turn's interrupt loop is skipped).
@@ -644,7 +722,8 @@ def run_repl(
             # Report it and fall through: an interactive session drops to the
             # prompt for a retry; a non-interactive run closes cleanly below so the
             # archive row is still finalized by main().
-            _stage(f"turn failed: {type(exc).__name__}: {exc}")
+            _stage(f"turn failed: {_err_detail(exc)}")
+            _dump_error(exc)
             _dump_partial(agent, config)
             answer = None
         if answer is not None:
@@ -678,6 +757,11 @@ def run_repl(
         if archive_conn is not None and command == "/topic":
             current_topic = _handle_topic(archive_conn, run_id, line, current_topic)
             continue
+        if command == "/refresh":
+            # Available whenever the ephemeral source mount is present, independent
+            # of the archive; inert (prints "unavailable") on a normal run.
+            _handle_refresh(workspace, line)
+            continue
 
         try:
             answer = _run_turn_hitl(
@@ -702,7 +786,8 @@ def run_repl(
             # persistent session: report it and keep the loop alive so the user can
             # retry. The staged recall slice is dropped so a poison injection can't
             # fail the same turn forever; re-issue /recall to stage it again.
-            _stage(f"turn failed: {type(exc).__name__}: {exc}")
+            _stage(f"turn failed: {_err_detail(exc)}")
+            _dump_error(exc)
             _dump_partial(agent, config)
             pending = []
             continue
@@ -783,7 +868,8 @@ def run_batch(
     except BudgetExceeded as exc:
         _stage(f"budget exceeded: {exc}")
     except Exception as exc:  # noqa: BLE001
-        _stage(f"turn failed: {type(exc).__name__}: {exc}")
+        _stage(f"turn failed: {_err_detail(exc)}")
+        _dump_error(exc)
         _dump_partial(agent, config)
         exit_code = 1
 
@@ -911,6 +997,14 @@ def main() -> int:
                 # pull past context mid-turn. Both share one archive connection.
                 middleware.append(archive.ArchiveMiddleware(archive_conn, run_id))
                 tools.append(make_recall_past_tool(archive_conn, args.topic))
+
+            if refresh.workspace_src() is not None:
+                # Ephemeral run with the real workspace mounted read-only alongside
+                # the throwaway copy: give the agent a tool to pull live host edits
+                # into its copy mid-turn. Inert (unregistered) on a normal run.
+                refresh_tool = make_refresh_workspace_tool(workspace)
+                if refresh_tool is not None:
+                    tools.append(refresh_tool)
 
             if hitl_conf is not None:
                 # S2: deterministic pause gate on tool.start / the PR, per the

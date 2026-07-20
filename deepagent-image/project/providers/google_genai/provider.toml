@@ -6,3 +6,21 @@ default_model = "gemini-3.5-flash"
 # prefix =
 # base_url_env =
 pricing = "rate_table"   # per-model [pricing] tables; cost from models/*.toml
+
+# Plan rate limits → proactive request pacing (harness/ratelimit.py). Declarative
+# and INERT until a tier is selected: set `tier` here, or DEEPAGENTS_PROVIDER_TIER
+# at run time (e.g. -e DEEPAGENTS_PROVIDER_TIER=free). RPM is exact; TPM is paced
+# best-effort via tokens_per_request. DEEPAGENTS_RPM / DEEPAGENTS_TPM override.
+# Numbers below are Google AI Studio free-tier ballparks — confirm against your
+# own console (they change and differ per model), then tune.
+[limits]
+# tier = "free"                 # uncomment (or set DEEPAGENTS_PROVIDER_TIER) to activate
+tokens_per_request = 12000      # estimate for TPM→rate (a coding turn's payload)
+
+[limits.free]
+rpm = 30
+tpm = 15000
+
+[limits.tier1]
+rpm = 1000
+tpm = 1000000

@@ -24,6 +24,7 @@ Only imported/wired when ``.harness-config.yaml`` is present (config.load_config
 
 from __future__ import annotations
 
+import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -118,6 +119,23 @@ class ReplChannel(Channel):
 
 
 # --- the resume loop (S1) — host-testable via injected resume_fn/channel ------
+
+
+class HaltTurn(Exception):
+    """Raised by the pause gate on a DENY when ``on_deny='halt'``: abandon the agent
+    turn *now* rather than feed a denial back and let the ReAct loop continue.
+
+    Ending the turn on deny (vs. ``continue``) avoids the post-deny model call, the
+    token/429 cost of it, and the bypass window where a denied ``rm -rf`` gets
+    re-issued as ``rmdir``. Carries the denial ``ToolMessage`` so the caller can pair
+    the now-dangling tool_call in checkpoint state (``update_state``) before returning
+    to the human prompt — otherwise the next turn resumes with an unanswered
+    tool_call and some providers reject that."""
+
+    def __init__(self, tool_message, name: str):
+        super().__init__(f"tool call {name!r} denied; turn halted")
+        self.tool_message = tool_message
+        self.tool_name = name
 
 
 class InterruptAborted(Exception):
@@ -242,12 +260,23 @@ def make_ask_human_tool(default_source: str = interrupt.SOURCE_ASK_HUMAN):
 
 
 def _tool_call_fields(request) -> tuple[str | None, list, str | None]:
-    """Best-effort (tool_name, args, command) off a deepagents tool-call request.
+    """Best-effort (tool_name, args, command) off a langchain tool-call request.
 
-    Kept defensive: the exact request shape is deepagents-internal, so anything
-    missing degrades to None/[] rather than raising inside the middleware."""
-    name = getattr(request, "tool_name", None) or getattr(request, "name", None)
-    args = getattr(request, "args", None) or getattr(request, "tool_input", None) or {}
+    The live shape is a ``ToolCallRequest`` whose ``.tool_call`` is the standard
+    langchain ToolCall dict — ``{"name", "args", "id"}`` — NOT top-level
+    ``tool_name``/``args`` attributes. Reading the wrong place silently yielded
+    ``name=None, args=[], command=None`` for every call, so under a non-``strict``
+    preset the ``review_triggers`` gate matched nothing and every tool call
+    (including ``rm -rf``) ran ungated. Prefer ``.tool_call``; fall back to the old
+    attribute shapes so test fakes / other request types still degrade, not raise."""
+    call = getattr(request, "tool_call", None)
+    if isinstance(call, dict):
+        name = call.get("name")
+        args = call.get("args")
+    else:
+        name = getattr(request, "tool_name", None) or getattr(request, "name", None)
+        args = getattr(request, "args", None) or getattr(request, "tool_input", None)
+    args = args or {}
     if isinstance(args, dict):
         values = list(args.values())
         command = args.get("command") or args.get("cmd")
@@ -255,6 +284,35 @@ def _tool_call_fields(request) -> tuple[str | None, list, str | None]:
         values = [args]
         command = None
     return name, values, command
+
+
+def _tool_call_args(request) -> dict:
+    """The tool-call args as a dict ({} when unavailable), same source as
+    ``_tool_call_fields``. Used to surface *parameters* (not just the tool name) in
+    the approval prompt so a human can see what the call would actually do."""
+    call = getattr(request, "tool_call", None)
+    if isinstance(call, dict):
+        args = call.get("args")
+    else:
+        args = getattr(request, "args", None) or getattr(request, "tool_input", None)
+    return args if isinstance(args, dict) else {}
+
+
+def _format_call_params(args: dict, command: str | None, *, cap: int = 200) -> str:
+    """A compact one-line ``k=v, …`` summary of a call's params for the prompt line.
+
+    Per-value and whole-line length caps keep the prompt readable; the full,
+    untruncated args go in the request ``context`` (revealed by ``/show``)."""
+    if not args:
+        return command or ""
+    parts = []
+    for k, v in args.items():
+        s = " ".join(str(v).split())
+        if len(s) > 80:
+            s = s[:80] + "…"
+        parts.append(f"{k}={s}")
+    line = ", ".join(parts)
+    return line if len(line) <= cap else line[:cap] + "…"
 
 
 class PauseMiddleware(AgentMiddleware):
@@ -273,6 +331,7 @@ class PauseMiddleware(AgentMiddleware):
         super().__init__()
         self._config = config
         self._gate_all_tools = "tool.start" in config.gated_hooks()
+        self._on_deny = getattr(config, "on_deny", "halt")
 
     def _should_gate(self, name, values, command):
         if self._gate_all_tools:
@@ -292,10 +351,23 @@ class PauseMiddleware(AgentMiddleware):
         if not gated:
             return handler(request)
         reason = f"matched trigger {{{hit.on}: {hit.pattern}}}" if hit else "strict autonomy"
+        args = _tool_call_args(request)
+        # Show the *parameters*, not just the tool name — a human approving 'execute'
+        # needs to see the command, and 'write_file' the path/content. Compact
+        # summary on the prompt line; full args as expandable context (/show).
+        params = _format_call_params(args, command)
+        prompt = f"Approve tool call '{name}'? ({reason})"
+        if params:
+            prompt = f"Approve tool call '{name}'({params})? ({reason})"
+        try:
+            full_args = json.dumps(args, indent=2, default=str) if args else ""
+        except (TypeError, ValueError):
+            full_args = str(args)
+        context = full_args or str(command or values or name)
         req = new_request(
             interrupt.KIND_APPROVE,
-            f"Approve tool call '{name}'? ({reason})",
-            context=str(command or values or name),
+            prompt,
+            context=context,
             source=interrupt.SOURCE_DETERMINISTIC,
             default=False,  # fail-closed if unanswered headless
             meta={"tool_name": name or ""},
@@ -303,17 +375,48 @@ class PauseMiddleware(AgentMiddleware):
         approved = interrupt.raise_interrupt(req)
         if approved:
             return handler(request)
-        return _blocked_result(request, name)
+        # Announce the block on stderr: the model is fed a denial ToolMessage but a
+        # weak model may still *claim* it did the action in its reply. This line is
+        # the ground truth the operator can trust over the model's prose.
+        print(
+            f"[harness] tool call '{name}' DENIED by operator — NOT executed"
+            + (f" ({command})" if command else ""),
+            file=sys.stderr,
+        )
+        blocked = _blocked_result(request, name)
+        if self._on_deny == "halt":
+            # End the turn now: no post-deny model call, no bypass window. The caller
+            # pairs `blocked` into checkpoint state and returns to the human prompt.
+            raise HaltTurn(blocked, name or "")
+        return blocked
 
 
 def _blocked_result(request, name):
-    """A tool result standing in for a denied call, fed back to the model so it
-    can adapt rather than crash. Shape mirrors what a normal tool return yields;
-    kept minimal + defensive since the deepagents result type is internal."""
+    """A tool result standing in for a denied call, fed back to the model.
+
+    **Stop-and-report, not "choose another approach."** The earlier wording invited
+    the model to reach the same goal by a different command — which is exactly how a
+    denied ``rm -rf`` got bypassed with ``rmdir`` (the review-trigger gate is
+    phrasing-blind, so the workaround runs ungated). A hard deny must tell the model
+    to abandon the goal and report, not to route around the human's decision. This is
+    guidance, not enforcement (a model can still disobey; only a tool-name gate or an
+    fs jail enforces) — but it stops actively coaching the bypass."""
     from langchain_core.messages import ToolMessage
 
-    tool_call_id = getattr(request, "tool_call_id", None) or getattr(request, "id", None) or ""
+    call = getattr(request, "tool_call", None)
+    tool_call_id = (
+        (call.get("id") if isinstance(call, dict) else None)
+        or getattr(request, "tool_call_id", None)
+        or getattr(request, "id", None)
+        or ""
+    )
     return ToolMessage(
-        content=f"Tool call '{name}' was denied by the human operator. Do not retry it; choose another approach.",
+        content=(
+            f"The operator DENIED the tool call '{name}'. Do NOT retry it, and do NOT "
+            "attempt to achieve the same result by any other command, tool, or "
+            "workaround — the denial applies to the intended action, not just this "
+            "exact call. Stop pursuing this goal now and tell the user what you were "
+            "trying to do and that it was denied."
+        ),
         tool_call_id=tool_call_id,
     )

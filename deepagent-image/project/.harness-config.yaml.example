@@ -23,6 +23,15 @@ review_triggers:
 # shadow UX is still an open fork — see milestone3.md §6).
 interruption_policy: blocking
 
+# halt | continue — what happens after you DENY a gated tool call.
+#   halt     — end the agent turn immediately, return to the you> prompt. No
+#              post-deny model call, no tokens burned, and no window for the model
+#              to re-issue the denied action in a different form (e.g. rmdir for a
+#              denied rm -rf). Default.
+#   continue — feed the denial back to the model and let it keep working the turn
+#              (it may pivot to something else you asked for).
+on_deny: halt
+
 # Which harness system events raise an interrupt (vs. log / crash).
 system_interrupts:
   missing_price: true       # surface before untracked spend accrues (M1 ledger)

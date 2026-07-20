@@ -26,6 +26,12 @@ CONFIG_NAME = ".harness-config.yaml"
 # --- valid enum values (validated loudly, like the workflow manifest) --------
 AUTONOMY_LEVELS = ("strict", "guided", "autonomous")
 INTERRUPTION_POLICIES = ("blocking", "shadow")
+# What happens to the turn after a human DENIES a gated tool call:
+#   halt     — end the agent turn immediately, return control to the human prompt
+#              (no post-deny LLM turn; no bypass window; cheaper). Default.
+#   continue — feed a denial ToolMessage back to the model and let the ReAct loop
+#              continue (the model may adapt/pivot in the same turn).
+ON_DENY_MODES = ("halt", "continue")
 TRIGGER_TARGETS = ("tool_name", "arg", "path", "command")
 SYSTEM_INTERRUPT_KEYS = ("missing_price", "provider_error", "permission_denied")
 
@@ -65,6 +71,7 @@ class Config:
     autonomy_level: str = "guided"
     review_triggers: tuple[Trigger, ...] = ()
     interruption_policy: str = "blocking"
+    on_deny: str = "halt"
     # Which harness system events raise (vs. log/crash). Default True: a present
     # config surfaces these unless explicitly disabled (matches the §5 example).
     system_interrupts: dict = field(
@@ -144,6 +151,7 @@ def parse_config(text: str, source: str = CONFIG_NAME) -> Config:
     silently ignored."""
     autonomy = "guided"
     policy = "blocking"
+    on_deny = "halt"
     triggers: list[Trigger] = []
     system: dict = {k: True for k in SYSTEM_INTERRUPT_KEYS}
 
@@ -162,6 +170,8 @@ def parse_config(text: str, source: str = CONFIG_NAME) -> Config:
                 autonomy, section = _scalar(value), None
             elif key == "interruption_policy":
                 policy, section = _scalar(value), None
+            elif key == "on_deny":
+                on_deny, section = _scalar(value), None
             elif key == "review_triggers":
                 section = "review_triggers"
                 if value:  # inline list on the same line is not supported
@@ -188,11 +198,14 @@ def parse_config(text: str, source: str = CONFIG_NAME) -> Config:
         _fail(source, f"autonomy_level must be one of {AUTONOMY_LEVELS}, got {autonomy!r}")
     if policy not in INTERRUPTION_POLICIES:
         _fail(source, f"interruption_policy must be one of {INTERRUPTION_POLICIES}, got {policy!r}")
+    if on_deny not in ON_DENY_MODES:
+        _fail(source, f"on_deny must be one of {ON_DENY_MODES}, got {on_deny!r}")
 
     return Config(
         autonomy_level=autonomy,
         review_triggers=tuple(triggers),
         interruption_policy=policy,
+        on_deny=on_deny,
         system_interrupts=system,
     )
 

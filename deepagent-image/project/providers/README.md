@@ -25,9 +25,40 @@ providers/
 | `prefix`       | str    | no       | model spec prefix; defaults to `"<dirname>:"`                  |
 | `base_url_env` | str    | no       | set => OpenAI-compatible, routed via `ChatOpenAI`             |
 | `pricing`      | str    | no       | cost strategy: `rate_table` \| `reported` \| `free` (default) |
+| `[limits]`     | table  | no       | plan rate limits → proactive request pacing (see below)      |
 
 `default_model` is a model file stem (e.g. `gemini-3.5-flash`), not a full spec.
 The full spec handed to langchain is `prefix + stem`.
+
+### `[limits]` — plan rate limits (request pacing)
+
+Declares the provider's plan RPM/TPM so the harness paces every model call under
+the ceiling (`harness/ratelimit.py`), instead of only reacting to 429s. **Inert
+until a tier is selected** — ships as data, changes nothing by default.
+
+```toml
+[limits]
+# tier = "free"               # activate here, or via DEEPAGENTS_PROVIDER_TIER
+tokens_per_request = 12000    # estimate for TPM→rate (best-effort TPM pacing)
+rpm = 30                      # optional top-level (used when no tier block matches)
+tpm = 15000
+[limits.free]                 # optional per-tier blocks
+rpm = 30
+tpm = 15000
+[limits.tier1]
+rpm = 1000
+tpm = 1000000
+```
+
+- **RPM is exact** (a minimum interval between calls). **TPM is best-effort**: the
+  `tokens_per_request` estimate turns tokens/min into a request rate; the stricter
+  of RPM/TPM binds. A tight free tier can pace to ~1 call/minute — that's the real
+  ceiling, surfaced rather than 429-thrashed.
+- Active tier: `DEEPAGENTS_PROVIDER_TIER` env, else the `tier` key. A matching
+  `[limits.<tier>]` block wins; otherwise top-level `rpm`/`tpm` apply.
+- Env overrides (highest precedence, work even with no `[limits]` at all):
+  `DEEPAGENTS_RPM`, `DEEPAGENTS_TPM`, `DEEPAGENTS_TOKENS_PER_REQUEST`.
+- Numbers change and differ per model — **confirm against your provider console.**
 
 ### `pricing` strategy (Milestone 1)
 

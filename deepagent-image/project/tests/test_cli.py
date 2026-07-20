@@ -397,6 +397,13 @@ def test_slash_commands_gated_on_archive():
     # Every command carries a non-empty description (the completion preview meta).
     assert all(witharchive.values())
 
+    # /refresh is gated on the ephemeral source mount, independent of the archive:
+    # absent by default, present (with a description) only when refresh_on.
+    assert "/refresh" not in cli.slash_commands(archive_on=True)
+    withrefresh = cli.slash_commands(archive_on=False, refresh_on=True)
+    assert "/refresh" in withrefresh
+    assert all(withrefresh.values())
+
 
 def test_read_line_falls_back_to_input_without_session(monkeypatch):
     # session=None => plain input(), so a non-TTY / prompt_toolkit-less run is

@@ -5,7 +5,11 @@
 #
 # Ephemeral workspace:
 #   EPHEMERAL=1 ./run-docker.sh "task"        # revert all workspace changes on close
+#                                             #   (in-container /refresh pulls live host edits)
 #   SAVE_WORKSPACE=1 ./run-docker.sh "task"   # ephemeral + snapshot to workspace-logs/<ts>/
+# In ephemeral mode the real workspace is also mounted read-only at
+# /project/workspace-src so the /refresh command + refresh_workspace tool can pull
+# live host edits into the throwaway copy mid-run (see harness/refresh.py).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="$ROOT/project/.env"
@@ -209,11 +213,20 @@ SAVE_WORKSPACE="${SAVE_WORKSPACE:-}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 EPHEMERAL_DIR=""
 MOUNT_WORKSPACE="$WORKSPACE"
+# In ephemeral mode we ALSO bind-mount the real workspace read-only at
+# /project/workspace-src, so the in-container /refresh command + refresh_workspace
+# tool can pull live host edits into the throwaway copy mid-run (still reverted on
+# close). Empty on a normal run, so nothing extra is mounted.
+SRC_MOUNT=()
 if [[ -n "$EPHEMERAL" ]]; then
   EPHEMERAL_DIR="$ROOT/.ephemeral/$STAMP"
   copy_workspace "$WORKSPACE" "$EPHEMERAL_DIR"
   MOUNT_WORKSPACE="$EPHEMERAL_DIR"
-  echo "Ephemeral: on - changes revert on close (copy at $EPHEMERAL_DIR)"
+  SRC_MOUNT=(-v "$WORKSPACE:/project/workspace-src:ro"
+             -e DEEPAGENTS_WORKSPACE_SRC=/project/workspace-src)
+  echo "Ephemeral: on - changes revert on close."
+  echo "  Live copy (run tests here): $EPHEMERAL_DIR"
+  echo "  /refresh pulls live host edits from $WORKSPACE into the copy."
 fi
 seed_workspace "$MOUNT_WORKSPACE" "$SEED_SOURCE"
 
@@ -233,6 +246,16 @@ mkdir -p "$STATE_HOST_DIR"
 GIT_MOUNT=()
 if [[ -f "$HOME/.gitconfig" ]]; then
   GIT_MOUNT=(-v "$HOME/.gitconfig:$HOME_DIR/.gitconfig:ro")
+fi
+
+# HITL config: .harness-config.yaml is host-local + gitignored (like .env), so it
+# is NOT baked into the image. Mount it into /project (the harness CWD) when
+# present so its mere presence turns HITL on (cli reads Path.cwd()/.harness-config.yaml).
+# Absent => not mounted => HITL stays off (byte-for-byte Milestone 2).
+HITL_MOUNT=()
+if [[ -f "$ROOT/project/.harness-config.yaml" ]]; then
+  HITL_MOUNT=(-v "$ROOT/project/.harness-config.yaml:/project/.harness-config.yaml:ro")
+  echo "HITL config: mounted (.harness-config.yaml present)"
 fi
 
 # -it gives the REPL prompt loop a TTY. If stdin isn't actually a terminal
@@ -256,7 +279,9 @@ build_agent_run() {
     -e DEEPAGENTS_STATE_DIR=/project/state
     -v "$MOUNT_WORKSPACE:/project/workspace"
     -v "$STATE_HOST_DIR:/project/state"
+    ${SRC_MOUNT[@]+"${SRC_MOUNT[@]}"}
     ${GIT_MOUNT[@]+"${GIT_MOUNT[@]}"}
+    ${HITL_MOUNT[@]+"${HITL_MOUNT[@]}"}
     deepagent-harness)
   if [[ $# -gt 0 ]]; then
     AGENT_RUN+=(python3 main.py "$@")

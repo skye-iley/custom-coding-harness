@@ -79,6 +79,10 @@ _DEFAULT_RETRY_BASE = 0.5
 # Hard ceiling on any single backoff sleep, so a large attempt count or base
 # can't wedge the session for minutes.
 _DELAY_CAP_SECONDS = 20.0
+# A *server-provided* wait (a 429's retry_delay / Retry-After) is authoritative,
+# so it gets a higher ceiling than the blind jitter — but still bounded, so a
+# provider that says "retry in 3600s" escalates to S4 rather than freezing the run.
+_SERVER_DELAY_CAP_SECONDS = 120.0
 
 
 def _status_of(exc: BaseException) -> int | None:
@@ -158,6 +162,62 @@ def retry_base_from_env(env: dict | None = None) -> float:
     return val if val > 0 else _DEFAULT_RETRY_BASE
 
 
+def _duration_seconds(value: Any) -> float | None:
+    """Coerce a retry-delay value to seconds across the shapes SDKs expose:
+    a plain number, a ``datetime.timedelta`` (``.total_seconds()``), or a protobuf
+    ``Duration`` (``.seconds``). ``None``/unknown → ``None``."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if value >= 0 else None
+    total = getattr(value, "total_seconds", None)
+    if callable(total):
+        try:
+            return float(total())
+        except Exception:  # noqa: BLE001
+            pass
+    secs = getattr(value, "seconds", None)
+    if isinstance(secs, (int, float)) and not isinstance(secs, bool):
+        return float(secs)
+    return None
+
+
+def retry_after_seconds(exc: BaseException) -> float | None:
+    """The server-requested wait before retrying, or ``None`` if it didn't say.
+
+    Precise beats blind backoff: a 429 usually carries how long to wait. Checked
+    in order — an explicit ``retry_delay``/``retry_after`` attribute (Google's
+    ``ResourceExhausted`` sets ``retry_delay``; OpenAI/Anthropic SDKs a numeric
+    ``retry_after``), a ``Retry-After`` response header, then a fingerprint in the
+    message (Google's ``retry_delay {{ seconds: N }}`` proto text, or a
+    "retry in Ns" phrasing). Returns a non-negative float or ``None``.
+    """
+    for attr in ("retry_delay", "retry_after"):
+        secs = _duration_seconds(getattr(exc, attr, None))
+        if secs is not None:
+            return secs
+
+    resp = getattr(exc, "response", None)
+    headers = getattr(resp, "headers", None) if resp is not None else None
+    if headers:
+        raw = None
+        try:
+            raw = headers.get("Retry-After") or headers.get("retry-after")
+        except AttributeError:
+            raw = None
+        if raw is not None and str(raw).strip().replace(".", "", 1).isdigit():
+            return float(raw)
+
+    text = str(exc)
+    m = re.search(r"retry_delay\s*\{\s*seconds:\s*(\d+)", text)  # google proto dump
+    if m:
+        return float(m.group(1))
+    m = re.search(r"retry(?:\s+again|\s+after|\s+in)?\s+(?:in\s+)?(\d+(?:\.\d+)?)\s*s(?:ec|econds)?\b", text, re.I)
+    if m:
+        return float(m.group(1))
+    return None
+
+
 def compute_delay(attempt: int, base: float, rand: Callable[[], float] = random.random) -> float:
     """Full-jitter exponential backoff for a 0-indexed ``attempt``.
 
@@ -197,7 +257,13 @@ def retry_call(
         except Exception as exc:  # noqa: BLE001 - classification decides re-raise
             if attempt >= max_retries or not is_retryable(exc):
                 raise
-            delay = compute_delay(attempt, base, rand=rand)
+            # Prefer the server's own retry_delay (precise) over blind jitter; cap
+            # it so a huge server wait escalates to S4 rather than freezing the run.
+            server = retry_after_seconds(exc)
+            if server is not None:
+                delay = min(server, _SERVER_DELAY_CAP_SECONDS)
+            else:
+                delay = compute_delay(attempt, base, rand=rand)
             if on_retry is not None:
                 on_retry(attempt + 1, exc, delay)
             sleep(delay)

@@ -90,6 +90,66 @@ def _agent_shell_env() -> dict[str, str]:
 BASE_SYSTEM_PROMPT = """You are an expert coding assistant operating inside a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files. You *only* check the previous sessions **if** there is some clear reference to them or clearly missing info, otherwise take the inputs as-is"""
 
 
+# Convenience set for DEEPAGENTS_LEAN_TOOLS: the two biggest tool schemas the agent
+# rarely needs for a simple task (~3k tokens/request between them, measured). The
+# subagent `task` tool (~1.9k) and `write_todos` (~1.1k). Dropping them shrinks
+# every model call — useful to fit a tight free-tier TPM while testing.
+_LEAN_EXCLUDED_TOOLS = frozenset({"task", "write_todos"})
+
+
+def _tool_display_name(tool) -> str | None:
+    """A bound tool's name across the shapes a model request carries (BaseTool or
+    an OpenAI-style ``{"function": {"name": ...}}`` / ``{"name": ...}`` dict)."""
+    name = getattr(tool, "name", None)
+    if name:
+        return name
+    if isinstance(tool, dict):
+        fn = tool.get("function")
+        if isinstance(fn, dict) and fn.get("name"):
+            return fn["name"]
+        return tool.get("name")
+    return None
+
+
+def excluded_tools_from_env(env: dict | None = None) -> frozenset[str]:
+    """Tool names to hide from the model, from env (empty => hide nothing).
+
+    ``DEEPAGENTS_EXCLUDE_TOOLS`` is a comma/space list of exact tool names;
+    ``DEEPAGENTS_LEAN_TOOLS`` (truthy) adds the ``_LEAN_EXCLUDED_TOOLS`` set. A
+    **test/token knob** — off by default, so a normal run offers the full toolset."""
+    env = os.environ if env is None else env
+    names = {t.strip() for t in env.get("DEEPAGENTS_EXCLUDE_TOOLS", "").replace(",", " ").split() if t.strip()}
+    if env.get("DEEPAGENTS_LEAN_TOOLS", "").strip().lower() in ("1", "true", "yes", "on"):
+        names |= _LEAN_EXCLUDED_TOOLS
+    return frozenset(names)
+
+
+class _ExcludeToolsMiddleware(AgentMiddleware):
+    """Strip named tools from what the model sees on each call (token/test knob).
+
+    Placed last in the stack so it filters tools *injected* by earlier deepagents
+    middleware (subagent `task`, `write_todos`, filesystem tools). Only the model's
+    view is narrowed — the tools still exist in the node — so this trims tool-schema
+    tokens per request without touching execution paths. Mirrors deepagents' own
+    internal ``_ToolExclusionMiddleware`` but avoids depending on that private API."""
+
+    def __init__(self, excluded: frozenset[str]):
+        super().__init__()
+        self._excluded = frozenset(excluded)
+
+    def _filter(self, request):
+        if not self._excluded:
+            return request
+        kept = [t for t in request.tools if _tool_display_name(t) not in self._excluded]
+        return request.override(tools=kept)
+
+    def wrap_model_call(self, request, handler):
+        return handler(self._filter(request))
+
+    async def awrap_model_call(self, request, handler):
+        return await handler(self._filter(request))
+
+
 class _WorkspaceShellBackend(LocalShellBackend):
     """LocalShellBackend that tolerates real-root-prefixed virtual paths.
 
@@ -175,6 +235,44 @@ def make_recall_past_tool(conn, default_topic: str | None):
     return recall_past
 
 
+def make_refresh_workspace_tool(workspace: Path):
+    """Build the `refresh_workspace` agent tool (ephemeral runs only).
+
+    Lets the model pull live host edits from the read-only source mount into its
+    working copy mid-turn — e.g. to pick up a file a human changed while it was
+    working. Source wins on conflict; the copy stays throwaway (reverted at close).
+    cli only builds this when the source mount is present (`refresh.workspace_src()`
+    is not None). Returns None if langchain's tool decorator is unavailable so a
+    bare host still imports this module.
+    """
+    from langchain_core.tools import tool
+
+    from harness import refresh as refresh_mod
+
+    @tool
+    def refresh_workspace(path: str | None = None) -> str:
+        """Pull the latest host-side edits into your workspace (ephemeral runs only).
+
+        Your workspace is a throwaway COPY; a human may edit the real files on the
+        host while you work, and those edits are NOT visible to you until you sync.
+        Call this to pull them in. `path`: omit to refresh everything, or pass a
+        single file/dir to refresh just that. The host copy WINS on conflict, so
+        your own unsaved edits to the same file are overwritten. Returns a short
+        summary of what changed.
+        """
+        src = refresh_mod.workspace_src()
+        if src is None:
+            return "refresh unavailable: not an ephemeral run (no source mount)."
+        try:
+            written = refresh_mod.refresh_into(workspace, src, path)
+        except (ValueError, FileNotFoundError) as exc:
+            return f"refresh failed: {exc}"
+        scope = f" under {path!r}" if path else ""
+        return f"Refreshed {len(written)} file(s) from the host{scope}."
+
+    return refresh_workspace
+
+
 def resolve_workspace(raw: str) -> Path:
     workspace = Path(raw).expanduser().resolve()
     # The image sets DEEPAGENTS_IN_CONTAINER=1 (see Dockerfile). An explicit
@@ -241,10 +339,17 @@ def build_agent(
     custom_tools = []
     custom_tools.extend(tools or [])
 
+    mw = list(middleware or [])
+    # Optional tool-shedding (DEEPAGENTS_LEAN_TOOLS / DEEPAGENTS_EXCLUDE_TOOLS):
+    # appended LAST so it strips tools injected by deepagents' own middleware.
+    excluded = excluded_tools_from_env()
+    if excluded:
+        mw.append(_ExcludeToolsMiddleware(excluded))
+
     return create_deep_agent(
         model=model,
         tools=custom_tools,
-        middleware=middleware or [],
+        middleware=mw,
         backend=backend,
         system_prompt=system_prompt,
         checkpointer=checkpointer,

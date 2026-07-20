@@ -78,6 +78,20 @@ conda env) so a run doesn't clone gigabytes — an ephemeral run rebuilds the en
 (`checkpoints.sqlite` / `past.sqlite`, keyed to the *real* workspace path) stays persistent across
 ephemeral runs; only the workspace tree is throwaway. Both output dirs are gitignored.
 
+**Live refresh into the ephemeral copy (`harness/refresh.py`).** The copy is a point-in-time
+snapshot: edits made to the *real* workspace after launch don't reach it on their own. So ephemeral
+mode *also* bind-mounts the real workspace **read-only** at `/project/workspace-src`
+(`DEEPAGENTS_WORKSPACE_SRC`), and exposes two ways to pull live host edits into the copy mid-run:
+the **`/refresh [subpath]`** REPL command and the **`refresh_workspace(path=None)`** agent tool
+(registered only when the source mount is present). Both mirror `src → workspace` **source-wins on
+conflict** (the agent's in-flight edits to the *same* file are overwritten), **excluding `.conda`**,
+and **do not delete** agent-created files absent from the source (pulls in, never prunes). Escaping
+the workspace (`..`/absolute) is refused. The copy stays throwaway — refreshed content reverts on
+close like everything else, so you can also just `cd deepagent-image/.ephemeral/<ts>/` on the host
+to run tests against the agent's live state. On a normal (non-ephemeral) run the mount is absent,
+`refresh.workspace_src()` is None, and both the command and tool report "unavailable" — inert.
+Tests: `tests/test_refresh.py` (host-runnable, stdlib only).
+
 ## Two Python stacks — do not mix
 
 | Stack | Location | For |
@@ -260,6 +274,14 @@ channel* (design_doc.md §9). **Off unless `project/.harness-config.yaml` exists
 absent, every seam below is skipped and the harness is byte-for-byte Milestone 2
 (removable contract). Copy `.harness-config.yaml.example` to turn it on.
 
+**How the config reaches the container:** `.harness-config.yaml` is host-local and
+**gitignored (like `.env`), so it is NOT baked into the image** (the Dockerfile's
+enumerated `COPY` list omits it, and would break the build if it required a
+gitignored file). `run-docker.{ps1,sh}` **bind-mount it into `/project`** at run
+time when present — `cli.main` reads `Path.cwd()/.harness-config.yaml` (CWD =
+`/project`). So HITL is off unless *both* the file exists on the host *and*
+run-docker mounts it; a raw `docker run` without that mount runs with HITL off.
+
 The spec (`docs/milestones/complete/milestone3.md`) is authoritative on intent; the
 code drifts from it in two deliberate places, noted below.
 
@@ -280,7 +302,20 @@ code drifts from it in two deliberate places, noted below.
   (`/show` expands a truncated context, §6).
 - **S2 pause gate (`hitl.PauseMiddleware`)** — gates `tool.start` by the
   `autonomy_level` preset (strict gates all tools; guided/autonomous gate only on a
-  `review_triggers` match) and blocks a denied call with a ToolMessage. **Deviation:**
+  `review_triggers` match). The gate reads the call off `ToolCallRequest.tool_call`
+  (`{name,args,id}` — **not** top-level `tool_name`/`args`, an early bug that let
+  every call run ungated under `guided`) and surfaces the tool **params** in the
+  approval prompt (full args as `/show` context). On **deny**, behaviour is set by
+  **`on_deny`** (config, default `halt`): `halt` raises `HaltTurn` so the turn ends
+  and control returns to the prompt (`cli.run_turn` catches it, repairs the dangling
+  tool_call via `update_state`, returns no reply) — no post-deny model call and no
+  window for the model to re-issue the denied action in another form (a denied
+  `rm -rf` was observed being bypassed as `rmdir` under `continue`); `continue` feeds
+  a stop-and-report ToolMessage back and lets the ReAct loop proceed. Either way a
+  `[harness] … DENIED — NOT executed` line prints (ground truth over a model that may
+  falsely claim success). **Note:** `review_triggers` are phrasing-blind (a pattern
+  gate is triage, not a guarantee) — for a hard destructive-action guarantee gate
+  `execute` by `tool_name` or use the planned fs jail (§2). **Deviation:**
   the spec calls for a `pause` *step type* in `workflows.py`; workflow steps are
   subprocess side-effects that cannot suspend the graph in-process, so the pause is
   an `AgentMiddleware` that raises `interrupt()` instead. `review_triggers` matching
@@ -318,13 +353,15 @@ code drifts from it in two deliberate places, noted below.
 cost/resource caps still tick while a human is deciding; tracked as a follow-up.
 
 Config knobs: `.harness-config.yaml` (`autonomy_level`, `review_triggers`,
-`interruption_policy`, `system_interrupts`); `--headless`/`DEEPAGENTS_HEADLESS`;
+`interruption_policy`, `on_deny`, `system_interrupts`); `--headless`/`DEEPAGENTS_HEADLESS`;
 P1's `DEEPAGENTS_MAX_RETRIES` / `DEEPAGENTS_RETRY_BASE`.
 
 Tests (host-runnable, stdlib/injected-fakes): `test_resilience`, `test_interrupt`,
 `test_config`, `test_audit`, `test_hitl` (loop/channel/resolution), plus the P1
-wiring cases in `test_cli`. The graph-side `interrupt()`/`ask_human`/`PauseMiddleware`
-dispatch is image-only and exercised by smoke, not the host suite.
+wiring cases in `test_cli`. `PauseMiddleware`'s field extraction + gate/deny
+decision is host-tested in `test_hitl` against the real `ToolCallRequest.tool_call`
+shape; only the graph-side `interrupt()`/`ask_human` suspend/resume is image-only
+(exercised by smoke).
 
 ## Test suite layout & conventions
 
@@ -380,6 +417,41 @@ or params (`-Cpus`/`-Memory`/`-PidsLimit`) in the `.ps1`. This is **not** a
 sandbox — the trust boundary is still the container (`docs/milestones/complete/mvp.md` §5);
 don't describe it as sandboxing. Verify with `docker inspect` (`NanoCpus`,
 `Memory`, `PidsLimit`).
+
+## Rate limiting / request pacing
+
+Two layers keep a run under a provider's plan limits — one reactive, one proactive:
+
+- **Reactive (`resilience.py`)** — on a retryable 429/5xx the backoff now **honors
+  the server's own wait**: `retry_after_seconds` reads a `retry_delay`/`retry_after`
+  attribute (Google `ResourceExhausted` sets `retry_delay`; OpenAI/Anthropic a
+  numeric `retry_after`), a `Retry-After` header, or a `retry_delay { seconds: N }` /
+  "retry in Ns" fingerprint in the message, and sleeps exactly that (capped at
+  `_SERVER_DELAY_CAP_SECONDS`=120 so a huge server wait escalates to S4 instead of
+  freezing). Falls back to jittered exponential backoff when the server says nothing.
+- **Proactive (`ratelimit.py`)** — declares plan limits in the registry and paces
+  **every** model call in the ReAct loop (not just per-turn) via langchain's
+  `InMemoryRateLimiter`, attached to the model in `providers.resolve_chat_model`.
+  **RPM is exact** (min interval); **TPM is best-effort** — a `tokens_per_request`
+  estimate converts a tokens/min budget to a request rate, and the stricter of
+  RPM/TPM binds (`effective_rps`). Because native providers return a bare model
+  *string* (create_deep_agent calls `init_chat_model` itself), attaching a limiter
+  means building the model object here; construction failure degrades to the unpaced
+  string, never a hard error.
+
+Config: `provider.toml` `[limits]` — top-level `rpm`/`tpm`/`tokens_per_request`,
+optional per-tier `[limits.<tier>]` blocks. **Inert until a tier is selected**:
+set `tier` in the TOML or `DEEPAGENTS_PROVIDER_TIER` at run time. `DEEPAGENTS_RPM` /
+`DEEPAGENTS_TPM` / `DEEPAGENTS_TOKENS_PER_REQUEST` override the numbers (and can pace
+a provider that ships no `[limits]` at all). No tier + no env = no pacing (byte-for-byte
+prior behaviour — the removable contract). `google_genai/provider.toml` ships
+`free`/`tier1` ballparks; **confirm against your own console** (limits change and
+differ per model). Note a tight free tier (e.g. 15k TPM) paces a coding turn to
+~1 call/minute — that is the tier's real ceiling, surfaced instead of 429-thrashed.
+
+Tests: `tests/test_ratelimit.py` (pure math + tier/env resolution), the
+`retry_after_*` cases in `tests/test_resilience.py`. The actual limiter attachment
+is image-only (smoke).
 
 ## Gotchas
 
