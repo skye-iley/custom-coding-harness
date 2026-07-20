@@ -260,7 +260,7 @@ channel* (design_doc.md §9). **Off unless `project/.harness-config.yaml` exists
 absent, every seam below is skipped and the harness is byte-for-byte Milestone 2
 (removable contract). Copy `.harness-config.yaml.example` to turn it on.
 
-The spec (`docs/milestones/planned/milestone3.md`) is authoritative on intent; the
+The spec (`docs/milestones/complete/milestone3.md`) is authoritative on intent; the
 code drifts from it in two deliberate places, noted below.
 
 - **P1 resilience (`resilience.py`)** — pure, host-tested backoff/classification.

@@ -6,17 +6,18 @@ secret-safe containers.
 
 - `design_doc.md` — full target vision (multi-agent, FSM routing, bubblewrap jail, telemetry-to-PR).
 - `docs/` — spec docs, organized by type. See `docs/README.md` for the full map. In short:
-  - `docs/milestones/complete/` — **built** milestones (`mvp.md`, `milestone1.md`, `milestone2.md`).
-    These record shipped scope; the code is authoritative where they drift.
+  - `docs/milestones/complete/` — **built** milestones (`mvp.md`, `milestone1.md`, `milestone2.md`,
+    `milestone3.md`). These record shipped scope; the code is authoritative where they drift.
     - `mvp.md` — the shipped baseline: one-command containerized Deep Agents coding agent.
     - `milestone1.md` — cost/token visibility + resource caps.
     - `milestone2.md` — present/past memory (fresh-by-default thread + separate on-demand archive).
       See the "Present / past memory" section in `deepagent-image/CLAUDE.md`.
+    - `milestone3.md` — human-in-the-loop (one `interrupt()` spine, three trigger sources) + the §12
+      resilience/headless prereqs it rides on. **Built** — see §0 build status for what shipped vs.
+      deferred, and the "Human-in-the-loop" section in `deepagent-image/CLAUDE.md`.
   - `docs/milestones/planned/` — **not-yet-built** milestones. Wins over `design_doc.md` for
-    "what we build next."
-    - `milestone3.md` — human-in-the-loop (one `interrupt()` spine, three trigger sources).
-      **Spec** — full build spec: dependency-ordered slices (spine + the §12 resilience/headless
-      prerequisites it rides on), design forks closed. Current frontier; slice 6 PR-a already built.
+    "what we build next." *(Empty — M3 was the last planned milestone; next work is picked from
+    `design_doc.md` §12 leftovers or a new named feature plan.)*
   - `docs/features/workspace_visibility.md` — **named feature plan** (not a numbered milestone): restrict
     which workspace paths an agent can see (`.agentignore` policy, designated-secret floor, docker-mask
     → bwrap fs-tool jail → optional overlayfs). **Planned** — summarized in `design_doc.md` §2.

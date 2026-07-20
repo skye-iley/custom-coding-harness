@@ -1,10 +1,11 @@
 # Milestone 3 — Human-in-the-Loop (HITL)
 
-> **Status:** 📋 Spec — full build spec, not a stub. Successor to `docs/milestones/complete/milestone2.md`
-> (present/past memory, ✅ Built). Wins over `design_doc.md` for "what we build next." This milestone
-> promotes the `design_doc.md` **§9 Human-in-the-Loop** design and the **§3 pause action tier** from
-> planned prose into a built, tested slice, and pulls in the two `design_doc.md` §12 items that HITL
-> structurally depends on (**§12.4 provider resilience**, **§12.3 headless mode**). Read §9 first.
+> **Status:** ✅ Built (first pass) — see **§0 Build status** for what shipped vs. deferred. Successor
+> to `docs/milestones/complete/milestone2.md` (present/past memory). Promotes the `design_doc.md`
+> **§9 Human-in-the-Loop** design and the **§3 pause action tier** into a built, tested slice, and
+> pulls in the two `design_doc.md` §12 items HITL structurally depends on (**§12.4 provider
+> resilience**, **§12.3 headless mode**). Read §9 first. Detail on deviations + follow-ups lives in
+> `deepagent-image/CLAUDE.md` → "Human-in-the-loop (Milestone 3)".
 
 ---
 

@@ -24,13 +24,15 @@ next*, the milestone doc wins.
   per-session budgets, `run-docker` `--cpus`/`--memory`/`--pids-limit`).
 - **`milestone2.md`** — present/past memory: fresh-by-default thread + a separate, on-demand
   archive that accumulates across sessions (`harness/archive.py`, `harness/memadmin.py`).
+- **`milestone3.md`** — human-in-the-loop: one `interrupt()` spine, three trigger sources
+  (deterministic pause middleware, agent `ask_human` tool, system events) + the two `design_doc.md`
+  §12 prereqs it rides on (P1 resilience, P2 headless). **Built** — §0 records what shipped vs.
+  deferred (`missing_price`/`permission_denied` events, `shadow` policy, clock-pause, S6 PR-b).
 
 ## Planned milestones — `milestones/planned/`
 
-- **`milestone3.md`** — human-in-the-loop (one `interrupt()` spine, three trigger sources:
-  deterministic workflow pause, agent `ask_human` tool, system events). **Spec** — full build
-  spec: dependency-ordered slices (spine + the two `design_doc.md` §12 prerequisites it rides on,
-  resilience + headless), forks closed. Current frontier; slice 6 PR-a already built.
+*Empty.* Milestone 3 was the last planned milestone; next work is drawn from `design_doc.md` §12
+leftovers or a new named feature plan.
 
 ## Feature plans — `features/`
 
