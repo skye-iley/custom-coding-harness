@@ -1,0 +1,30 @@
+# Human-in-the-loop (HITL) config — Milestone 3 (design_doc.md §9).
+#
+# Copy to `.harness-config.yaml` to TURN HITL ON. Its mere presence enables the
+# interrupt spine; delete the file and the harness is byte-for-byte Milestone 2
+# (removable seam). All four keys are optional — the values below are the
+# defaults the parser applies when a key is omitted.
+
+# strict | guided | autonomous — the preset pause-workflow set.
+#   strict     — approve every tool call and the PR.
+#   guided     — approve the PR; tool calls only when a review_trigger matches.
+#   autonomous — nothing by default; only explicit review_triggers gate.
+autonomy_level: guided
+
+# Force a pause when `on` matches `pattern`, regardless of autonomy_level.
+#   on ∈ { tool_name, arg, path, command }
+#   pattern is an fnmatch glob by default; a leading `re:` opts into a regex.
+#   `path` matches files in the pending diff; `command` matches the raw shell string.
+review_triggers:
+  - { on: path,    pattern: "*.env" }
+  - { on: command, pattern: "rm -rf*" }
+
+# blocking | shadow — blocking pauses immediately; shadow batches (S5; the
+# shadow UX is still an open fork — see milestone3.md §6).
+interruption_policy: blocking
+
+# Which harness system events raise an interrupt (vs. log / crash).
+system_interrupts:
+  missing_price: true       # surface before untracked spend accrues (M1 ledger)
+  provider_error: true      # after P1 retry/backoff is exhausted: retry / abort
+  permission_denied: true   # a path-guard / NetJail / bwrap denial → allow once / deny

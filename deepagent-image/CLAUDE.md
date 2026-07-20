@@ -252,6 +252,80 @@ wants agent-authored long-term memories, that is a separate, additive store.
 Tests: `tests/test_archive.py` + `tests/test_memadmin.py` (host-runnable, stdlib
 only) and the M2 additions in `tests/test_cli.py`.
 
+## Human-in-the-loop (Milestone 3)
+
+A session can **suspend and ask a human**, then resume from the persisted
+checkpoint. *One interrupt request object, three trigger sources, one human
+channel* (design_doc.md §9). **Off unless `project/.harness-config.yaml` exists** —
+absent, every seam below is skipped and the harness is byte-for-byte Milestone 2
+(removable contract). Copy `.harness-config.yaml.example` to turn it on.
+
+The spec (`docs/milestones/planned/milestone3.md`) is authoritative on intent; the
+code drifts from it in two deliberate places, noted below.
+
+- **P1 resilience (`resilience.py`)** — pure, host-tested backoff/classification.
+  `cli._invoke_resilient` wraps every model invoke: bounded exponential backoff
+  with full jitter on retryable errors (429/5xx/connection reset; caps from
+  `DEEPAGENTS_MAX_RETRIES` / `DEEPAGENTS_RETRY_BASE`), plus a one-shot
+  context-overflow stopgap (shed injected/recall context, retry once — the
+  pre-§7/Headroom placeholder). An exhausted error re-raises, which is the seam S4
+  hooks onto.
+- **S1 spine (`interrupt.py` + `hitl.py`)** — `InterruptRequest{id,kind,prompt,
+  options,context,default,timeout_policy,source,meta}` with a stable uuid `id` so a
+  resume binds to the right pause and the *same* keyed prompt re-surfaces after a
+  mid-wait restart (the request dict is the value handed to `langgraph.interrupt()`,
+  so it round-trips through `checkpoints.sqlite`). `hitl.run_interrupt_loop` drains
+  a result's `__interrupt__`, resolves each via the channel (or headless policy),
+  audits it, and resumes with `Command(resume=…)`. REPL presentation is cap+expand
+  (`/show` expands a truncated context, §6).
+- **S2 pause gate (`hitl.PauseMiddleware`)** — gates `tool.start` by the
+  `autonomy_level` preset (strict gates all tools; guided/autonomous gate only on a
+  `review_triggers` match) and blocks a denied call with a ToolMessage. **Deviation:**
+  the spec calls for a `pause` *step type* in `workflows.py`; workflow steps are
+  subprocess side-effects that cannot suspend the graph in-process, so the pause is
+  an `AgentMiddleware` that raises `interrupt()` instead. `review_triggers` matching
+  (`config.match_triggers`, `{on,pattern}`, glob or `re:` regex) is pure/host-tested.
+  The PR gate (`session.end`) is preset-recognized but enforced via the existing
+  git-pr workflow, not yet a blocking interrupt.
+- **S3 ask_human (`hitl.make_ask_human_tool`)** — a Deep Agents tool the agent calls
+  when *it* is blocked; raises the same interrupt, returns the human reply as the
+  tool result (trusted input, §6). Registered next to `recall_past`, gated on HITL.
+- **S4 system interrupts** — **`provider_error` is wired** (REPL-level retry/abort
+  after P1 exhaustion, `cli._run_turn_hitl`; `switch provider` deferred — needs an
+  agent rebuild). **`missing_price` and `permission_denied` are recognized config
+  keys but not yet enforced** — `missing_price` would need `cost.py` to raise an
+  interrupt, which the acyclic import guard (cost imports no sibling) forbids, so it
+  belongs in a separate reader middleware; `permission_denied` rides on the §2/§10
+  path-guard/NetJail gates. Both are follow-ups.
+- **P2 headless (`cli.run_batch`, `--headless` / `DEEPAGENTS_HEADLESS`)** — one-shot:
+  run the task(s) to completion, emit one JSON result on **stdout** (final message,
+  thread id, tokens, cost, branch, exit code; stage markers stay on stderr). PR URL
+  is not yet captured into the JSON (git-pr runs at session.end and logs it to
+  stderr). Interrupts resolve by the §6 fail-closed policy.
+- **S5 policy (`interrupt.headless_decision`)** — `interruption_policy` +
+  per-request `timeout_policy`. Non-TTY runs fall through to `default`; an
+  `approve` with no default denies (fail-closed); `strict`+`blocking` with no safe
+  fall-through **aborts with `EXIT_INTERRUPT_ABORT` (42)** rather than hang. Shadow
+  mode UX is the one open fork (§6) — not built.
+- **S6** — PR-a (`prompt_toolkit` input) shipped earlier. PR-b (the `choose`
+  arrow-key select menu over the S1 request) is **deferred**; `choose` currently
+  resolves by typed index/name (`interpret_reply`).
+- **S7 audit (`audit.py`)** — appends a scrubbed record (id, kind, prompt, resolved
+  value, source, timestamps — **never the context payload**) to
+  `<workspace>/.agent_telemetry/interrupts.jsonl`, git-ignored and git-pr-excluded.
+
+**Budget/clock pause on interrupt (§6 "pause the clock") is not yet wired** — the M1
+cost/resource caps still tick while a human is deciding; tracked as a follow-up.
+
+Config knobs: `.harness-config.yaml` (`autonomy_level`, `review_triggers`,
+`interruption_policy`, `system_interrupts`); `--headless`/`DEEPAGENTS_HEADLESS`;
+P1's `DEEPAGENTS_MAX_RETRIES` / `DEEPAGENTS_RETRY_BASE`.
+
+Tests (host-runnable, stdlib/injected-fakes): `test_resilience`, `test_interrupt`,
+`test_config`, `test_audit`, `test_hitl` (loop/channel/resolution), plus the P1
+wiring cases in `test_cli`. The graph-side `interrupt()`/`ask_human`/`PauseMiddleware`
+dispatch is image-only and exercised by smoke, not the host suite.
+
 ## Test suite layout & conventions
 
 `smoke` runs `python3 -m pytest tests/` in the `test` image stage. The suite is

@@ -26,6 +26,11 @@
 # of the workspace at /project/state by run-docker (DEEPAGENTS_STATE_DIR).
 deepagent-image/project/state/
 
+# Live HITL config (Milestone 3): its presence turns HITL on, so a stray commit
+# would silently flip smoke/CI off the MVP path. The tracked template is
+# .harness-config.yaml.example; the active file stays local.
+deepagent-image/project/.harness-config.yaml
+
 # Host-side run outputs (all gitignored, all under deepagent-image/):
 #  - test-artifacts/  : files tests ship out under smoke -KeepArtifacts / KEEP_ARTIFACTS=1
 #  - .ephemeral/      : throwaway workspace copies for run-docker -Ephemeral (deleted on close)

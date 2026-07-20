@@ -8,6 +8,29 @@
 
 ---
 
+## 0. Build status (branch `feat/milestone3-hitl`)
+
+First implementation pass. Authoritative detail on what shipped, deviations, and follow-ups lives in
+`deepagent-image/CLAUDE.md` → "Human-in-the-loop (Milestone 3)". Summary:
+
+| Slice | State | Notes |
+|-------|-------|-------|
+| **P1** provider resilience | ✅ built | `resilience.py` (pure, tested) + `cli._invoke_resilient`. |
+| **P2** headless one-shot | ✅ built | `cli.run_batch`, `--headless`. PR-URL-in-JSON deferred. |
+| **S1** interrupt spine + channel | ✅ built | `interrupt.py` + `hitl.run_interrupt_loop`; restart round-trip via checkpoint. |
+| **S2** deterministic pause tier | ◑ partial | `PauseMiddleware` gates `tool.start` + `review_triggers`. **Deviation:** middleware, not a `workflows.py` `pause` step (steps can't suspend the graph). PR gate via existing git-pr, not yet a blocking interrupt. |
+| **S3** `ask_human` tool | ✅ built | `hitl.make_ask_human_tool`. |
+| **S4** system-event interrupts | ◑ partial | `provider_error` wired (retry/abort). `missing_price` + `permission_denied` recognized but **not enforced** (follow-ups). |
+| **S5** policy & headless behavior | ✅ built | `headless_decision` fail-closed + `EXIT_INTERRUPT_ABORT`. Shadow-mode UX still open (§6). |
+| **S6** REPL ergonomics | ◑ PR-a only | PR-a (`prompt_toolkit`) shipped; PR-b (`choose` arrow menu) deferred. |
+| **S7** interrupt audit trail | ✅ built | `audit.py` → `.agent_telemetry/interrupts.jsonl` (scrubbed, no context payload). |
+
+Not yet wired: budget/clock **pause-on-interrupt** (§6 "pause the clock"); `switch provider` option
+on the provider-error prompt. Graph-side dispatch (`interrupt()`, `PauseMiddleware`, `ask_human`) is
+image-only — exercised by smoke, not the host test suite.
+
+---
+
 ## 1. Goal & Definition of Done
 
 Give a running session a way to **stop and ask a human** — and give the human a way to answer — at
