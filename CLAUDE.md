@@ -15,7 +15,8 @@ secret-safe containers.
   - `docs/milestones/planned/` — **not-yet-built** milestones. Wins over `design_doc.md` for
     "what we build next."
     - `milestone3.md` — human-in-the-loop (one `interrupt()` spine, three trigger sources).
-      **Stub** — schedules the `design_doc.md` §9 / §3 HITL design; not yet spec-complete. Current frontier.
+      **Spec** — full build spec: dependency-ordered slices (spine + the §12 resilience/headless
+      prerequisites it rides on), design forks closed. Current frontier; slice 6 PR-a already built.
   - `docs/features/workspace_visibility.md` — **named feature plan** (not a numbered milestone): restrict
     which workspace paths an agent can see (`.agentignore` policy, designated-secret floor, docker-mask
     → bwrap fs-tool jail → optional overlayfs). **Planned** — summarized in `design_doc.md` §2.

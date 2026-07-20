@@ -28,8 +28,9 @@ next*, the milestone doc wins.
 ## Planned milestones — `milestones/planned/`
 
 - **`milestone3.md`** — human-in-the-loop (one `interrupt()` spine, three trigger sources:
-  deterministic workflow pause, agent `ask_human` tool, system events). **Stub** — schedules
-  the `design_doc.md` §9 / §3 HITL design into build slices; not yet spec-complete. Current frontier.
+  deterministic workflow pause, agent `ask_human` tool, system events). **Spec** — full build
+  spec: dependency-ordered slices (spine + the two `design_doc.md` §12 prerequisites it rides on,
+  resilience + headless), forks closed. Current frontier; slice 6 PR-a already built.
 
 ## Feature plans — `features/`
 
