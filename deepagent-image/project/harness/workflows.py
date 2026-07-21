@@ -57,6 +57,23 @@ MANIFEST_NAME = "workflow.md"
 _DEFAULT_HOOK_TIMEOUT = 30.0
 
 
+def _side_effect_stdout():
+    """Where a gate/step subprocess's stdout goes.
+
+    Never the harness's own stdout: a headless run (`cli.run_batch`) reserves
+    stdout for the single JSON result line, so any workflow/hook step that prints
+    (e.g. a git-pr status line, or a stray `echo`) would corrupt that contract if
+    it inherited stdout. Route step stdout to **stderr** — visible for debugging,
+    off the machine-readable channel — mirroring how the harness writes its own
+    stage markers. Falls back to DEVNULL if stderr has no real fileno (e.g. under a
+    capturing test harness) so the redirect can never itself raise."""
+    try:
+        sys.stderr.fileno()
+    except (AttributeError, OSError, ValueError):
+        return subprocess.DEVNULL
+    return sys.stderr
+
+
 def _hook_timeout() -> float | None:
     raw = os.getenv("DEEPAGENTS_HOOK_TIMEOUT")
     if raw is None:
@@ -243,7 +260,7 @@ def _run_shell_gate(wf: Workflow, ctx: GateContext) -> bool:
     try:
         result = subprocess.run(
             ["sh", str(wf.gate)], cwd=str(wf.folder), env=ctx.as_env(),
-            check=False, timeout=timeout,
+            check=False, timeout=timeout, stdout=_side_effect_stdout(),
         )
     except subprocess.TimeoutExpired:
         # A hung gate is killed and treated as "skip" (loud, non-fatal) rather
@@ -297,7 +314,7 @@ def run_steps(wf: Workflow, ctx: GateContext) -> None:
         try:
             subprocess.run(
                 cmd, shell=isinstance(cmd, str), env=env, cwd=cwd,
-                check=False, timeout=timeout,
+                check=False, timeout=timeout, stdout=_side_effect_stdout(),
             )
         except subprocess.TimeoutExpired:
             # Loud, non-fatal: a stuck step is killed and the session continues

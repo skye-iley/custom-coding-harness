@@ -132,6 +132,26 @@ def test_final_message_text_list_content_joins_text_parts():
     assert agent.final_message_text({"messages": [msg]}) == "a\nb"
 
 
+def test_final_message_text_drops_thinking_parts():
+    # Regression: Gemma/Anthropic emit a reasoning part alongside the answer text.
+    # The old str(item) fallback leaked "{'type': 'thinking', ...}" into the reply
+    # (and the headless JSON). Only the text part is the answer.
+    msg = _Msg([
+        {"type": "thinking", "thinking": "the user wants the sum; 17+25=42"},
+        {"type": "text", "text": "42"},
+    ])
+    out = agent.final_message_text({"messages": [msg]})
+    assert out == "42"
+    assert "thinking" not in out
+
+
+def test_final_message_text_drops_unknown_non_text_parts():
+    # Non-text parts with no text (e.g. a tool_use block) contribute nothing,
+    # rather than being stringified into the answer.
+    msg = _Msg([{"type": "tool_use", "name": "x", "input": {}}, {"type": "text", "text": "done"}])
+    assert agent.final_message_text({"messages": [msg]}) == "done"
+
+
 def test_final_message_text_dict_message_content():
     result = {"messages": [{"content": "from dict"}]}
     assert agent.final_message_text(result) == "from dict"
