@@ -1,8 +1,9 @@
 # Workspace Visibility & Secret Masking — Feature Plan
 
-> **Status:** ⬜ Planned. Named feature-plan doc (not a numbered milestone). Referenced from
-> `design_doc.md` §2 (Sandbox & Isolation). Wins over `design_doc.md` for the mechanics of
-> *which workspace paths an agent can see*.
+> **Status:** ⬜ Planned — **scheduled under `docs/milestones/planned/milestone4.md`** (Real Trust
+> Boundary), which sets v1-vs-deferred scope and wires this policy into the harness. Named
+> feature-plan doc (not a numbered milestone). Referenced from `design_doc.md` §2 (Sandbox &
+> Isolation). Wins over `design_doc.md` for the mechanics of *which workspace paths an agent can see*.
 >
 > **Problem:** The workspace is a whole-tree bind mount (`-v ${WorkspacePath}:/project/workspace`).
 > Every file under it — including secrets the user's own repo carries (`.env`, `id_rsa`,

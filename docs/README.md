@@ -31,8 +31,11 @@ next*, the milestone doc wins.
 
 ## Planned milestones — `milestones/planned/`
 
-*Empty.* Milestone 3 was the last planned milestone; next work is drawn from `design_doc.md` §12
-leftovers or a new named feature plan.
+- **`milestone4.md`** — **Real Trust Boundary**: workspace visibility (`.agentignore` +
+  designated-secret floor + docker mount-mask) + path-guard middleware + `permission_denied`
+  interrupt wiring, backed by the §10 security suite and the §12.1 CI / §12.2 `harness doctor`
+  support tier. Buildable-now v1 (no host-userns dep); bwrap fs-tool jail is the stretch layer.
+  Pulls together `docs/features/workspace_visibility.md` + `design_doc.md` §2/§10/§12.
 
 ## Feature plans — `features/`
 
