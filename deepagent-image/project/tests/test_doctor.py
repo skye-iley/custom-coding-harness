@@ -61,3 +61,30 @@ def test_doctor_empty_workspace_no_keys_no_errors(tmp_path):
     state.mkdir(parents=True, exist_ok=True)
     rc = doctor.doctor_main([str(ws), str(state)])
     assert rc == 0
+
+
+def test_doctor_no_snapshot_mutation(tmp_path):
+    """Regression: doctor must not write mask-snapshot.txt (snapshot=False)."""
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    (ws / ".env").write_text("SECRET=1")
+    state = tmp_path / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    rc = doctor.doctor_main([str(ws), str(state)])
+    assert rc == 0
+    snap = state / "mask-snapshot.txt"
+    assert not snap.is_file(), "doctor should not write snapshot"
+
+
+def test_doctor_detects_floor_negation(tmp_path):
+    """Regression: floor negation should produce error in doctor."""
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    (ws / ".env").write_text("SECRET=1")
+    state = tmp_path / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "agentignore").write_text("#!floor:\n.env\n", encoding="utf-8")
+    ignore = ws / ".agentignore"
+    ignore.write_text("!.env\n", encoding="utf-8")
+    rc = doctor.doctor_main([str(ws), str(state)])
+    assert rc == 1, "doctor should detect floor negation and return non-zero"

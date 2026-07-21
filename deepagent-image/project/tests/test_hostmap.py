@@ -15,6 +15,7 @@ _BASH = shutil.which("bash")
 needs_bash = pytest.mark.skipif(_BASH is None, reason="needs bash")
 
 _LIB = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "lib" / "hostmap.sh"
+_needs_lib = pytest.mark.skipif(not _LIB.is_file(), reason="hostmap.sh not available (not in test image)")
 
 
 def _decide(uname_s, is_wsl, docker_os, env):
@@ -38,6 +39,7 @@ _MACOS = ("Darwin", "0", "Docker Desktop")
 
 
 @needs_bash
+@_needs_lib
 @pytest.mark.parametrize("engine", [_NATIVE, _WSL, _DESKTOP, _MACOS])
 def test_explicit_on_forces_map(engine):
     # MAP_HOST_USER=1 maps on every engine.
@@ -45,6 +47,7 @@ def test_explicit_on_forces_map(engine):
 
 
 @needs_bash
+@_needs_lib
 @pytest.mark.parametrize("engine", [_NATIVE, _WSL, _DESKTOP, _MACOS])
 def test_explicit_off_forces_no_map(engine):
     # MAP_HOST_USER=0 never maps, even on native Linux.
@@ -52,11 +55,13 @@ def test_explicit_off_forces_no_map(engine):
 
 
 @needs_bash
+@_needs_lib
 def test_auto_maps_only_on_native_linux():
     assert _decide(*_NATIVE, "") == "1"
 
 
 @needs_bash
+@_needs_lib
 @pytest.mark.parametrize("engine", [_WSL, _DESKTOP, _MACOS])
 def test_auto_skips_squashed_engines(engine):
     # WSL / Docker Desktop / macOS squash mount ownership → no mapping.
@@ -64,6 +69,7 @@ def test_auto_skips_squashed_engines(engine):
 
 
 @needs_bash
+@_needs_lib
 def test_macos_never_auto_maps_regardless_of_docker_os():
     # The Darwin gate must win before docker_os is consulted: even a colima/lima
     # VM (reports a plain distro, not "Docker Desktop") must not auto-map, because
@@ -73,6 +79,7 @@ def test_macos_never_auto_maps_regardless_of_docker_os():
 
 
 @needs_bash
+@_needs_lib
 def test_detect_is_wsl_echoes_zero_or_one():
     # Smoke: the WSL probe runs and returns a clean boolean on this host.
     out = subprocess.run(

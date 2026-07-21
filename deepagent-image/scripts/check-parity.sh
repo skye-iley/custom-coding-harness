@@ -26,10 +26,15 @@ for pair in "${pairs[@]}"; do
     FAILED=1
     continue
   fi
+  # Line-count delta only. Deep content parity is NOT auto-checked: the two
+  # scripts express the same docker invocation in different shell syntax
+  # (${MountWorkspace} vs $MOUNT_WORKSPACE, /home/agent vs $HOME_DIR, Linux-only
+  # `-e HOME=/tmp`), so any text-level cross-shell diff yields false positives.
+  # Keep the pairs in sync by review. Mirror of check-parity.ps1.
   ps1_lines=$(wc -l < "$ps1_path")
   sh_lines=$(wc -l < "$sh_path")
   diff=$((ps1_lines - sh_lines))
-  echo "$ps1 ($ps1_lines lines) vs $sh ($sh_lines lines) — diff $diff lines"
+  echo "$ps1 ($ps1_lines lines) vs $sh ($sh_lines lines) - diff $diff lines"
 done
 
 if [[ $FAILED -ne 0 ]]; then

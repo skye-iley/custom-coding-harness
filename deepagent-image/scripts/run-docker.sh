@@ -297,15 +297,33 @@ fi
 MASK_ARGS=()
 EMPTY_FILE=""
 EMPTY_DIR=""
+# Read a var from project/.env so launcher-side decisions honour the SAME config
+# the container sees (DEEPAGENTS_MASK is a container env per §13; the launcher
+# gates the host-side scan/overlay on it too). Host/launcher env still wins when
+# set — this is only the fallback. Last matching KEY=VALUE line, quotes stripped.
+_env_file_get() {
+  local key="$1"
+  [[ -f "$ENV_FILE" ]] || return 0
+  sed -n "s/^[[:space:]]*${key}=//p" "$ENV_FILE" | tail -1 \
+    | sed 's/[[:space:]]*$//; s/^"//; s/"$//; s/^'"'"'//; s/'"'"'$//'
+}
+
 mask_scan() {
-  local mask_mode="${DEEPAGENTS_MASK:-1}"
+  # Launcher env wins; else fall back to project/.env; else default on ("1").
+  local mask_mode="${DEEPAGENTS_MASK:-$(_env_file_get DEEPAGENTS_MASK)}"
+  mask_mode="${mask_mode:-1}"
   [[ "$mask_mode" == "0" ]] && return 0
-  local scan_output
+  local scan_output scan_err
+  scan_err="$(mktemp)"
   scan_output="$(docker run --rm \
     -v "$MOUNT_WORKSPACE:/project/workspace:ro" \
-    -v "$STATE_HOST_DIR:/project/state:ro" \
+    -v "$STATE_HOST_DIR:/project/state" \
     -e DEEPAGENTS_STATE_DIR=/project/state \
-    deepagent-harness python3 -m harness mask-scan 2>/dev/null)" || return 0
+    deepagent-harness python3 -m harness mask-scan 2>"$scan_err")" \
+    || { [[ -s "$scan_err" ]] && cat "$scan_err" >&2; rm -f "$scan_err"; return 0; }
+  # Surface mask-scan diagnostics (protection-reduction, symlink-escape warnings).
+  [[ -s "$scan_err" ]] && cat "$scan_err" >&2
+  rm -f "$scan_err"
   [[ -z "$scan_output" ]] && return 0
   EMPTY_FILE="$(mktemp)"
   EMPTY_DIR="$(mktemp -d)"
@@ -379,5 +397,11 @@ if [[ -n "$EPHEMERAL" ]]; then
   "${AGENT_RUN[@]}"
   exit $?
 fi
+# Can't exec: the mask overlay sources (empty temp file/dir) must outlive the
+# container run, then be cleaned up after it exits. exec would replace the shell
+# so the EXIT trap never fires; and cleaning up before exec deletes the overlay
+# sources out from under `docker run` (docker then fails mounting a dir onto a
+# masked file). So run non-exec and let the trap clean up post-run.
 trap "mask_cleanup" EXIT INT TERM
-exec "${AGENT_RUN[@]}"
+"${AGENT_RUN[@]}"
+exit $?

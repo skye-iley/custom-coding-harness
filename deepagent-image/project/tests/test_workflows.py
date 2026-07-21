@@ -384,3 +384,81 @@ def test_run_steps_redirects_stdout_off_the_harness_stdout(monkeypatch):
 def test_side_effect_stdout_is_stderr_or_devnull():
     import subprocess as _sp
     assert wf._side_effect_stdout() in (sys.stderr, _sp.DEVNULL)
+
+
+# --- M4 §15.1: git-pr must never blank a masked secret into a commit --------
+
+import os  # noqa: E402
+import pathlib  # noqa: E402
+
+_HAS_GIT = shutil.which("git") is not None
+_HAS_PY3 = shutil.which("python3") is not None
+_PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]  # deepagent-image/project
+_STAGE_SCRIPT = _PROJECT_ROOT / "workflows" / "git-pr" / "stage-commit-push.sh"
+
+
+@pytest.mark.skipif(
+    not (_HAS_SH and _HAS_GIT and _HAS_PY3),
+    reason="git-pr exclusion needs sh, git, and python3",
+)
+def test_git_pr_excludes_masked_secret_from_staging(tmp_path):
+    """§15.1: the docker mask makes .env read empty in the container; git-pr must
+    unstage it so the emptied file is NOT committed (the real secret is preserved
+    on the branch). Regression for the secret-blanking hazard."""
+    # The git-pr step shells out to `python3 -m harness mask-scan`; skip unless the
+    # `python3` on PATH is actually the harness interpreter (in the image it is; on
+    # a dev host `python3` may be a stub without harness deps).
+    probe = subprocess.run(
+        ["python3", "-c", "import harness.mask"],
+        env={**os.environ, "PYTHONPATH": str(_PROJECT_ROOT)},
+        capture_output=True,
+    )
+    if probe.returncode != 0:
+        pytest.skip("python3 on PATH is not the harness interpreter")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
+
+    git("init", "-q")
+    git("config", "user.email", "t@t")
+    git("config", "user.name", "t")
+    git("config", "commit.gpgsign", "false")
+
+    # .env tracked in HEAD with the real secret; app.py gives us a real change to commit.
+    (repo / ".env").write_text("REALSECRET=1\n", encoding="utf-8")
+    (repo / "app.py").write_text("x = 1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "seed")
+
+    # Simulate the container view: the mask overlay makes .env read EMPTY. Plus an
+    # unrelated real edit so the commit has content.
+    (repo / ".env").write_text("", encoding="utf-8")
+    (repo / "app.py").write_text("x = 2\n", encoding="utf-8")
+
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "session.env").write_text(
+        "DEEPAGENTS_SESSION_ID=test\nDEEPAGENTS_SESSION_BRANCH=agent/test\n",
+        encoding="utf-8",
+    )
+
+    env = dict(os.environ)
+    env["DEEPAGENTS_WORKSPACE"] = str(repo)
+    env["DEEPAGENTS_STATE_DIR"] = str(state)
+    env["PYTHONPATH"] = str(_PROJECT_ROOT)
+    # No remote → the script's push fails gracefully and it exits 0.
+    subprocess.run(["sh", str(_STAGE_SCRIPT)], env=env, check=True, capture_output=True, text=True)
+
+    # The committed .env must still be the real secret, never the masked empty.
+    head_env = subprocess.run(
+        ["git", "show", "HEAD:.env"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout
+    assert head_env == "REALSECRET=1\n", "git-pr blanked the masked secret into the commit"
+    # And the unrelated change DID commit (proves the run actually committed).
+    head_app = subprocess.run(
+        ["git", "show", "HEAD:app.py"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout
+    assert head_app == "x = 2\n"

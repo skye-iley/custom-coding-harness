@@ -32,7 +32,6 @@ from harness.agent import (
     make_refresh_workspace_tool,
     resolve_workspace,
 )
-from harness.pathguard import PathGuardDenied
 from harness.cost import (
     BudgetExceeded,
     CostTrackerMiddleware,
@@ -1196,30 +1195,11 @@ def main() -> int:
                 if mask_tool is not None:
                     tools.append(mask_tool)
 
-            # M4: path-guard denial → HITL permission_denied interrupt (S4).
-            # When HITL is on and permission_denied is enabled, build a callback
-            # that raises an interrupt for in-bounds non-floor denials.
-            # Floor paths and escape denials are never approvable.
+            # M4: path-guard denial — pathguard only denies outright escapes,
+            # which are never approvable. No HITL interrupt for v1; the
+            # permission_denied system_interrupt seam is reserved for future
+            # in-bounds mask denials (§11.3 v1 honesty).
             on_path_denied = None
-            if hitl_conf is not None and hitl_conf.system_interrupt_enabled("permission_denied"):
-                from harness import interrupt as interrupt_mod
-
-                def _make_denied_callback(workspace_path, hitl_cfg):
-                    def _on_denied(target: str, base: str):
-                        import os as _os
-                        relpath = _os.path.relpath(target, base)
-                        # Hard-deny floor or escape paths
-                        req = interrupt_mod.new_request(
-                            interrupt_mod.KIND_APPROVE,
-                            f"Path access denied: '{relpath}' is outside workspace or is a floor path",
-                            source=interrupt_mod.SOURCE_SYSTEM,
-                            default=False,
-                            meta={"path": relpath, "op": "read/write", "tier": "floor/escape"},
-                        )
-                        raise interrupt_mod.raise_interrupt(req)
-                    return _on_denied
-
-                on_path_denied = _make_denied_callback(workspace, hitl_conf)
 
             agent = build_agent(
                 chat_model,

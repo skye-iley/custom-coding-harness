@@ -1,4 +1,10 @@
-# Check .ps1 ↔ .sh script pairs for drift.
+# Check .ps1 <-> .sh script pairs for drift.
+#
+# Reports line-count deltas and fails on a MISSING pair member. Deep content
+# parity is NOT auto-checked: the two scripts express the same docker invocation
+# in different shell syntax (${MountWorkspace} vs $MOUNT_WORKSPACE, /home/agent vs
+# $HOME_DIR, Linux-only `-e HOME=/tmp`), so any text-level cross-shell diff yields
+# false positives. Keep the pairs in sync by review. Mirror of check-parity.sh.
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $Failed = $false
@@ -12,18 +18,18 @@ $pairs = @(
 )
 
 foreach ($pair in $pairs) {
-    $ps1 = Join-Path $Root "scripts" $pair[0]
-    $sh = Join-Path $Root "scripts" $pair[1]
+    $ps1 = Join-Path (Join-Path $Root "scripts") $pair[0]
+    $sh = Join-Path (Join-Path $Root "scripts") $pair[1]
     if (-not (Test-Path $ps1)) { Write-Host "MISSING: $ps1"; $Failed = $true; continue }
     if (-not (Test-Path $sh)) { Write-Host "MISSING: $sh"; $Failed = $true; continue }
     $ps1Lines = (Get-Content $ps1).Count
     $shLines = (Get-Content $sh).Count
     $diff = $ps1Lines - $shLines
-    Write-Host "$($pair[0]) ($ps1Lines lines) vs $($pair[1]) ($shLines lines) — diff $diff lines"
+    Write-Host "$($pair[0]) ($ps1Lines lines) vs $($pair[1]) ($shLines lines) - diff $diff lines"
 }
 
 if ($Failed) {
-    Write-Host "PARITY CHECK FAILED" *>> "$null"
+    Write-Host "PARITY CHECK FAILED"
     exit 1
 }
 Write-Host "PARITY CHECK OK"

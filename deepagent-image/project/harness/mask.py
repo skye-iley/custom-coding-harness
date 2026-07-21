@@ -356,6 +356,7 @@ def resolve(
     state_dir: str | Path,
     mode: str | None = None,
     agentignore_name: str = AGENTIGNORE_NAME,
+    snapshot: bool = True,
 ) -> MaskResult:
     """Resolve the full mask policy for `workspace`.
 
@@ -364,6 +365,7 @@ def resolve(
         state_dir: Path to the harness state directory (holds authoritative config).
         mode: Override mode (deny/allow). None = check env + header directives.
         agentignore_name: In-workspace config file basename.
+        snapshot: Write mask-snapshot.txt after resolution (False for dry-run validation).
 
     Returns a ``MaskResult`` with the resolved mask entries, warnings, and
     protection-reduction info.
@@ -445,12 +447,19 @@ def resolve(
                 break
 
         if floor_masked:
+            for tier, rule in all_rules:
+                if rule["negated"] and _matches_pattern(rule, relpath, is_dir):
+                    result.warnings.append(
+                        f"negation for floor path '{relpath}' dropped — floor invariant"
+                    )
+                    break
             masked_set[relpath] = TIER_FLOOR
             continue
 
         # Non-floor rules: scan in order (last match wins)
         is_masked = False
         matched_tier: str | None = None
+        default_ever_matched = False
 
         for tier, rule in all_rules:
             if _matches_pattern(rule, relpath, is_dir):
@@ -460,12 +469,19 @@ def resolve(
                 else:
                     is_masked = True
                     matched_tier = tier
+                    if tier == TIER_DEFAULT:
+                        default_ever_matched = True
 
-        # Allow mode: default visible, only listed entries are masked
-        if mode == MODE_ALLOW and not is_masked:
-            continue
-
-        if is_masked and matched_tier:
+        if mode == MODE_ALLOW:
+            # Allow mode: pattern-defaults ALWAYS mask regardless of mode.
+            # Only user-tier positive matches form the allow-list.
+            if default_ever_matched:
+                masked_set[relpath] = TIER_DEFAULT
+            elif matched_tier == TIER_USER and is_masked:
+                continue
+            else:
+                masked_set[relpath] = matched_tier or TIER_DEFAULT
+        elif is_masked and matched_tier:
             masked_set[relpath] = matched_tier
 
     # --- step 4: floor enforcement ---------------------------------------------
@@ -481,42 +497,8 @@ def resolve(
                 floor_paths_set.add(rel)
                 masked_set[rel] = TIER_FLOOR
 
-    # --- step 5: build MaskEntry list (minimized) ------------------------------
-    # Group by dir: if all files under a dir are masked with no negation,
-    # emit one dir entry instead of per-file entries.
-
-    dir_mask_candidates: dict[str, set[str]] = {}
-    file_entries: list[MaskEntry] = []
-
-    for relpath, tier in sorted(masked_set.items()):
-        entry_type = "file"
-        for e in entries:
-            if e["relpath"] == relpath:
-                if e["is_dir"]:
-                    entry_type = "dir"
-                break
-
-        if entry_type == "dir":
-            dir_mask_candidates[relpath] = {tier}
-        else:
-            file_entries.append(MaskEntry(relpath=relpath, type="file", tier=tier))
-
-    # Try to collapse dirs
-    for relpath, tiers in dir_mask_candidates.items():
-        tier = next(iter(tiers))
-        children_masked = all(
-            e.relpath.startswith(relpath + "/") for e in file_entries
-        )
-        has_negated_child = any(relpath.startswith(e.relpath + "/") for e in file_entries if False)
-        if not has_negated_child:
-            result.masked.append(MaskEntry(relpath=relpath, type="dir", tier=tier))
-        else:
-            result.masked.append(MaskEntry(relpath=relpath, type="dir", tier=tier))
-
-    result.masked.extend(file_entries)
-
-    # --- step 5b (redo properly): minimize emissions ---------------------------
-    # Proper approach: for each dir in masked_set, check if ALL children are masked.
+    # --- step 5: minimize emissions ---------------------------------------------
+    # For each dir in masked_set, check if ALL children are masked.
     # If so, emit one dir entry and skip children.
 
     all_masked = dict(masked_set)
@@ -571,7 +553,8 @@ def resolve(
             + ", ".join(result.reduced_paths)
         )
 
-    _write_snapshot(state_dir, result.masked)
+    if snapshot:
+        _write_snapshot(state_dir, result.masked)
 
     return result
 

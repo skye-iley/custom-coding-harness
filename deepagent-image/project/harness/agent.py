@@ -206,8 +206,10 @@ class _WorkspaceShellBackend(LocalShellBackend):
                 validate_path(str(resolved), base)
             except PathGuardDenied:
                 if self._on_path_denied:
-                    self._on_path_denied(str(resolved), base)
-                raise
+                    if self._on_path_denied(str(resolved), base) is not True:
+                        raise
+                else:
+                    raise
         return resolved
 
 

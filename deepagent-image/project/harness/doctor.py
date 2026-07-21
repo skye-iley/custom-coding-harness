@@ -122,7 +122,7 @@ def doctor_main(argv: list[str]) -> int:
 
     # --- Mask / floor checks ---------------------------------------------------
     try:
-        mask_result = resolve(str(workspace), str(state_dir))
+        mask_result = resolve(str(workspace), str(state_dir), snapshot=False)
         records.append(("info", f"mask resolve OK ({len(mask_result.masked)} masked paths)"))
 
         # Floor must be present (shipped defaults or #!floor: block)

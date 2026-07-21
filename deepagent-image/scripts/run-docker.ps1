@@ -280,12 +280,27 @@ if ($NetJail) {
 # Scan output lines: <mode> <type> <tier> <relpath>
 $MaskArgs = @()
 $MaskMode = $env:DEEPAGENTS_MASK
+if ([string]::IsNullOrEmpty($MaskMode)) {
+    # Launcher env unset — fall back to project\.env so the host-side scan/overlay
+    # gate honours the SAME DEEPAGENTS_MASK the container sees (§13). Host env wins.
+    $envLine = Select-String -Path $EnvFile -Pattern '^\s*DEEPAGENTS_MASK\s*=' -ErrorAction SilentlyContinue | Select-Object -Last 1
+    if ($envLine) {
+        $MaskMode = ($envLine.Line -replace '^\s*DEEPAGENTS_MASK\s*=', '').Trim().Trim('"').Trim("'")
+    }
+}
 if ($MaskMode -eq "" -or $MaskMode -eq "1") {
+    # Surface mask-scan diagnostics (protection-reduction / symlink warnings) instead
+    # of dropping stderr; stdout stays the parseable grammar.
+    $scanErr = New-TemporaryFile
     $scanOutput = & docker run --rm `
         -v "${MountWorkspace}:/project/workspace:ro" `
-        -v "${StateHostDir}:/project/state:ro" `
+        -v "${StateHostDir}:/project/state" `
         -e "DEEPAGENTS_STATE_DIR=/project/state" `
-        deepagent-harness python3 -m harness mask-scan 2>$null
+        deepagent-harness python3 -m harness mask-scan 2>$scanErr.FullName
+    if ((Get-Item $scanErr.FullName).Length -gt 0) {
+        Get-Content $scanErr.FullName | ForEach-Object { Write-Host $_ }
+    }
+    Remove-Item -Force $scanErr.FullName -ErrorAction SilentlyContinue
     if ($LASTEXITCODE -eq 0 -and $scanOutput) {
         $emptyFile = New-TemporaryFile
         $emptyDir = New-Item -ItemType Directory -Path ([System.IO.Path]::GetTempPath()) -Name ([System.IO.Path]::GetRandomFileName())

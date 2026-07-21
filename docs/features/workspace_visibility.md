@@ -1,6 +1,6 @@
 # Workspace Visibility & Secret Masking — Feature Plan
 
-> **Status:** ✅ Built (v1) — implemented under `docs/milestones/planned/milestone4.md` (Real Trust
+> **Status:** ✅ Built (v1) — implemented under `docs/milestones/complete/milestone4.md` (Real Trust
 > Boundary). The policy (`.agentignore` gitignore-parity, 3-tier policy, designated-secret floor),
 > docker mount-mask, path-guard middleware, `permission_denied` interrupt wiring, `harness doctor`,
 > CI pipeline, and security test suite all shipped. Stretch H (bwrap fs-tool jail) is not yet built.
