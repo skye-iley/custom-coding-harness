@@ -305,12 +305,21 @@ def final_message_text(result: Any) -> str:
         return content
 
     if isinstance(content, list):
+        # Content is a list of parts. Keep only the human-facing TEXT: a bare
+        # string, or a {"type": "text", "text": ...} block. Non-text parts —
+        # reasoning/thinking, tool_use, etc. — are NOT the answer and must not be
+        # stringified into it. The old `str(item)` fallback leaked Gemma/Anthropic
+        # 'thinking' dicts (e.g. "{'type': 'thinking', ...}") into the reply and the
+        # headless JSON. Unknown part shapes are dropped, not dumped.
         parts: list[str] = []
         for item in content:
-            if isinstance(item, dict) and item.get("type") == "text":
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and item.get("type") == "text":
                 parts.append(str(item.get("text", "")))
-            else:
-                parts.append(str(item))
+            elif isinstance(item, dict) and "text" in item and "type" not in item:
+                # Some providers emit a typeless {"text": ...} block.
+                parts.append(str(item.get("text", "")))
         return "\n".join(part for part in parts if part)
 
     return str(content)

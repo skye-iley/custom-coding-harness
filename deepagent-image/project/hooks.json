@@ -1,8 +1,4 @@
 {
-  "hooks": [
-    {
-      "command": ["echo '--- Hook Triggered Test - session end' " ],
-      "events": ["session.end"]
-    }
-  ]
+  "comment": "Optional lifecycle hooks (flat precursor to workflows/). Each entry runs its shell command(s) on the named event(s); step stdout is routed to stderr so it never corrupts the headless JSON stdout contract. Empty by default.",
+  "hooks": []
 }

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -356,3 +357,30 @@ def test_latest_user_text_picks_last_human():
 def test_latest_user_text_none_when_absent():
     assert wf._latest_user_text({"messages": []}) is None
     assert wf._latest_user_text({}) is None
+
+
+# --- step/gate stdout isolation (headless JSON-contract regression) ----------
+
+def test_run_steps_redirects_stdout_off_the_harness_stdout(monkeypatch):
+    # Regression: a workflow/hook step that prints must NOT inherit the harness's
+    # own stdout — headless run_batch reserves stdout for its single JSON line.
+    # run_steps must pass an explicit stdout redirect (never None/inherited).
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(kwargs)
+        class _R:
+            returncode = 0
+        return _R()
+
+    monkeypatch.setattr(wf.subprocess, "run", fake_run)
+    workflow = wf.Workflow(name="hooks.json:session.end", hook="session.end",
+                           steps=("echo leak-to-stdout",))
+    wf.run_steps(workflow, wf.GateContext("session.end", workspace=__import__("pathlib").Path(".")))
+    assert calls, "step should have invoked subprocess.run"
+    assert calls[0].get("stdout") is not None, "step stdout must be redirected, not inherited"
+
+
+def test_side_effect_stdout_is_stderr_or_devnull():
+    import subprocess as _sp
+    assert wf._side_effect_stdout() in (sys.stderr, _sp.DEVNULL)
