@@ -74,6 +74,67 @@ def test_repl_channel_reprompts_on_garbage():
     assert ch.ask(r) is True
 
 
+# --- ReplChannel arrow-key select (S6 PR-b) ----------------------------------
+
+def test_select_used_for_choose_returns_pick():
+    # A wired `select` resolves a `choose` without any typed input.
+    ch = hitl.ReplChannel(
+        read_line=lambda p: pytest.fail("should not read a line"),
+        emit=lambda s: None,
+        select=lambda req: req.options[1],
+    )
+    r = it.new_request(it.KIND_CHOOSE, "pick", options=("a", "b", "c"))
+    assert ch.ask(r) == "b"
+
+
+def test_select_none_falls_back_to_typed():
+    # select returning None (menu cancelled / arrows off) => typed loop resolves it.
+    ch = hitl.ReplChannel(
+        read_line=lambda p: "c",
+        emit=lambda s: None,
+        select=lambda req: None,
+    )
+    r = it.new_request(it.KIND_CHOOSE, "pick", options=("a", "b", "c"))
+    assert ch.ask(r) == "c"
+
+
+def test_select_not_used_for_approve():
+    # The arrow menu is a `choose`-only affordance; approve still reads a line.
+    ch = hitl.ReplChannel(
+        read_line=lambda p: "yes",
+        emit=lambda s: None,
+        select=lambda req: pytest.fail("select must not fire for approve"),
+    )
+    r = it.new_request(it.KIND_APPROVE, "ok?")
+    assert ch.ask(r) is True
+
+
+# --- PR gate (S2 session.end tier) -------------------------------------------
+
+def test_should_gate_pr_true_when_interactive_gated_with_session():
+    assert hitl.should_gate_pr(_cfg("guided"), interactive=True, has_session=True) is True
+    assert hitl.should_gate_pr(_cfg("strict"), interactive=True, has_session=True) is True
+
+
+def test_should_gate_pr_false_when_headless_or_no_session_or_off():
+    # non-interactive => PR proceeds (never blocks CI); git-pr never auto-merges.
+    assert hitl.should_gate_pr(_cfg("guided"), interactive=False, has_session=True) is False
+    # no git session (no session.env) => nothing to gate.
+    assert hitl.should_gate_pr(_cfg("guided"), interactive=True, has_session=False) is False
+    # autonomous preset doesn't gate session.end.
+    assert hitl.should_gate_pr(_cfg("autonomous"), interactive=True, has_session=True) is False
+    # HITL off entirely.
+    assert hitl.should_gate_pr(None, interactive=True, has_session=True) is False
+
+
+def test_make_pr_gate_request_shape():
+    r = hitl.make_pr_gate_request(branch="agent/x", base="main", summary="[commits]\nabc")
+    assert r.kind == it.KIND_APPROVE
+    assert "agent/x" in r.prompt and "main" in r.prompt
+    assert r.context == "[commits]\nabc"          # summary is the /show context
+    assert r.meta["gate"] == "pr" and r.default is None
+
+
 # --- resolve_value -----------------------------------------------------------
 
 def test_resolve_interactive_uses_channel():

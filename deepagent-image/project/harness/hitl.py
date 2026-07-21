@@ -99,14 +99,37 @@ class Channel:
 class ReplChannel(Channel):
     """Terminal channel: render the request (capped context + ``/show`` expand),
     read a reply through the same seam the prompt loop uses, and interpret it for
-    the request's kind. Re-prompts on an unparseable reply."""
+    the request's kind. Re-prompts on an unparseable reply.
 
-    def __init__(self, read_line: Callable[[str], str], emit: Callable[[str], None] | None = None):
+    ``select`` (optional) is the S6 PR-b arrow-key menu: for a ``choose`` request it
+    is called with the request and returns the picked option — or ``None`` to fall
+    back to the typed index/name loop (menu cancelled, or arrows unavailable). Left
+    ``None`` (headless, non-TTY, or no prompt_toolkit) the channel is typed-only, so
+    the whole class stays host-testable with plain fakes."""
+
+    def __init__(
+        self,
+        read_line: Callable[[str], str],
+        emit: Callable[[str], None] | None = None,
+        select: "Callable[[InterruptRequest], str | None] | None" = None,
+    ):
         self._read_line = read_line
         self._emit = emit or (lambda s: print(s, file=sys.stderr))
+        self._select = select
 
     def ask(self, request: InterruptRequest):
-        self._emit(render(request))
+        # S6 PR-b: a `choose` with options gets the arrow-key menu when one is
+        # wired. The menu draws its own option list, so render without it; a None
+        # return (cancelled / arrows off) falls through to the typed loop below.
+        if self._select is not None and request.kind == interrupt.KIND_CHOOSE and request.options:
+            self._emit(render(request, show_options=False))
+            chosen = self._select(request)
+            if chosen is not None:
+                return chosen
+            self._emit("[harness] menu cancelled — type a choice (index or name)")
+            self._emit(render(request))
+        else:
+            self._emit(render(request))
         while True:
             reply = self._read_line("answer> ")
             if reply.strip().lower() in ("/show", "/expand"):
@@ -219,6 +242,54 @@ def resume_command(value):
     from langgraph.types import Command
 
     return Command(resume=value)
+
+
+# --- S2: the session-end PR approval gate ------------------------------------
+
+
+def should_gate_pr(config: "Config | None", *, interactive: bool, has_session: bool) -> bool:
+    """Whether the session-end PR should pause for human approval (the ``pause``
+    action tier applied to the ``session.end`` hook — the "approve the PR" half of
+    the strict/guided presets).
+
+    True only when **all** hold:
+      * HITL is on (``config`` present);
+      * the autonomy preset gates ``session.end`` (strict, guided — not autonomous);
+      * there is actually a PR to gate (``has_session`` — a git-branch session.env
+        exists; otherwise git-pr no-ops and a prompt would confuse);
+      * a human is present (``interactive``).
+
+    A non-interactive/headless run returns False and the PR **proceeds** as before:
+    git-pr never auto-merges, so opening it without a human is safe, and a stuck
+    prompt in CI is worse than an unreviewed-but-openable PR (§6). The gate is the
+    interactive veto, not a headless block. (Contrast the tool gate, which
+    fails-closed headless — a tool call can be destructive; a PR cannot.)"""
+    if config is None:
+        return False
+    if "session.end" not in config.gated_hooks():
+        return False
+    if not has_session:
+        return False
+    return interactive
+
+
+def make_pr_gate_request(
+    branch: str | None = None, base: str | None = None, summary: str | None = None
+) -> InterruptRequest:
+    """Build the ``approve`` interrupt for the session-end PR gate.
+
+    ``summary`` (a git log/diff-stat of what would be pushed) rides as the
+    expandable ``context`` (``/show``). No ``default`` — the gate only runs
+    interactively (``should_gate_pr``), so a fall-through value is never consulted."""
+    src = f" from '{branch}'" if branch else ""
+    dest = f" into {base}" if base else ""
+    return new_request(
+        interrupt.KIND_APPROVE,
+        f"Approve opening the pull request{src}{dest}?",
+        context=summary,
+        source=interrupt.SOURCE_DETERMINISTIC,
+        meta={"gate": "pr", "branch": branch or "", "base": base or ""},
+    )
 
 
 # --- S3: the ask_human agent tool --------------------------------------------

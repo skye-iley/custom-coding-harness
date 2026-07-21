@@ -858,8 +858,9 @@ Sandbox Stream and Cost Ticker panels below.
 > **Not implemented (this design's optional/open parts):**
 > - **Deterministic pause = an `AgentMiddleware`, not a `workflows.py` `pause` step** — workflow
 >   steps are subprocess side-effects and cannot suspend the graph in-process, so the pause tier is
->   `hitl.PauseMiddleware`. The `session.end` PR gate rides the existing git-pr workflow, not yet a
->   blocking interrupt.
+>   `hitl.PauseMiddleware`. The `session.end` PR gate **is** a blocking approval (`cli._pr_approval`
+>   ahead of the git-pr workflow) for the strict/guided presets — an interactive veto; headless and
+>   the autonomous preset let the PR proceed (git-pr never auto-merges).
 > - **System-event source 3, two of three:** `missing_price` and `permission_denied` are recognized
 >   `.harness-config.yaml` keys but **not enforced** (`missing_price` is blocked by the cost-module
 >   no-sibling-import guard; `permission_denied` needs the §2/§10 path-guard/NetJail integration).
@@ -869,8 +870,8 @@ Sandbox Stream and Cost Ticker panels below.
 > - **Budget/clock pause-on-interrupt** ("pause the clock") — not wired; M1 caps still tick while a
 >   human decides.
 > - **Host TUI channel** (Rich prompt / batched review panel) — deferred; the in-container REPL is
->   the only channel. S6 PR-b (the `choose` arrow-key menu) is deferred; `choose` resolves by typed
->   index/name.
+>   the only channel. (S6 PR-b, the `choose` arrow-key menu, **is** built — inline ↑/↓ + Enter menu
+>   with a typed-index fallback off-TTY.)
 
 HITL is not a feature bolted onto the CLI — it is **one interrupt spine** with three trigger
 sources feeding a single **human channel**. The spine is LangGraph's `interrupt()` over the

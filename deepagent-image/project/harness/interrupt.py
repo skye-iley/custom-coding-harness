@@ -126,13 +126,23 @@ def new_request(kind: str, prompt: str, **kwargs) -> InterruptRequest:
 DEFAULT_CONTEXT_LINES = 20
 
 
-def render(request: InterruptRequest, *, max_context_lines: int = DEFAULT_CONTEXT_LINES) -> str:
+def render(
+    request: InterruptRequest,
+    *,
+    max_context_lines: int = DEFAULT_CONTEXT_LINES,
+    show_options: bool = True,
+) -> str:
     """The REPL presentation of a request: prompt, numbered options, and a
     length-capped context (§6 cap + expand). Pure — no terminal — so a test asserts
-    the rendered text (including the truncation footer) without a tty."""
+    the rendered text (including the truncation footer) without a tty.
+
+    ``show_options=False`` omits the numbered option list — used by the arrow-key
+    select menu (S6 PR-b), which draws its own interactive option list, so the
+    channel only prints the prompt + context header above it."""
     lines = [f"[interrupt · {request.kind}] {request.prompt}"]
-    for i, opt in enumerate(request.options, 1):
-        lines.append(f"  {i}) {opt}")
+    if show_options:
+        for i, opt in enumerate(request.options, 1):
+            lines.append(f"  {i}) {opt}")
     if request.context:
         clines = request.context.splitlines()
         if max_context_lines >= 0 and len(clines) > max_context_lines:

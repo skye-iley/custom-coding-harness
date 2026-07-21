@@ -19,11 +19,11 @@ First implementation pass. Authoritative detail on what shipped, deviations, and
 | **P1** provider resilience | ✅ built | `resilience.py` (pure, tested) + `cli._invoke_resilient`. |
 | **P2** headless one-shot | ✅ built | `cli.run_batch`, `--headless`. PR-URL-in-JSON deferred. |
 | **S1** interrupt spine + channel | ✅ built | `interrupt.py` + `hitl.run_interrupt_loop`; restart round-trip via checkpoint. |
-| **S2** deterministic pause tier | ◑ partial | `PauseMiddleware` gates `tool.start` + `review_triggers`. **Deviation:** middleware, not a `workflows.py` `pause` step (steps can't suspend the graph). PR gate via existing git-pr, not yet a blocking interrupt. |
+| **S2** deterministic pause tier | ✅ built | `PauseMiddleware` gates `tool.start` + `review_triggers`; **PR gate (`session.end`) now a blocking approval** (`cli._pr_approval` + `hitl.should_gate_pr`/`make_pr_gate_request`) — interactive veto for strict/guided, deny skips git-pr; headless/autonomous proceed. **Deviation:** middleware, not a `workflows.py` `pause` step (steps can't suspend the graph). |
 | **S3** `ask_human` tool | ✅ built | `hitl.make_ask_human_tool`. |
 | **S4** system-event interrupts | ◑ partial | `provider_error` wired (retry/abort). `missing_price` + `permission_denied` recognized but **not enforced** (follow-ups). |
 | **S5** policy & headless behavior | ✅ built | `headless_decision` fail-closed + `EXIT_INTERRUPT_ABORT`. Shadow-mode UX still open (§6). |
-| **S6** REPL ergonomics | ◑ PR-a only | PR-a (`prompt_toolkit`) shipped; PR-b (`choose` arrow menu) deferred. |
+| **S6** REPL ergonomics | ✅ built | PR-a (`prompt_toolkit` input) + PR-b (`choose` arrow-key menu, `cli._arrow_select`/`ReplChannel(select=…)`, typed fallback on Esc/no-TTY). |
 | **S7** interrupt audit trail | ✅ built | `audit.py` → `.agent_telemetry/interrupts.jsonl` (scrubbed, no context payload). |
 
 Not yet wired: budget/clock **pause-on-interrupt** (§6 "pause the clock"); `switch provider` option
@@ -112,7 +112,10 @@ A `pause` step type in the workflow engine (`harness/workflows.py`), gated by th
 deterministic predicate gates (no model in the loop). Ships the `autonomy_level` presets
 (`strict`/`guided`/`autonomous`) as bundled pause-workflow sets, and `review_triggers` path/keyword
 matching (match contract in §6). Fires at `tool.start` (gate a tool call) and `session.end` (gate the
-PR) first.
+PR) first. **BUILT** (as `PauseMiddleware` + `cli._pr_approval`, not a workflow `pause` step — see
+the §0 deviation): `tool.start` gating and the `session.end` PR-approval gate both ship. The PR gate
+is an interactive veto for the strict/guided presets (deny → git-pr skipped); headless/autonomous
+proceed unblocked (git-pr never auto-merges).
 
 ### S3 — Agent-initiated `ask_human` tool
 A Deep Agents tool the agent calls when *it* decides it is blocked (ambiguous requirements, missing
@@ -139,8 +142,9 @@ headless run (P2) has defined behavior with no human present (deadlock resolutio
   `sys.stdin.isatty()`, degrading to plain `input()` off-TTY. Kept line-oriented, so the M1
   stdout-answer / stderr-stage-marker split is untouched. The full-screen host TUI (`textual`) is
   still deferred; the `kind`-keyed request object carries the input contract forward.
-- **PR-b — after S1.** The `choose`-kind single-line arrow-key select menu, over the S1 request
-  object, replacing typed option indices. Falls back to a numbered-text prompt off-TTY.
+- **PR-b — ✅ BUILT.** The `choose`-kind arrow-key select menu (`cli._arrow_select` →
+  `ReplChannel(select=…)`), an inline (non-full-screen) ↑/↓ + Enter menu over the S1 request object.
+  Falls back to the typed index/name prompt off-TTY, without `prompt_toolkit`, or on Esc/Ctrl-C.
 
 ### S7 — Interrupt audit trail — *slice of §12.7*
 Persist every interrupt + its human response to telemetry for reproducibility/replay: append a

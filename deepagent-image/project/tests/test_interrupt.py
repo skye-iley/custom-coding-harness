@@ -76,6 +76,15 @@ def test_render_includes_prompt_and_options():
     assert "2) beta" in out
 
 
+def test_render_omits_options_when_show_options_false():
+    # The arrow-key menu (S6 PR-b) draws its own options, so the channel renders
+    # the prompt + context header without the numbered list.
+    r = it.new_request(it.KIND_CHOOSE, "pick one", options=("alpha", "beta"), context="why")
+    out = it.render(r, show_options=False)
+    assert "pick one" in out and "why" in out
+    assert "1) alpha" not in out and "2) beta" not in out
+
+
 def test_render_caps_long_context_with_footer():
     ctx = "\n".join(f"line{i}" for i in range(50))
     r = it.new_request(it.KIND_APPROVE, "ok?", context=ctx)

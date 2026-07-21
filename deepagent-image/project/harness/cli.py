@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 import time
 import uuid
@@ -244,6 +245,70 @@ def _read_line(session, prompt_str: str) -> str:
     if session is None:
         return input(prompt_str)
     return session.prompt(prompt_str)
+
+
+def _arrow_select(request):
+    """S6 PR-b: an inline arrow-key menu over a `choose` request's options.
+
+    Returns the picked option string, or ``None`` to fall back to typed input
+    (menu cancelled with Esc/Ctrl-C, or prompt_toolkit unavailable). Non-full-screen
+    so it renders in place above the prompt and leaves the scrollback intact. Only
+    wired for an interactive TTY (see `_build_hitl_ctx`), so the None fallback also
+    covers the no-prompt_toolkit host."""
+    try:
+        from prompt_toolkit.application import Application
+        from prompt_toolkit.key_binding import KeyBindings
+        from prompt_toolkit.layout import Layout
+        from prompt_toolkit.layout.containers import HSplit, Window
+        from prompt_toolkit.layout.controls import FormattedTextControl
+    except Exception:  # noqa: BLE001 - no prompt_toolkit => typed fallback
+        return None
+
+    options = list(request.options)
+    state = {"idx": 0}
+
+    def _menu():
+        rows = []
+        for i, opt in enumerate(options):
+            selected = i == state["idx"]
+            rows.append((
+                "reverse" if selected else "",
+                f"{'❯ ' if selected else '  '}{opt}\n",
+            ))
+        rows.append(("", "(↑/↓ move · Enter select · Esc to type instead)"))
+        return rows
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    @kb.add("c-p")
+    def _up(event):
+        state["idx"] = (state["idx"] - 1) % len(options)
+
+    @kb.add("down")
+    @kb.add("c-n")
+    def _down(event):
+        state["idx"] = (state["idx"] + 1) % len(options)
+
+    @kb.add("enter")
+    def _pick(event):
+        event.app.exit(result=options[state["idx"]])
+
+    @kb.add("escape")
+    @kb.add("c-c")
+    def _cancel(event):
+        event.app.exit(result=None)
+
+    app = Application(
+        layout=Layout(HSplit([Window(FormattedTextControl(_menu), always_hide_cursor=True)])),
+        key_bindings=kb,
+        full_screen=False,
+        mouse_support=False,
+    )
+    try:
+        return app.run()
+    except Exception:  # noqa: BLE001 - any tty/render failure => typed fallback
+        return None
 
 
 def _stage(message: str) -> None:
@@ -649,7 +714,13 @@ def _build_hitl_ctx(hitl_conf, workspace: Path, session, interactive: bool, head
         return None
     channel = None
     if interactive and not headless:
-        channel = hitl.ReplChannel(read_line=lambda prompt: _read_line(session, prompt))
+        # Arrow-key menu (S6 PR-b) only when a prompt_toolkit session exists (TTY +
+        # library present); else `select=None` and `choose` resolves by typed
+        # index/name — the channel handles the fallback.
+        channel = hitl.ReplChannel(
+            read_line=lambda prompt: _read_line(session, prompt),
+            select=_arrow_select if session is not None else None,
+        )
     return hitl.HitlContext(
         config=hitl_conf, workspace=workspace, channel=channel, headless=headless
     )
@@ -801,18 +872,93 @@ def run_repl(
     return 0
 
 
-def _read_session_branch(workspace: Path | None) -> str | None:
-    """Best-effort read of the session branch git-branch persisted to session.env."""
+def _read_session_env(workspace: Path | None) -> dict[str, str]:
+    """Parse the git-branch-written session.env (BRANCH/BASE/ID) into a dict, or
+    ``{}`` when absent — i.e. this was not a git session."""
     if workspace is None:
-        return None
+        return {}
     env_path = archive.state_dir(workspace) / "session.env"
     if not env_path.is_file():
-        return None
+        return {}
+    out: dict[str, str] = {}
     for line in env_path.read_text(encoding="utf-8").splitlines():
         key, _, value = line.partition("=")
-        if key.strip() == "DEEPAGENTS_SESSION_BRANCH":
-            return value.strip() or None
-    return None
+        key = key.strip()
+        if key:
+            out[key] = value.strip()
+    return out
+
+
+def _read_session_branch(workspace: Path | None) -> str | None:
+    """Best-effort read of the session branch git-branch persisted to session.env."""
+    return _read_session_env(workspace).get("DEEPAGENTS_SESSION_BRANCH") or None
+
+
+def _pr_summary(workspace: Path | None, env: dict[str, str]) -> str | None:
+    """A best-effort ``branch/base`` + commit list + diff-stat of what git-pr would
+    push, shown as the PR-gate interrupt's expandable context. All git calls are
+    best-effort (short timeout, failures swallowed) so gathering the summary can
+    never block or break the gate; returns ``None`` when nothing is available."""
+    if workspace is None:
+        return None
+    branch = env.get("DEEPAGENTS_SESSION_BRANCH")
+    base = env.get("DEEPAGENTS_SESSION_BASE")
+    parts: list[str] = []
+    if branch:
+        parts.append(f"branch: {branch}" + (f"  →  base: {base}" if base else ""))
+
+    def _git(*args: str) -> str | None:
+        try:
+            out = subprocess.run(
+                ["git", "-C", str(workspace), *args],
+                capture_output=True, text=True, timeout=10,
+            )
+        except Exception:  # noqa: BLE001 - summary is decorative; never fatal
+            return None
+        return out.stdout.strip() or None
+
+    if base:
+        commits = _git("log", "--oneline", f"{base}..HEAD")
+        if commits:
+            parts.append("[commits]\n" + commits)
+        stat = _git("diff", "--stat", base)
+        if stat:
+            parts.append("[changes]\n" + stat)
+    return "\n".join(parts) if parts else None
+
+
+def _pr_approval(hitl_conf, workspace: Path | None, headless: bool) -> bool:
+    """Session-end PR gate (S2 PR tier): return True to run git-pr, False to skip it.
+
+    Off-path (HITL off, autonomous preset, headless/non-TTY, or no git session)
+    returns True so session.end runs exactly as before. When it does gate, ask the
+    human on a plain-input channel (the REPL prompt_toolkit session is already torn
+    down by here) and audit the answer. An EOF/Ctrl-C at the gate is a decline
+    (fail-closed: no explicit yes → no PR)."""
+    interactive = (not headless) and sys.stdin.isatty()
+    env = _read_session_env(workspace)
+    branch = env.get("DEEPAGENTS_SESSION_BRANCH")
+    if not hitl.should_gate_pr(hitl_conf, interactive=interactive, has_session=bool(branch)):
+        return True
+
+    request = hitl.make_pr_gate_request(
+        branch=branch,
+        base=env.get("DEEPAGENTS_SESSION_BASE"),
+        summary=_pr_summary(workspace, env),
+    )
+    channel = hitl.ReplChannel(read_line=lambda prompt: _read_line(None, prompt))
+    try:
+        approved = bool(channel.ask(request))
+    except (EOFError, KeyboardInterrupt):
+        _stage("PR gate: no answer (EOF/interrupt) — treating as decline; PR not opened")
+        approved = False
+    try:
+        audit.record_interrupt(workspace, request, approved, resolved_by="human")
+    except Exception as exc:  # noqa: BLE001 - audit must never fail the close
+        _stage(f"audit: failed to record PR-gate interrupt ({exc})")
+    if not approved:
+        _stage("PR gate: operator declined — git-pr (stage/commit/push/PR) skipped")
+    return approved
 
 
 def _batch_payload(final_message, config, tracker, workspace, exit_code) -> dict:
@@ -978,6 +1124,10 @@ def main() -> int:
     # These run gated, like every other workflow (the git-branch workflow lives
     # on session.start; git-pr on session.end).
     run_hook(by_hook.get("session.start", []), GateContext("session.start", workspace))
+    # PR gate (S2 PR tier): decided on the normal-completion path just before
+    # return; stays True on any early/exception exit so a crash still runs
+    # session.end exactly as before (existing behaviour preserved on failure).
+    pr_gate_ok = True
     try:
         # SqliteSaver holds an open connection, so the whole REPL must run
         # inside the context manager, not just the first invoke.
@@ -1059,9 +1209,15 @@ def main() -> int:
                 _finalize_session(
                     archive_conn, run_id, init_summary_model(model), tracker
                 )
+            # Ask the operator before git-pr opens the PR (interactive gated presets
+            # only; off-path returns True). Decided here, enforced in `finally`.
+            pr_gate_ok = _pr_approval(hitl_conf, workspace, args.headless)
             return rc
     finally:
-        run_hook(by_hook.get("session.end", []), GateContext("session.end", workspace))
+        if pr_gate_ok:
+            run_hook(by_hook.get("session.end", []), GateContext("session.end", workspace))
+        else:
+            _stage("session.end workflows skipped (PR gate declined)")
         if archive_conn is not None:
             archive_conn.close()
 

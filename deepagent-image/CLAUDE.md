@@ -320,8 +320,17 @@ code drifts from it in two deliberate places, noted below.
   subprocess side-effects that cannot suspend the graph in-process, so the pause is
   an `AgentMiddleware` that raises `interrupt()` instead. `review_triggers` matching
   (`config.match_triggers`, `{on,pattern}`, glob or `re:` regex) is pure/host-tested.
-  The PR gate (`session.end`) is preset-recognized but enforced via the existing
-  git-pr workflow, not yet a blocking interrupt.
+  The **PR gate (`session.end`) is now a blocking approval** for the gated presets
+  (strict/guided): `cli._pr_approval` runs just before the `session.end` git-pr
+  workflow and asks the operator to approve opening the PR (context = branch/base +
+  `git log`/`diff --stat` of what would be pushed, via `/show`); a deny **skips
+  git-pr entirely** (no stage/commit/push/PR). Gate logic is pure/host-tested
+  (`hitl.should_gate_pr`, `hitl.make_pr_gate_request`). It is an **interactive veto
+  only** — headless/non-TTY and the `autonomous` preset return True and the PR
+  proceeds as before (git-pr never auto-merges, so opening it without a human is
+  safe, and a stuck prompt in CI is worse; contrast the tool gate, which
+  fails-closed headless because a tool call can be destructive). An EOF/Ctrl-C at
+  the gate is a decline.
 - **S3 ask_human (`hitl.make_ask_human_tool`)** — a Deep Agents tool the agent calls
   when *it* is blocked; raises the same interrupt, returns the human reply as the
   tool result (trusted input, §6). Registered next to `recall_past`, gated on HITL.
@@ -342,9 +351,13 @@ code drifts from it in two deliberate places, noted below.
   `approve` with no default denies (fail-closed); `strict`+`blocking` with no safe
   fall-through **aborts with `EXIT_INTERRUPT_ABORT` (42)** rather than hang. Shadow
   mode UX is the one open fork (§6) — not built.
-- **S6** — PR-a (`prompt_toolkit` input) shipped earlier. PR-b (the `choose`
-  arrow-key select menu over the S1 request) is **deferred**; `choose` currently
-  resolves by typed index/name (`interpret_reply`).
+- **S6** — PR-a (`prompt_toolkit` input) shipped earlier. **PR-b (the `choose`
+  arrow-key select menu) is now wired** (`cli._arrow_select` → `ReplChannel(select=…)`):
+  an inline (non-full-screen) ↑/↓ + Enter menu over a `choose` request's options,
+  active only on an interactive TTY with `prompt_toolkit`. Esc/Ctrl-C (or no
+  prompt_toolkit) falls back to the typed index/name path (`interpret_reply`), so
+  the channel stays host-testable with a fake `select` and the non-TTY path is
+  unchanged.
 - **S7 audit (`audit.py`)** — appends a scrubbed record (id, kind, prompt, resolved
   value, source, timestamps — **never the context payload**) to
   `<workspace>/.agent_telemetry/interrupts.jsonl`, git-ignored and git-pr-excluded.
