@@ -50,23 +50,23 @@ thread id), isolates workspace dependencies in a workspace-local conda env, and 
 | 2 | Per-agent network policy (`HarnessProfile.network`) | ⬜ Planned | NetJail is all-or-nothing per run; no per-agent *subtractive* egress / host-service / net-tool gating (Tier-1 env-based; §2) |
 | 2 | Config-driven allowlist selection (`@group` + `enabled.txt`) | ⬜ Planned | Entries enabled by hand-uncommenting; no group tags / machine-written selection for a startup menu (§2) |
 | 3 | Workflow engine — folder format + deterministic gates + side-effect steps | ✅ Built | `harness/workflows.py`: `workflows/<name>/` folders (`workflow.md` + `trigger.py`/`trigger.sh` gate + ordered steps), `WorkflowMiddleware`. `hooks.json` is the flat always-gate precursor, adapted into the same path |
-| 3 | Classifier-gated triggers + context-mutation / control-flow / pause (HITL) action tiers | ⬜ Planned | Deterministic predicate gates + the side-effect action tier are built (above); the classifier gate and the context-rewrite / control-flow / human-in-the-loop pause tiers are not. Pause tier is the deterministic half of §9 HITL |
+| 3 | Classifier-gated triggers + context-mutation / control-flow / pause (HITL) action tiers | 🟡 Partial | Deterministic predicate gates + the side-effect action tier are built; the **pause tier ships in Milestone 3** (as `hitl.PauseMiddleware`, not a `workflows.py` step — steps can't suspend the graph). The classifier gate and the context-rewrite / control-flow tiers are still not built |
 | — | MCP tool loading (`.mcp.json`) | ✅ Built | `load_mcp_tools` (not a separate doc section) |
 | 3 | Git branch/commit/push/PR lifecycle | ✅ Built | `workflows/git-branch` (session.start) + `workflows/git-pr` (session.end): branch → persist session id → commit/push → `gh pr create`, never auto-merged. Safe no-op without a repo/remote/`GH_TOKEN` |
 | 5 | Multi-agent funnel (classifier→orchestrator→worker) | ⬜ Planned | Single `create_deep_agent` today |
-| 6 | Token/cost tracker | ✅ Built (Milestone 1) | `harness/cost.py` (`CostTrackerMiddleware`); pricing in the `providers/` TOML registry (`[pricing]` per model, strategy per provider), not a `prices.json`. Optional energy estimate + budgets. See `docs/milestones/milestone1.md` |
+| 6 | Token/cost tracker | ✅ Built (Milestone 1) | `harness/cost.py` (`CostTrackerMiddleware`); pricing in the `providers/` TOML registry (`[pricing]` per model, strategy per provider), not a `prices.json`. Optional energy estimate + budgets. See `docs/milestones/complete/milestone1.md` |
 | 7 | Headroom / Caveman / caching pipeline | ⬜ Planned | Nothing integrated |
 | 8 | Observability, telemetry, telemetry-to-PR | ⬜ Planned | No trace/metrics files written |
-| 9 | In-container interactive REPL (multi-turn session) | 🟡 MVP | Persistent `docker run -it` prompt loop in `harness/cli.py`: multi-turn on one `thread_id`, deterministic `/exit`, stage output — see `docs/milestones/mvp.md` §1a |
+| 9 | In-container interactive REPL (multi-turn session) | 🟡 MVP | Persistent `docker run -it` prompt loop in `harness/cli.py`: multi-turn on one `thread_id`, deterministic `/exit`, stage output — see `docs/milestones/complete/mvp.md` §1a |
 | 9 | Host CLI frontend (Typer/Rich) + TUI | ⬜ Planned | No `harness` CLI/TUI; interactive use is the in-container REPL above |
-| 9 | Human-in-the-loop (interrupt spine + `ask_human` tool + `.harness-config.yaml`) | ⬜ Planned | LangGraph `interrupt()` over the **built** SqliteSaver checkpoint (row above); one human channel, 3 trigger sources — deterministic pause-workflow (§3 tier), agent `ask_human` tool, system events (missing-price/provider-error/permission). See §9 |
+| 9 | Human-in-the-loop (interrupt spine + `ask_human` tool + `.harness-config.yaml`) | ✅ Built (Milestone 3) | LangGraph `interrupt()` over the SqliteSaver checkpoint; one human channel, all 3 trigger sources (deterministic pause middleware, `ask_human` tool, system `provider_error`). Off unless `.harness-config.yaml` exists. **Not implemented:** `missing_price`/`permission_denied` system events, `shadow` policy, clock-pause, host TUI. See §9 + `docs/milestones/complete/milestone3.md` |
 | 10 | Security verification test suite | ⬜ Planned | Risk analysis is design-only |
 | 11 | Future extensions & roadmap | 🔬 Research | By definition |
 | 12 | CI pipeline for the harness repo | ⬜ Planned | Suite exists (`pytest`/`verify`/`smoke`) but nothing runs it on push/PR; no `.github/workflows/` |
 | 12 | Config-validate / `harness doctor` | ⬜ Planned | `verify` checks imports only; no pre-flight check that the registry / `.mcp.json` / `hooks.json` / `workflow.md` are coherent |
-| 12 | Headless one-shot-to-PR mode | ⬜ Planned | Non-TTY today only degrades to a single REPL turn; no structured-result batch entrypoint |
-| 12 | Provider resilience (retry/backoff + context-overflow fallback) | ⬜ Planned | No handling of 429/5xx/network blips mid-turn; no interim plan before §7 compression lands |
-| 12 | Thread / checkpoint management | 🟡 Partial | **Shipped in Milestone 2** (`docs/milestones/milestone2.md`): fresh-by-default present thread + separate on-demand `past.sqlite` archive, **and** the `harness threads`/`harness past` list/show/rm/prune lifecycle CLI (§2.6). Automatic/policy-based GC still deferred (manual prune only) |
+| 12 | Headless one-shot-to-PR mode | ✅ Built (Milestone 3) | `cli.run_batch` / `--headless` (`DEEPAGENTS_HEADLESS`): run task(s) to completion, emit one JSON result on stdout, meaningful exit code. **PR URL not yet in the JSON** (git-pr logs it to stderr at session.end). Pulled in as M3 prereq P2 |
+| 12 | Provider resilience (retry/backoff + context-overflow fallback) | ✅ Built (Milestone 3) | `harness/resilience.py` + `cli._invoke_resilient`: bounded jittered backoff on 429/5xx/reset (`DEEPAGENTS_MAX_RETRIES`/`_RETRY_BASE`) + one-shot context-overflow trim (pre-§7 stopgap). Pulled in as M3 prereq P1 |
+| 12 | Thread / checkpoint management | 🟡 Partial | **Shipped in Milestone 2** (`docs/milestones/complete/milestone2.md`): fresh-by-default present thread + separate on-demand `past.sqlite` archive, **and** the `harness threads`/`harness past` list/show/rm/prune lifecycle CLI (§2.6). Automatic/policy-based GC still deferred (manual prune only) |
 | 12 | Deepagents-native skills & memories wiring | 🟡 Partial | **Milestone 2** shipped the accumulating on-demand "past" archive (`past.sqlite`) and (§2.7) **disambiguates** it from deepagents' native `memories/` surface — no dead scaffolding now implies M2 wired the latter. `project/agents/`,`skills/`,`memories/` native wiring (Option A/B) remains deferred to §12.6 |
 | 12 | Cost / telemetry persistence | 🟡 Partial | **Milestone 2** (§2.3) shipped the first slice: a per-session token/cost ledger on the `past.sqlite` `sessions` row (provenance-tagged, NULL when keyless). §8 telemetry-to-PR export of that ledger still deferred |
 | 13 | File-read middleware (per-file context shaping) | ⬜ Planned | No read-time transform seam; `read_file` serves whole files. Planned: pipeline on the backend `read()` override; tag add/omit + in-file progressive disclosure as instances |
@@ -167,7 +167,7 @@ network: NetworkPolicy = NetworkPolicy()
 *   `allow_net_tools=False` → omit http/fetch and network-transport MCP tools from that agent's
     toolset entirely.
 
-> **This is a policy, not a cage — same trust caveat as the MVP shell (`docs/milestones/mvp.md` §5).**
+> **This is a policy, not a cage — same trust caveat as the MVP shell (`docs/milestones/complete/mvp.md` §5).**
 > All subagents run in-process, sharing one network namespace and one proxy. Env-withholding stops a
 > *cooperative* agent and a prompt-injected one that only knows the documented env, but an agent that
 > hardcodes the proxy IP or a forwarder address can still reach it. It is meaningful **only while
@@ -301,7 +301,7 @@ This guarantees agent session state, Git identity, and accumulated metrics survi
 > **Status:** 🟡 Partial (Milestone 1) — CPU / memory / PID caps are **built**:
 > `run-docker.{sh,ps1}` pass `--cpus`/`--memory`/`--pids-limit` (defaults
 > 2/4g/512, overridable). Disk quota and wall-clock timeouts below remain
-> **planned**. Docker host-boundary control, not a sandbox (`docs/milestones/mvp.md` §5).
+> **planned**. Docker host-boundary control, not a sandbox (`docs/milestones/complete/mvp.md` §5).
 
 Isolation is not just filesystem/network — an agent loop can also exhaust host resources. Apply
 hard caps at container start (independent of bubblewrap):
@@ -370,13 +370,15 @@ first-party workflows on this one engine. A workflow is fully described by three
         — rather than the whole outgoing context.)
     *   **Control-flow** *(planned)* — alter dispatch: select/swap the model (model routing),
         short-circuit a turn, or veto a tool call.
-    *   **Human-in-the-loop (pause)** *(planned)* — suspend the run at this hook point, surface a
-        structured prompt to the human channel, and block until a typed reply returns, which the step
-        routes on (approve / deny / edit). Deterministic here: the **gate** decides *whether* to pause
-        (`always`, or a predicate — `*.env` touched, cost over budget, dirty `git status`), so a
-        workflow encodes "always confirm before X" with no model in the loop. Built on LangGraph
+    *   **Human-in-the-loop (pause)** *(built — Milestone 3)* — suspend the run at this hook point,
+        surface a structured prompt to the human channel, and block until a typed reply returns, which
+        the step routes on (approve / deny / edit). Deterministic here: the **gate** decides *whether*
+        to pause (`always`, or a predicate — `*.env` touched, cost over budget, dirty `git status`), so
+        a workflow encodes "always confirm before X" with no model in the loop. Built on LangGraph
         `interrupt()` + the SqliteSaver checkpoint, so the suspended turn is durable and resumable
-        across process restarts. This is the deterministic, workflow-bound half of HITL (§9); the
+        across process restarts. **Implementation note:** it ships as `hitl.PauseMiddleware`, not a
+        `pause` step type here — workflow steps are subprocess side-effects and cannot suspend the
+        graph in-process. This is the deterministic, workflow-bound half of HITL (§9); the
         agent-initiated half is the `ask_human` tool.
 
 > **Built vs. planned.** Built: the folder format, the **deterministic** gate layer (predicate —
@@ -662,7 +664,7 @@ way `git-branch` / `git-pr` are instances of the side-effect tier.
 > per-model `[pricing]` table incl. split cache prices), not a `prices.json`. A
 > priced model with no rate is loud (warn-once + floor), never silent `$0`. An
 > optional per-model energy estimate is tracked (measured local-device energy is
-> specified, not built — see `docs/milestones/ENERGY_SPEC.md`). See `docs/milestones/milestone1.md`.
+> specified, not built — see `docs/specs/energy.md`). See `docs/milestones/complete/milestone1.md`.
 
 ### Callback Implementation
 Deep Agents provides hooks to monitor execution streams:
@@ -812,7 +814,7 @@ Local dictionary for calculating financial cost of session:
 ## 9. CLI Frontend & User Interface
 > **Status:** 🟡 Partial — an **in-container interactive REPL** is now in MVP scope (persistent
 > `docker run -it` prompt loop in `harness/cli.py`: multi-turn on one `thread_id`, deterministic
-> `/exit`, lifecycle stage output — see `docs/milestones/mvp.md` §1a). The **host-side** Typer/Rich
+> `/exit`, lifecycle stage output — see `docs/milestones/complete/mvp.md` §1a). The **host-side** Typer/Rich
 > `harness` CLI, the TUI, and `.harness-config.yaml` below remain ⬜ Planned. See the status matrix above.
 
 ### MVP precursor: in-container interactive loop
@@ -849,7 +851,27 @@ Sandbox Stream and Cost Ticker panels below.
 *   **Manual Override**: Capability to manually trigger a `cloud-fallback` if the local orchestrator is stuck in a loop.
 
 ### Human-in-the-Loop (HITL)
-> **Status:** ⬜ Planned.
+> **Status:** ✅ Built (Milestone 3) — the interrupt spine and all three trigger sources ship. See
+> `docs/milestones/complete/milestone3.md` (esp. §0 build status) and
+> `deepagent-image/CLAUDE.md` → "Human-in-the-loop (Milestone 3)" for detail.
+>
+> **Not implemented (this design's optional/open parts):**
+> - **Deterministic pause = an `AgentMiddleware`, not a `workflows.py` `pause` step** — workflow
+>   steps are subprocess side-effects and cannot suspend the graph in-process, so the pause tier is
+>   `hitl.PauseMiddleware`. The `session.end` PR gate **is** a blocking approval (`cli._pr_approval`
+>   ahead of the git-pr workflow) for the strict/guided presets — an interactive veto; headless and
+>   the autonomous preset let the PR proceed (git-pr never auto-merges).
+> - **System-event source 3, two of three:** `missing_price` and `permission_denied` are recognized
+>   `.harness-config.yaml` keys but **not enforced** (`missing_price` is blocked by the cost-module
+>   no-sibling-import guard; `permission_denied` needs the §2/§10 path-guard/NetJail integration).
+>   `provider_error` is built (retry/abort; `switch provider` not offered — needs an agent rebuild).
+> - **`interruption_policy: shadow`** — not built; only `blocking` ships (the shadow-mode ordering/
+>   resume UX is the one open fork, milestone3 §6).
+> - **Budget/clock pause-on-interrupt** ("pause the clock") — not wired; M1 caps still tick while a
+>   human decides.
+> - **Host TUI channel** (Rich prompt / batched review panel) — deferred; the in-container REPL is
+>   the only channel. (S6 PR-b, the `choose` arrow-key menu, **is** built — inline ↑/↓ + Enter menu
+>   with a typed-index fallback off-TTY.)
 
 HITL is not a feature bolted onto the CLI — it is **one interrupt spine** with three trigger
 sources feeding a single **human channel**. The spine is LangGraph's `interrupt()` over the
@@ -1047,6 +1069,9 @@ keeps the host-runnable tier); `scripts/verify.{ps1,sh}` optionally call it; `te
 missing pricing; passes clean on the shipped registry; runs with no keys/network.
 
 ### 12.3 Headless one-shot-to-PR mode
+> **Status:** ✅ Built (Milestone 3, prereq P2). `cli.run_batch` / `--headless`. **Not yet:** PR URL in
+> the JSON (git-pr logs it to stderr), and multi-task file input (single task only so far).
+
 *Why.* Today a non-TTY stdin only *degrades* the interactive REPL to one turn (a CI fallback, not a
 feature). With the git lifecycle (§3) and cost tracker (§6/M1) now built, the missing capstone is a
 first-class **headless** mode that lets *other* automation drive the harness: run a task to
@@ -1070,6 +1095,8 @@ piping a task file runs each and aggregates; a budget-exceeded run exits non-zer
 total in the JSON.
 
 ### 12.4 Provider resilience — retry/backoff + context-overflow fallback
+> **Status:** ✅ Built (Milestone 3, prereq P1). `harness/resilience.py` + `cli._invoke_resilient`.
+
 *Why.* A long persistent session is one transient `429`/`5xx`/network blip away from dying
 mid-turn, and one long conversation away from a hard context-window error. The §7 compression
 pipeline is the eventual answer to context pressure but is research-stage; there is no interim
@@ -1094,7 +1121,7 @@ returns to the prompt without killing the session; a simulated context-overflow 
 once and is labelled interim.
 
 ### 12.5 Thread / checkpoint management
-> Specced in `docs/milestones/milestone2.md` §2.6 (present/past split + `harness threads`/`harness past`
+> Specced in `docs/milestones/complete/milestone2.md` §2.6 (present/past split + `harness threads`/`harness past`
 > lifecycle CLI). The design below is the source the milestone pulls from.
 
 *Why.* Conversation state persists in `<workspace>/.deepagents/checkpoints.sqlite`, keyed by
@@ -1115,7 +1142,7 @@ wiring, `test_threads.py` against a tmp sqlite. No change to the run path.
 guarded against deleting everything without explicit confirmation.
 
 ### 12.6 Deepagents-native skills & memories — wire or document
-> `docs/milestones/milestone2.md` §2.7 disambiguates this native `memories/` surface from that milestone's
+> `docs/milestones/complete/milestone2.md` §2.7 disambiguates this native `memories/` surface from that milestone's
 > bespoke `past.sqlite` archive and defers the wire-or-document decision below to here.
 
 *Why.* The Dockerfile bakes `project/agents/`, `project/skills/`, `project/memories/` into the
@@ -1141,7 +1168,7 @@ the agent) or removed, and `deepagent-image/CLAUDE.md` states which and why — 
 scaffolding.
 
 ### 12.7 Cost / telemetry persistence
-> First slice specced in `docs/milestones/milestone2.md` §2.3: a per-session token/cost ledger on the
+> First slice specced in `docs/milestones/complete/milestone2.md` §2.3: a per-session token/cost ledger on the
 > `past.sqlite` `sessions` row. The `usage.jsonl` sink below remains the fuller, still-planned form.
 
 *Why.* The cost tracker (§6 / M1) prints per-turn + session usage to stderr, then it is gone. There

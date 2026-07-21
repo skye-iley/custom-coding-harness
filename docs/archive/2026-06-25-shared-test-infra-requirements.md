@@ -111,7 +111,7 @@ flowchart LR
 
 **Outside this change's identity:**
 - No change to the trust boundary; this does not add sandboxing (the boundary
-  stays the container, per `docs/milestones/mvp.md` §5).
+  stays the container, per `docs/milestones/complete/mvp.md` §5).
 
 ## Dependencies / Assumptions
 

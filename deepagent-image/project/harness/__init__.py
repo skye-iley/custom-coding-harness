@@ -7,6 +7,11 @@ Split out of the original single-file main.py for navigation:
   workflows.py  §3 workflow engine: folder format + gates + side-effect steps,
                 WorkflowMiddleware (agent/model/tool events); hooks.json precursor
   agent.py      workspace resolution, system prompt, build_agent, result text
+  resilience.py Milestone 3 P1: retry/backoff + context-overflow classification
+  interrupt.py  Milestone 3 S1: interrupt request model, render, headless policy
+  config.py     Milestone 3 S2: .harness-config.yaml + review_triggers matching
+  audit.py      Milestone 3 S7: scrubbed interrupt audit trail (interrupts.jsonl)
+  hitl.py       Milestone 3 glue: interrupt resume loop, pause gate, ask_human
   cli.py        argparse + main() (the run loop, checkpointer, session workflows)
 
 Entry points (both run cli.main from WORKDIR /project):

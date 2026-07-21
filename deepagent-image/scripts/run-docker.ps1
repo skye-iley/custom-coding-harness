@@ -8,6 +8,7 @@
 #   .\run-docker.ps1 -WorkspacePath C:\path\to\repo "your task here"
 #   .\run-docker.ps1 -NetJail "task"         # deny-all-egress jail + allowlist
 #   .\run-docker.ps1 -Ephemeral "task"       # revert all workspace changes on close
+#                                            #   (in-container /refresh pulls live host edits)
 #   .\run-docker.ps1 -SaveWorkspace "task"   # ephemeral + snapshot to workspace-logs\<ts>\
 [CmdletBinding()]
 param(
@@ -28,9 +29,12 @@ param(
     [switch]$NetJail,
     # Ephemeral workspace: mount a throwaway COPY of the workspace, so every change
     # the agent makes is reverted on close (the real workspace is never touched).
-    # -SaveWorkspace additionally snapshots the post-run copy to workspace-logs\<ts>\
-    # before it is discarded, and implies -Ephemeral. The rebuildable conda env
-    # (.conda) is excluded from the copy so a run doesn't clone gigabytes.
+    # The real workspace is ALSO mounted read-only at /project/workspace-src, so the
+    # in-container /refresh command + refresh_workspace tool can pull live host edits
+    # into the copy mid-run (still reverted on close). -SaveWorkspace additionally
+    # snapshots the post-run copy to workspace-logs\<ts>\ before it is discarded, and
+    # implies -Ephemeral. The rebuildable conda env (.conda) is excluded from the copy
+    # so a run doesn't clone gigabytes.
     [switch]$Ephemeral,
     [switch]$SaveWorkspace
 )
@@ -113,11 +117,22 @@ if ($SaveWorkspace) { $Ephemeral = $true }
 $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $MountWorkspace = $WorkspacePath
 $EphemeralDir = $null
+# In ephemeral mode we ALSO bind-mount the real workspace read-only at
+# /project/workspace-src, so the in-container /refresh command + refresh_workspace
+# tool can pull live host edits into the throwaway copy mid-run (still reverted on
+# close). Empty on a normal run, so nothing extra is mounted.
+$SrcMountArgs = @()
 if ($Ephemeral) {
     $EphemeralDir = Join-Path $Root ".ephemeral\$Stamp"
     Copy-Workspace -Src $WorkspacePath -Dst $EphemeralDir
     $MountWorkspace = $EphemeralDir
-    Write-Host "Ephemeral: on - changes revert on close (copy at $EphemeralDir)"
+    $SrcMountArgs = @(
+        "-v", "${WorkspacePath}:/project/workspace-src:ro",
+        "-e", "DEEPAGENTS_WORKSPACE_SRC=/project/workspace-src"
+    )
+    Write-Host "Ephemeral: on - changes revert on close."
+    Write-Host "  Live copy (run tests here): $EphemeralDir"
+    Write-Host "  /refresh pulls live host edits from $WorkspacePath into the copy."
 }
 
 Seed-Workspace -Target $MountWorkspace -SeedSource $SeedSource
@@ -271,7 +286,7 @@ $dockerArgs = @(
     "-e", "DEEPAGENTS_STATE_DIR=/project/state",
     "-v", "${MountWorkspace}:/project/workspace",
     "-v", "${StateHostDir}:/project/state"
-)
+) + $SrcMountArgs
 
 # Git identity: mount host .gitconfig read-only into the agent user's home (uid 10001 -> /home/agent),
 # not /root (container runs USER agent). Never mount ~/.ssh into an autonomous-agent container -
@@ -279,6 +294,16 @@ $dockerArgs = @(
 $GitConfig = Join-Path $env:USERPROFILE ".gitconfig"
 if (Test-Path $GitConfig) {
     $dockerArgs += "-v", "${GitConfig}:/home/agent/.gitconfig:ro"
+}
+
+# HITL config: .harness-config.yaml is host-local + gitignored (like .env), so it
+# is NOT baked into the image. Mount it into /project (the harness CWD) when
+# present so its mere presence turns HITL on (cli reads Path.cwd()/.harness-config.yaml).
+# Absent => not mounted => HITL stays off (byte-for-byte Milestone 2).
+$HitlConfig = Join-Path $Root "project\.harness-config.yaml"
+if (Test-Path $HitlConfig) {
+    $dockerArgs += "-v", "${HitlConfig}:/project/.harness-config.yaml:ro"
+    Write-Host "HITL config: mounted (.harness-config.yaml present)"
 }
 
 $dockerArgs += "deepagent-harness"

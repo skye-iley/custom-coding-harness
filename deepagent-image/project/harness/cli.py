@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -18,12 +20,15 @@ from pprint import pprint
 from dotenv import load_dotenv
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from harness import archive
+import json
+
+from harness import archive, audit, config as hitl_config, hitl, interrupt, refresh, resilience
 from harness.agent import (
     DEFAULT_TASK,
     build_agent,
     final_message_text,
     make_recall_past_tool,
+    make_refresh_workspace_tool,
     resolve_workspace,
 )
 from harness.cost import (
@@ -75,6 +80,14 @@ def parse_args() -> argparse.Namespace:
         help="Continual-topic label for this run; scopes recall by default (also DEEPAGENTS_TOPIC).",
     )
     parser.add_argument("--stream", action="store_true", help="Print raw LangGraph stream events.")
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        default=os.getenv("DEEPAGENTS_HEADLESS", "").strip().lower() in _TRUTHY,
+        help="One-shot batch mode: run the task(s) to completion, emit one JSON "
+        "result on stdout, and exit (no interactive prompt). Interrupts resolve "
+        "by the fail-closed headless policy (also DEEPAGENTS_HEADLESS).",
+    )
     # Cost/token tracker (Milestone 1). Budgets default unset = no ceiling; env
     # fallbacks let the container be capped via --env-file without editing argv.
     parser.add_argument(
@@ -126,15 +139,20 @@ _SLASH_META_ARCHIVE = {
     "/recall": "stage prior-session context for the next turn ( /recall [query] [--all] )",
     "/topic": "show or set the continual-topic label ( /topic [name] )",
 }
+_SLASH_META_REFRESH = {
+    "/refresh": "pull live host edits into the ephemeral workspace copy ( /refresh [subpath] )",
+}
 
 
-def slash_commands(archive_on: bool) -> dict[str, str]:
+def slash_commands(archive_on: bool, refresh_on: bool = False) -> dict[str, str]:
     """The slash-command -> description map offered by prompt completion. Pure
     (no I/O) so tests assert the menu without building a terminal. Archive-only
-    commands are folded in only when the past archive is enabled."""
+    and refresh-only commands are folded in only when their feature is enabled."""
     meta = dict(_SLASH_META_BASE)
     if archive_on:
         meta.update(_SLASH_META_ARCHIVE)
+    if refresh_on:
+        meta.update(_SLASH_META_REFRESH)
     return meta
 
 
@@ -176,7 +194,7 @@ def _repl_key_bindings():
     return kb
 
 
-def _make_prompt_session(archive_on: bool, history_path: Path | None):
+def _make_prompt_session(archive_on: bool, history_path: Path | None, refresh_on: bool = False):
     """A `prompt_toolkit` session — persistent history, Ctrl-R reverse search,
     slash-command completion with a preview menu, and typed multi-line input — or
     None when prompt_toolkit is unavailable or can't attach to this terminal, so
@@ -192,7 +210,7 @@ def _make_prompt_session(archive_on: bool, history_path: Path | None):
         from prompt_toolkit.completion import Completer, Completion
         from prompt_toolkit.history import FileHistory, InMemoryHistory
 
-        commands = slash_commands(archive_on)
+        commands = slash_commands(archive_on, refresh_on)
 
         class _SlashCompleter(Completer):
             def get_completions(self, document, complete_event):
@@ -229,11 +247,113 @@ def _read_line(session, prompt_str: str) -> str:
     return session.prompt(prompt_str)
 
 
+def _arrow_select(request):
+    """S6 PR-b: an inline arrow-key menu over a `choose` request's options.
+
+    Returns the picked option string, or ``None`` to fall back to typed input
+    (menu cancelled with Esc/Ctrl-C, or prompt_toolkit unavailable). Non-full-screen
+    so it renders in place above the prompt and leaves the scrollback intact. Only
+    wired for an interactive TTY (see `_build_hitl_ctx`), so the None fallback also
+    covers the no-prompt_toolkit host."""
+    try:
+        from prompt_toolkit.application import Application
+        from prompt_toolkit.key_binding import KeyBindings
+        from prompt_toolkit.layout import Layout
+        from prompt_toolkit.layout.containers import HSplit, Window
+        from prompt_toolkit.layout.controls import FormattedTextControl
+    except Exception:  # noqa: BLE001 - no prompt_toolkit => typed fallback
+        return None
+
+    options = list(request.options)
+    state = {"idx": 0}
+
+    def _menu():
+        rows = []
+        for i, opt in enumerate(options):
+            selected = i == state["idx"]
+            rows.append((
+                "reverse" if selected else "",
+                f"{'❯ ' if selected else '  '}{opt}\n",
+            ))
+        rows.append(("", "(↑/↓ move · Enter select · Esc to type instead)"))
+        return rows
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    @kb.add("c-p")
+    def _up(event):
+        state["idx"] = (state["idx"] - 1) % len(options)
+
+    @kb.add("down")
+    @kb.add("c-n")
+    def _down(event):
+        state["idx"] = (state["idx"] + 1) % len(options)
+
+    @kb.add("enter")
+    def _pick(event):
+        event.app.exit(result=options[state["idx"]])
+
+    @kb.add("escape")
+    @kb.add("c-c")
+    def _cancel(event):
+        event.app.exit(result=None)
+
+    app = Application(
+        layout=Layout(HSplit([Window(FormattedTextControl(_menu), always_hide_cursor=True)])),
+        key_bindings=kb,
+        full_screen=False,
+        mouse_support=False,
+    )
+    try:
+        return app.run()
+    except Exception:  # noqa: BLE001 - any tty/render failure => typed fallback
+        return None
+
+
 def _stage(message: str) -> None:
     """Lifecycle marker. Written to stderr (not stdout) with a distinct prefix
     so it stays out of the agent's reply stream and can be grepped/suppressed
     independently (MVP §1a req 6)."""
     print(f"[harness] {message}", file=sys.stderr)
+
+
+def _err_detail(exc: Exception) -> str:
+    """A one-line, length-capped rendering of an exception's message for a stage
+    marker. Collapses whitespace so a multi-line provider payload stays on one
+    line; capped at 500 chars unless DEEPAGENTS_DEBUG is set (then uncapped). Walks
+    the ``__cause__``/``__context__`` chain because provider wrappers (e.g.
+    ChatGoogleGenerativeAIError) often carry an empty ``str()`` while the real
+    HTTP/quota detail sits on the underlying cause."""
+    parts = []
+    seen = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        msg = " ".join(str(cur).split())
+        label = type(cur).__name__
+        parts.append(f"{label}: {msg}" if msg else label)
+        cur = cur.__cause__ or cur.__context__
+    detail = " <- ".join(parts)
+    debug = os.environ.get("DEEPAGENTS_DEBUG", "").strip().lower() in _TRUTHY
+    if not debug and len(detail) > 500:
+        detail = detail[:500] + " …(set DEEPAGENTS_DEBUG=1 for full error + traceback)"
+    return detail
+
+
+def _dump_error(exc: Exception) -> None:
+    """Print the full traceback for a failed turn when DEEPAGENTS_DEBUG is set.
+
+    The one-line ``turn failed: …`` marker is enough for normal use; the full
+    traceback (with the provider's underlying cause chain) is what you need to tell
+    a rate-limit/quota 429 from a bad key or a genuine bug. Best-effort — never
+    raises out of an error handler."""
+    if os.environ.get("DEEPAGENTS_DEBUG", "").strip().lower() not in _TRUTHY:
+        return
+    import traceback
+
+    print("[harness] --- full traceback (DEEPAGENTS_DEBUG) ---", file=sys.stderr)
+    traceback.print_exception(type(exc), exc, exc.__traceback__)
 
 
 def _dump_partial(agent, config: dict) -> None:
@@ -312,7 +432,7 @@ def build_cost_tracker(
     Built only when the resolved model can report a non-zero cost (non-Free
     pricing), carries an energy estimate, or a budget ceiling is set. Otherwise
     return None and main() appends no middleware — byte-for-byte MVP behavior
-    (docs/milestones/milestone1.md §2.5 "remove-without-functional-change").
+    (docs/milestones/complete/milestone1.md §2.5 "remove-without-functional-change").
     """
     provider = provider_for(model)
     pricing = provider.pricing if provider else Free()
@@ -343,12 +463,18 @@ def run_turn(
     config: dict,
     stream: bool = False,
     extra_messages: list | None = None,
+    hitl_ctx: "hitl.HitlContext | None" = None,
 ) -> str | None:
     """One invoke on the given thread. Returns the answer text, or None when
     --stream already printed raw events instead of a final message.
 
     `extra_messages` (recall context, marked so the archive tap skips it) are
     prepended before the user message for this turn only.
+
+    When `hitl_ctx` is set (HITL config present), a graph that suspends on an
+    `interrupt()` is drained through the human channel and resumed before the
+    final message is extracted (S1). None => the invoke returns straight through
+    (MVP path).
     """
     messages = list(extra_messages or []) + [{"role": "user", "content": text}]
     inputs = {"messages": messages}
@@ -357,8 +483,68 @@ def run_turn(
         for event in agent.stream(inputs, config=config):
             pprint(event)
         return None
-    result = agent.invoke(inputs, config=config)
+    try:
+        result = _invoke_resilient(agent, inputs, config)
+        if hitl_ctx is not None:
+            result = hitl.run_interrupt_loop(
+                result,
+                lambda value: _invoke_resilient(agent, hitl.resume_command(value), config),
+                channel=hitl_ctx.channel,
+                headless=hitl_ctx.headless,
+                config=hitl_ctx.config,
+                workspace=hitl_ctx.workspace,
+            )
+    except hitl.HaltTurn as halt:
+        # on_deny='halt': the gate abandoned the turn on a deny. Pair the dangling
+        # tool_call in checkpoint state so the next turn doesn't resume with an
+        # unanswered call, then return to the human prompt with no model reply.
+        try:
+            agent.update_state(config, {"messages": [halt.tool_message]})
+        except Exception as exc:  # noqa: BLE001 - repair is best-effort, never fatal
+            _stage(f"halt: could not repair tool_call state ({type(exc).__name__}: {exc})")
+        _stage(f"tool call '{halt.tool_name}' denied — turn halted; back to you")
+        return None
     return final_message_text(result)
+
+
+def _invoke_resilient(agent, inputs: dict, config: dict):
+    """Invoke the agent with the P1 resilience layer (§12.4 / slice P1):
+
+    * bounded exponential backoff on transient provider/transport errors
+      (429 / 5xx / connection reset), caps from DEEPAGENTS_MAX_RETRIES /
+      DEEPAGENTS_RETRY_BASE;
+    * a one-shot context-overflow stopgap — on a context-length error, shed the
+      injected (recall) context and retry once with just the live user message.
+      This is the pre-§7 (Headroom) placeholder: drop-oldest, not summarization.
+
+    A retryable error that outlasts the backoff budget is re-raised unchanged —
+    that is the seam S4's provider-error interrupt hooks onto.
+    """
+    def invoke():
+        return agent.invoke(inputs, config=config)
+
+    def _note(attempt: int, exc: Exception, delay: float) -> None:
+        _stage(
+            f"provider error ({_err_detail(exc)}); retry {attempt} in {delay:.1f}s"
+        )
+
+    try:
+        return resilience.retry_call(
+            invoke,
+            max_retries=resilience.max_retries_from_env(),
+            base=resilience.retry_base_from_env(),
+            sleep=time.sleep,
+            on_retry=_note,
+        )
+    except Exception as exc:  # noqa: BLE001
+        msgs = inputs.get("messages", []) if isinstance(inputs, dict) else []
+        if resilience.is_context_overflow(exc) and len(msgs) > 1:
+            # Stopgap: recalled/injected slices are reference-only, so shed them
+            # and retry once with just the live user turn (the last message).
+            _stage("context overflow — dropping injected context and retrying once")
+            trimmed = {"messages": resilience.trim_messages(msgs, 1)}
+            return agent.invoke(trimmed, config=config)
+        raise
 
 
 def _handle_recall(conn, line: str, current_topic: str | None, pending: list) -> list:
@@ -402,6 +588,24 @@ def _handle_topic(conn, run_id: str, line: str, current_topic: str | None) -> st
     archive.set_topic(conn, run_id, name)
     _stage(f"topic set to {name!r}")
     return name
+
+
+def _handle_refresh(workspace: Path | None, line: str) -> None:
+    """`/refresh [subpath]`: pull live host edits from the read-only source mount
+    into the ephemeral workspace copy (source wins on conflict). Prints an
+    "unavailable" note on a normal run (no source mount) instead of acting."""
+    src = refresh.workspace_src()
+    if src is None or workspace is None:
+        _stage("refresh: unavailable (only in an ephemeral run; no source mount)")
+        return
+    subpath = " ".join(line.split()[1:]).strip() or None
+    try:
+        written = refresh.refresh_into(workspace, src, subpath)
+    except (ValueError, FileNotFoundError) as exc:
+        _stage(f"refresh: {exc}")
+        return
+    scope = f" under {subpath!r}" if subpath else ""
+    _stage(f"refresh: updated {len(written)} file(s) from the host{scope}")
 
 
 def _cost_totals_for_row(tracker: CostTrackerMiddleware | None):
@@ -456,6 +660,72 @@ def _print_session_total(tracker: CostTrackerMiddleware | None) -> None:
         )
 
 
+def _run_turn_hitl(agent, text, config, *, stream, extra_messages, hitl_ctx):
+    """`run_turn` plus the S4 *provider-error* system interrupt.
+
+    When the resilience layer (P1) has exhausted its retries and re-raised a
+    provider/transport error, and HITL's `provider_error` system interrupt is
+    enabled with a human present, offer a *retry / abort* choice on the human
+    channel instead of just reporting the failure (§4 S4). `switch provider` is
+    not offered yet (it needs an agent rebuild) — tracked as a follow-up. Any
+    other failure (a bug, a bad key) propagates to the caller's handler unchanged.
+    """
+    while True:
+        try:
+            return run_turn(
+                agent, text, config,
+                stream=stream, extra_messages=extra_messages, hitl_ctx=hitl_ctx,
+            )
+        except BudgetExceeded:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            offerable = (
+                hitl_ctx is not None
+                and hitl_ctx.channel is not None
+                and hitl_ctx.config.system_interrupt_enabled("provider_error")
+                and resilience.is_retryable(exc)
+            )
+            if not offerable:
+                raise
+            req = interrupt.new_request(
+                interrupt.KIND_CHOOSE,
+                f"Provider error after retries ({_err_detail(exc)}). What now?",
+                options=("retry", "abort"),
+                default="abort",
+                source=interrupt.SOURCE_SYSTEM,
+            )
+            choice = hitl_ctx.channel.ask(req)
+            try:
+                audit.record_interrupt(hitl_ctx.workspace, req, choice, resolved_by="human")
+            except Exception as aexc:  # noqa: BLE001
+                _stage(f"audit: failed to record provider-error interrupt ({aexc})")
+            if choice == "retry":
+                _stage("retrying turn after provider error")
+                continue
+            raise
+
+
+def _build_hitl_ctx(hitl_conf, workspace: Path, session, interactive: bool, headless: bool):
+    """Assemble the per-run HitlContext, or None when HITL is off. The REPL
+    channel reuses the same line-read seam the prompt loop uses (so history /
+    editing carry over); it is None on a headless/non-TTY run (resolve via the
+    §6 fail-closed policy)."""
+    if hitl_conf is None:
+        return None
+    channel = None
+    if interactive and not headless:
+        # Arrow-key menu (S6 PR-b) only when a prompt_toolkit session exists (TTY +
+        # library present); else `select=None` and `choose` resolves by typed
+        # index/name — the channel handles the fallback.
+        channel = hitl.ReplChannel(
+            read_line=lambda prompt: _read_line(session, prompt),
+            select=_arrow_select if session is not None else None,
+        )
+    return hitl.HitlContext(
+        config=hitl_conf, workspace=workspace, channel=channel, headless=headless
+    )
+
+
 def run_repl(
     agent,
     config: dict,
@@ -466,6 +736,8 @@ def run_repl(
     run_id: str | None = None,
     topic: str | None = None,
     history_path: Path | None = None,
+    hitl_conf=None,
+    workspace: Path | None = None,
 ) -> int:
     """Container-lifetime loop: build once (by the caller), then prompt -> invoke
     -> answer until /exit, /quit, or EOF. A non-TTY stdin collapses to the single
@@ -490,11 +762,22 @@ def run_repl(
     pending: list = []  # recall slices staged for the next turn (marked)
     # Rich line editing only for an interactive TTY; a non-TTY run never reaches
     # the loop below. None => plain input() (prompt_toolkit missing / non-TTY).
-    session = _make_prompt_session(archive_conn is not None, history_path) if interactive else None
+    refresh_on = refresh.workspace_src() is not None
+    session = (
+        _make_prompt_session(archive_conn is not None, history_path, refresh_on)
+        if interactive
+        else None
+    )
+    # HITL context (S1). channel = the REPL renderer when a human is present;
+    # None (headless, §6 fail-closed) on a non-TTY run. None entirely when no
+    # .harness-config.yaml (MVP path — run_turn's interrupt loop is skipped).
+    hitl_ctx = _build_hitl_ctx(hitl_conf, workspace, session, interactive, headless=False)
 
     if initial_task:
         try:
-            answer = run_turn(agent, initial_task, config, stream=stream)
+            answer = _run_turn_hitl(
+                agent, initial_task, config, stream=stream, extra_messages=None, hitl_ctx=hitl_ctx
+            )
         except KeyboardInterrupt:
             # Ctrl-C during a turn cancels that turn only; the session survives.
             print("\n[harness] turn cancelled")
@@ -510,7 +793,8 @@ def run_repl(
             # Report it and fall through: an interactive session drops to the
             # prompt for a retry; a non-interactive run closes cleanly below so the
             # archive row is still finalized by main().
-            _stage(f"turn failed: {type(exc).__name__}: {exc}")
+            _stage(f"turn failed: {_err_detail(exc)}")
+            _dump_error(exc)
             _dump_partial(agent, config)
             answer = None
         if answer is not None:
@@ -544,9 +828,16 @@ def run_repl(
         if archive_conn is not None and command == "/topic":
             current_topic = _handle_topic(archive_conn, run_id, line, current_topic)
             continue
+        if command == "/refresh":
+            # Available whenever the ephemeral source mount is present, independent
+            # of the archive; inert (prints "unavailable") on a normal run.
+            _handle_refresh(workspace, line)
+            continue
 
         try:
-            answer = run_turn(agent, line, config, stream=stream, extra_messages=pending)
+            answer = _run_turn_hitl(
+                agent, line, config, stream=stream, extra_messages=pending, hitl_ctx=hitl_ctx
+            )
             pending = []
         except KeyboardInterrupt:
             # Relies on KeyboardInterrupt propagating out of the synchronous
@@ -566,7 +857,8 @@ def run_repl(
             # persistent session: report it and keep the loop alive so the user can
             # retry. The staged recall slice is dropped so a poison injection can't
             # fail the same turn forever; re-issue /recall to stage it again.
-            _stage(f"turn failed: {type(exc).__name__}: {exc}")
+            _stage(f"turn failed: {_err_detail(exc)}")
+            _dump_error(exc)
             _dump_partial(agent, config)
             pending = []
             continue
@@ -578,6 +870,159 @@ def run_repl(
     _print_session_total(tracker)
     _stage("session closed")
     return 0
+
+
+def _read_session_env(workspace: Path | None) -> dict[str, str]:
+    """Parse the git-branch-written session.env (BRANCH/BASE/ID) into a dict, or
+    ``{}`` when absent — i.e. this was not a git session."""
+    if workspace is None:
+        return {}
+    env_path = archive.state_dir(workspace) / "session.env"
+    if not env_path.is_file():
+        return {}
+    out: dict[str, str] = {}
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key:
+            out[key] = value.strip()
+    return out
+
+
+def _read_session_branch(workspace: Path | None) -> str | None:
+    """Best-effort read of the session branch git-branch persisted to session.env."""
+    return _read_session_env(workspace).get("DEEPAGENTS_SESSION_BRANCH") or None
+
+
+def _pr_summary(workspace: Path | None, env: dict[str, str]) -> str | None:
+    """A best-effort ``branch/base`` + commit list + diff-stat of what git-pr would
+    push, shown as the PR-gate interrupt's expandable context. All git calls are
+    best-effort (short timeout, failures swallowed) so gathering the summary can
+    never block or break the gate; returns ``None`` when nothing is available."""
+    if workspace is None:
+        return None
+    branch = env.get("DEEPAGENTS_SESSION_BRANCH")
+    base = env.get("DEEPAGENTS_SESSION_BASE")
+    parts: list[str] = []
+    if branch:
+        parts.append(f"branch: {branch}" + (f"  →  base: {base}" if base else ""))
+
+    def _git(*args: str) -> str | None:
+        try:
+            out = subprocess.run(
+                ["git", "-C", str(workspace), *args],
+                capture_output=True, text=True, timeout=10,
+            )
+        except Exception:  # noqa: BLE001 - summary is decorative; never fatal
+            return None
+        return out.stdout.strip() or None
+
+    if base:
+        commits = _git("log", "--oneline", f"{base}..HEAD")
+        if commits:
+            parts.append("[commits]\n" + commits)
+        stat = _git("diff", "--stat", base)
+        if stat:
+            parts.append("[changes]\n" + stat)
+    return "\n".join(parts) if parts else None
+
+
+def _pr_approval(hitl_conf, workspace: Path | None, headless: bool) -> bool:
+    """Session-end PR gate (S2 PR tier): return True to run git-pr, False to skip it.
+
+    Off-path (HITL off, autonomous preset, headless/non-TTY, or no git session)
+    returns True so session.end runs exactly as before. When it does gate, ask the
+    human on a plain-input channel (the REPL prompt_toolkit session is already torn
+    down by here) and audit the answer. An EOF/Ctrl-C at the gate is a decline
+    (fail-closed: no explicit yes → no PR)."""
+    interactive = (not headless) and sys.stdin.isatty()
+    env = _read_session_env(workspace)
+    branch = env.get("DEEPAGENTS_SESSION_BRANCH")
+    if not hitl.should_gate_pr(hitl_conf, interactive=interactive, has_session=bool(branch)):
+        return True
+
+    request = hitl.make_pr_gate_request(
+        branch=branch,
+        base=env.get("DEEPAGENTS_SESSION_BASE"),
+        summary=_pr_summary(workspace, env),
+    )
+    channel = hitl.ReplChannel(read_line=lambda prompt: _read_line(None, prompt))
+    try:
+        approved = bool(channel.ask(request))
+    except (EOFError, KeyboardInterrupt):
+        _stage("PR gate: no answer (EOF/interrupt) — treating as decline; PR not opened")
+        approved = False
+    try:
+        audit.record_interrupt(workspace, request, approved, resolved_by="human")
+    except Exception as exc:  # noqa: BLE001 - audit must never fail the close
+        _stage(f"audit: failed to record PR-gate interrupt ({exc})")
+    if not approved:
+        _stage("PR gate: operator declined — git-pr (stage/commit/push/PR) skipped")
+    return approved
+
+
+def _batch_payload(final_message, config, tracker, workspace, exit_code) -> dict:
+    """The one JSON object a headless run emits on stdout (P2). PR URL is not yet
+    captured here — git-pr runs at session.end (after this) and logs its URL to
+    stderr; wiring it into the payload is a follow-up."""
+    thread_id = config.get("configurable", {}).get("thread_id")
+    tokens = cost = None
+    if tracker is not None:
+        _, _, cost, _ = _cost_totals_for_row(tracker)
+        tokens = tracker.session.total_tokens
+    return {
+        "final_message": final_message,
+        "thread_id": thread_id,
+        "tokens": tokens,
+        "cost_usd": cost,
+        "branch": _read_session_branch(workspace),
+        "pr_url": None,
+        "exit_code": exit_code,
+    }
+
+
+def run_batch(
+    agent,
+    config: dict,
+    tasks: list[str],
+    stream: bool = False,
+    tracker: CostTrackerMiddleware | None = None,
+    hitl_conf=None,
+    workspace: Path | None = None,
+) -> int:
+    """Headless one-shot mode (P2 / design_doc.md §12.3).
+
+    Run each task to completion, resolving any interrupt by the fail-closed
+    headless policy (§6) — never blocking for a human that isn't there — then emit
+    one structured JSON result on stdout. Stage markers stay on stderr, so the
+    JSON line is the sole stdout output a caller parses.
+
+    A blocking interrupt with no safe fall-through aborts the run with the
+    distinct EXIT_INTERRUPT_ABORT code (§6: a labelled abort beats a stuck CI job).
+    """
+    hitl_ctx = _build_hitl_ctx(hitl_conf, workspace, session=None, interactive=False, headless=True)
+    final_message = None
+    exit_code = 0
+    try:
+        for task in tasks:
+            if not task:
+                continue
+            final_message = run_turn(agent, task, config, stream=stream, hitl_ctx=hitl_ctx)
+    except hitl.InterruptAborted as exc:
+        _stage(f"headless abort: {exc}")
+        exit_code = exc.exit_code
+    except BudgetExceeded as exc:
+        _stage(f"budget exceeded: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        _stage(f"turn failed: {_err_detail(exc)}")
+        _dump_error(exc)
+        _dump_partial(agent, config)
+        exit_code = 1
+
+    _print_session_total(tracker)
+    print(json.dumps(_batch_payload(final_message, config, tracker, workspace, exit_code)))
+    _stage("session closed")
+    return exit_code
 
 
 def dispatch(argv: list[str]) -> int:
@@ -627,6 +1072,17 @@ def main() -> int:
     )
     by_hook = workflows_by_hook(all_workflows)
 
+    # HITL config (Milestone 3, §9). Presence of .harness-config.yaml turns HITL
+    # on; absent => hitl_conf is None and every HITL seam below is skipped, so the
+    # harness is byte-for-byte Milestone 2 (removable contract). Read from the
+    # project CWD like AGENTS.md / .mcp.json (operator config, not workspace code).
+    hitl_conf = hitl_config.load_config(Path.cwd() / hitl_config.CONFIG_NAME)
+    if hitl_conf is not None:
+        _stage(
+            f"HITL on (autonomy={hitl_conf.autonomy_level}, "
+            f"policy={hitl_conf.interruption_policy})"
+        )
+
     # Checkpointer DB lives in the harness state dir (archive.state_dir): under
     # the workspace by default so thread state (conversation memory) rides the
     # same host mount and survives --rm runs, or relocated out of the workspace
@@ -668,6 +1124,10 @@ def main() -> int:
     # These run gated, like every other workflow (the git-branch workflow lives
     # on session.start; git-pr on session.end).
     run_hook(by_hook.get("session.start", []), GateContext("session.start", workspace))
+    # PR gate (S2 PR tier): decided on the normal-completion path just before
+    # return; stays True on any early/exception exit so a crash still runs
+    # session.end exactly as before (existing behaviour preserved on failure).
+    pr_gate_ok = True
     try:
         # SqliteSaver holds an open connection, so the whole REPL must run
         # inside the context manager, not just the first invoke.
@@ -688,6 +1148,24 @@ def main() -> int:
                 middleware.append(archive.ArchiveMiddleware(archive_conn, run_id))
                 tools.append(make_recall_past_tool(archive_conn, args.topic))
 
+            if refresh.workspace_src() is not None:
+                # Ephemeral run with the real workspace mounted read-only alongside
+                # the throwaway copy: give the agent a tool to pull live host edits
+                # into its copy mid-turn. Inert (unregistered) on a normal run.
+                refresh_tool = make_refresh_workspace_tool(workspace)
+                if refresh_tool is not None:
+                    tools.append(refresh_tool)
+
+            if hitl_conf is not None:
+                # S2: deterministic pause gate on tool.start / the PR, per the
+                # autonomy preset + review_triggers. S3: the ask_human tool the
+                # agent calls when it decides it is blocked. Both raise interrupt()
+                # over the same checkpointer the loop resumes from.
+                middleware.append(hitl.PauseMiddleware(hitl_conf))
+                ask_human = hitl.make_ask_human_tool()
+                if ask_human is not None:
+                    tools.append(ask_human)
+
             agent = build_agent(
                 chat_model,
                 workspace,
@@ -695,17 +1173,33 @@ def main() -> int:
                 middleware=middleware,
                 checkpointer=checkpointer,
             )
-            rc = run_repl(
-                agent,
-                config,
-                task,
-                stream=args.stream,
-                tracker=tracker,
-                archive_conn=archive_conn,
-                run_id=run_id,
-                topic=args.topic,
-                history_path=checkpoint_db.parent / "repl_history",
-            )
+            if args.headless:
+                # P2: one-shot batch — run the task(s), emit one JSON result on
+                # stdout, exit. No interactive prompt; interrupts resolve by the
+                # §6 fail-closed headless policy.
+                rc = run_batch(
+                    agent,
+                    config,
+                    [task] if task else [],
+                    stream=args.stream,
+                    tracker=tracker,
+                    hitl_conf=hitl_conf,
+                    workspace=workspace,
+                )
+            else:
+                rc = run_repl(
+                    agent,
+                    config,
+                    task,
+                    stream=args.stream,
+                    tracker=tracker,
+                    archive_conn=archive_conn,
+                    run_id=run_id,
+                    topic=args.topic,
+                    history_path=checkpoint_db.parent / "repl_history",
+                    hitl_conf=hitl_conf,
+                    workspace=workspace,
+                )
             if archive_conn is not None:
                 # After the M1 session-total line printed (inside run_repl), so the
                 # ledger row's cost matches stderr; summary runs here too (§2.3).
@@ -715,9 +1209,15 @@ def main() -> int:
                 _finalize_session(
                     archive_conn, run_id, init_summary_model(model), tracker
                 )
+            # Ask the operator before git-pr opens the PR (interactive gated presets
+            # only; off-path returns True). Decided here, enforced in `finally`.
+            pr_gate_ok = _pr_approval(hitl_conf, workspace, args.headless)
             return rc
     finally:
-        run_hook(by_hook.get("session.end", []), GateContext("session.end", workspace))
+        if pr_gate_ok:
+            run_hook(by_hook.get("session.end", []), GateContext("session.end", workspace))
+        else:
+            _stage("session.end workflows skipped (PR gate declined)")
         if archive_conn is not None:
             archive_conn.close()
 

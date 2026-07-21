@@ -19,7 +19,7 @@ from pathlib import Path
 
 # cost.py holds the Pricing types + rate math. The import is one-directional
 # (providers -> cost) on purpose: cost.py must never import providers, so the
-# two don't form a cycle (docs/milestones/milestone1.md §2.4).
+# two don't form a cycle (docs/milestones/complete/milestone1.md §2.4).
 from harness.cost import (
     ModelRates,
     Pricing,
@@ -57,6 +57,10 @@ class Provider:
     # the MVP-equivalent null state (Free, no rates) so the tracker is opt-in.
     pricing: Pricing = field(default_factory=Free)
     model_rates: dict[str, ModelRates] = field(default_factory=dict)
+    # Optional [limits] table from provider.toml (rpm/tpm/tier/tokens_per_request),
+    # stored raw so env + tier resolution happens at run time (harness/ratelimit).
+    # None => no plan limits declared (no proactive pacing unless env sets one).
+    limits_table: dict | None = None
 
     def rates_for(self, model: str) -> ModelRates | None:
         """ModelRates for a full model spec, keyed by the bare id after prefix."""
@@ -117,6 +121,10 @@ def _load_provider(provider_dir: Path) -> Provider:
     # rates so cost.py can look them up.
     pricing = pricing_from_strategy(cfg.get("pricing"), model_rates)
 
+    limits_table = cfg.get("limits")
+    if limits_table is not None and not isinstance(limits_table, dict):
+        raise SystemExit(f"Provider config {config_path}: [limits] must be a table.")
+
     return Provider(
         prefix=prefix,
         api_key_env=api_key_env,
@@ -127,6 +135,7 @@ def _load_provider(provider_dir: Path) -> Provider:
         models=tuple(models),
         pricing=pricing,
         model_rates=model_rates,
+        limits_table=limits_table,
     )
 
 
@@ -222,18 +231,49 @@ def resolve_chat_model(model: str):
     runs keyless, so the api key falls back to a placeholder when unset.
     """
     provider = _provider_for(model)
+    limiter = _rate_limiter_for(provider)
+
     if provider and provider.base_url_env:
         base_url = os.getenv(provider.base_url_env)
         if not base_url:
             raise SystemExit(f"Model '{model}' requires {provider.base_url_env}.")
         from langchain_openai import ChatOpenAI
 
+        kwargs = {"rate_limiter": limiter} if limiter is not None else {}
         return ChatOpenAI(
             model=model[len(provider.prefix):],
             base_url=base_url,
             api_key=os.getenv(provider.api_key_env) or "not-needed",
+            **kwargs,
         )
+
+    if limiter is not None:
+        # Native provider: create_deep_agent would call init_chat_model itself and
+        # get an unpaced model. To attach the limiter we must build the object here.
+        # Fall back to the bare string (unpaced) if construction fails (e.g. keyless
+        # host) so we never turn a pacing win into a hard failure.
+        try:
+            from langchain.chat_models import init_chat_model
+
+            return init_chat_model(model, rate_limiter=limiter)
+        except Exception:  # noqa: BLE001 - pacing is best-effort; degrade to unpaced
+            return model
     return model
+
+
+def _rate_limiter_for(provider: "Provider | None"):
+    """Build the proactive rate limiter for a provider's plan limits, or ``None``.
+
+    Resolves the registry ``[limits]`` table (+ tier / env overrides) to an
+    effective requests/second and, when one exists, returns a langchain rate
+    limiter that paces every model call. ``None`` when no limit is configured —
+    then the model is left unpaced (byte-for-byte prior behaviour)."""
+    from harness import ratelimit
+
+    table = provider.limits_table if provider else None
+    limits = ratelimit.resolve_limits(table, os.environ)
+    rps = ratelimit.effective_rps(limits)
+    return ratelimit.build_rate_limiter(rps) if rps else None
 
 
 def init_summary_model(model: str):

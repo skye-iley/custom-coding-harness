@@ -345,17 +345,27 @@ def test_run_repl_turn_error_non_interactive_closes_cleanly(monkeypatch):
     # propagate the exception out of run_repl — otherwise main() skips archive
     # finalization and the container dies with a traceback. It should close with
     # rc 0 so main() still finalizes the session row.
+    #
+    # The "500 INTERNAL" is a retryable transient (P1), so the resilience layer
+    # first retries it: with the budget pinned to 2 that is 3 invokes (1 + 2),
+    # which also proves run_turn is wrapped by _invoke_resilient. The exhausted
+    # error is then caught and the session closes cleanly.
+    monkeypatch.setenv("DEEPAGENTS_MAX_RETRIES", "2")
+    monkeypatch.setenv("DEEPAGENTS_RETRY_BASE", "0.01")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     agent = _BoomAgent()
     rc = cli.run_repl(agent, {}, "do the thing")
     assert rc == 0
-    assert agent.calls == 1
+    assert agent.calls == 3
 
 
 def test_run_repl_turn_error_interactive_survives_to_next_prompt(monkeypatch):
     # In an interactive session a failed turn is reported and the loop keeps
     # going: the user gets the prompt back to retry, the session is not killed.
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    # Retries off so this isolates the survival property from P1's backoff: one
+    # invoke, caught, loop continues.
+    monkeypatch.setenv("DEEPAGENTS_MAX_RETRIES", "0")
     # Force the plain-input() fallback so the test drives the loop without a real
     # terminal (prompt_toolkit's session.prompt would need one).
     monkeypatch.setattr(cli, "_make_prompt_session", lambda *a, **k: None)
@@ -386,6 +396,13 @@ def test_slash_commands_gated_on_archive():
     assert {"/recall", "/topic"} <= set(witharchive)
     # Every command carries a non-empty description (the completion preview meta).
     assert all(witharchive.values())
+
+    # /refresh is gated on the ephemeral source mount, independent of the archive:
+    # absent by default, present (with a description) only when refresh_on.
+    assert "/refresh" not in cli.slash_commands(archive_on=True)
+    withrefresh = cli.slash_commands(archive_on=False, refresh_on=True)
+    assert "/refresh" in withrefresh
+    assert all(withrefresh.values())
 
 
 def test_read_line_falls_back_to_input_without_session(monkeypatch):
