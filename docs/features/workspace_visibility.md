@@ -1,7 +1,10 @@
 # Workspace Visibility & Secret Masking — Feature Plan
 
-> **Status:** ⬜ Planned — **scheduled under `docs/milestones/planned/milestone4.md`** (Real Trust
-> Boundary), which sets v1-vs-deferred scope and wires this policy into the harness. Named
+> **Status:** ✅ Built (v1) — implemented under `docs/milestones/planned/milestone4.md` (Real Trust
+> Boundary). The policy (`.agentignore` gitignore-parity, 3-tier policy, designated-secret floor),
+> docker mount-mask, path-guard middleware, `permission_denied` interrupt wiring, `harness doctor`,
+> CI pipeline, and security test suite all shipped. Stretch H (bwrap fs-tool jail) is not yet built.
+> Named
 > feature-plan doc (not a numbered milestone). Referenced from `design_doc.md` §2 (Sandbox &
 > Isolation). Wins over `design_doc.md` for the mechanics of *which workspace paths an agent can see*.
 >

@@ -1,6 +1,8 @@
 # Milestone 4 — Real Trust Boundary (Workspace Visibility + Path Guard)
 
-> **Status:** ⬜ Planned. Successor to `docs/milestones/complete/milestone3.md` (HITL). Promotes the
+> **Status:** ✅ Built (v1 — slices A–G). Stretch H (bwrap fs-tool jail) not yet built;
+> deferred v2 (overlayfs view) not yet built. See PR1–PR5 for the shipped commits.
+> Promotes the
 > `design_doc.md` **§2 Workspace Visibility & Secret Masking** + **Path Guard** designs, backed by the
 > **§10 security verification suite**, into a built, tested slice — and pulls in the two `design_doc.md`
 > §12 operational items this work structurally needs (**§12.1 CI**, **§12.2 `harness doctor`**). The

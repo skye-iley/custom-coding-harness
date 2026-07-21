@@ -16,9 +16,10 @@ secret-safe containers.
       resilience/headless prereqs it rides on. **Built** — see §0 build status for what shipped vs.
       deferred, and the "Human-in-the-loop" section in `deepagent-image/CLAUDE.md`.
   - `docs/milestones/planned/` — **not-yet-built** milestones. Wins over `design_doc.md` for
-    "what we build next." *(`milestone4.md` — **Real Trust Boundary**: workspace visibility +
-    path guard + `permission_denied` interrupt, backed by §10 security suite + §12.1 CI / §12.2
-    doctor. v1 buildable now; bwrap jail is the stretch layer.)*
+    "what we build next." *(`milestone4.md` — **Built**: see PR1–PR5. Real Trust Boundary:
+    workspace visibility (`.agentignore`, 3-tier policy, designated-secret floor), docker
+    mount-mask, path-guard middleware, `permission_denied` interrupt wiring, `harness doctor`,
+    CI pipeline, security test suite. Stretch H (bwrap fs-tool jail) is not yet built.)*
   - `docs/features/workspace_visibility.md` — **named feature plan** (not a numbered milestone): restrict
     which workspace paths an agent can see (`.agentignore` policy, designated-secret floor, docker-mask
     → bwrap fs-tool jail → optional overlayfs). **Planned** — summarized in `design_doc.md` §2.

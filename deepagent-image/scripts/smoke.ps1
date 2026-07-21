@@ -169,6 +169,12 @@ try {
     & docker @importArgs
     if ($LASTEXITCODE -ne 0) { throw "runtime import check failed" }
 
+    # M4 smoke: verify mask resolution works end-to-end by running mask-scan
+    $maskCode = "from harness.mask import resolve; r = resolve('/tmp', '/tmp'); print(f'mask OK: {len(r.masked)} entries')"
+    $maskArgs = @("run", "--rm") + $NetArgs + $ProxyEnv + @("deepagent-harness", "python3", "-c", $maskCode)
+    & docker @maskArgs
+    if ($LASTEXITCODE -ne 0) { throw "mask resolution check failed" }
+
     # Full suite via pytest discovery on the test image. -v names every test case
     # (file::test PASSED/FAILED); -ra recaps non-passing tests at the end. Failures
     # print the failing test id, file:line, and asserted values by default.

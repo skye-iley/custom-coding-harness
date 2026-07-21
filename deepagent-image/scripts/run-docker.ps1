@@ -274,6 +274,33 @@ if ($NetJail) {
     $ProxyEnv = @()
 }
 
+# ---------------------------------------------------------------------------
+# M4 mask pre-flight: when DEEPAGENTS_MASK != 0, run a throwaway scan container
+# to resolve the mask set, then emit empty overlay mounts for each masked path.
+# Scan output lines: <mode> <type> <tier> <relpath>
+$MaskArgs = @()
+$MaskMode = $env:DEEPAGENTS_MASK
+if ($MaskMode -eq "" -or $MaskMode -eq "1") {
+    $scanOutput = & docker run --rm `
+        -v "${MountWorkspace}:/project/workspace:ro" `
+        -v "${StateHostDir}:/project/state:ro" `
+        -e "DEEPAGENTS_STATE_DIR=/project/state" `
+        deepagent-harness python3 -m harness mask-scan 2>$null
+    if ($LASTEXITCODE -eq 0 -and $scanOutput) {
+        $emptyFile = New-TemporaryFile
+        $emptyDir = New-Item -ItemType Directory -Path ([System.IO.Path]::GetTempPath()) -Name ([System.IO.Path]::GetRandomFileName())
+        foreach ($line in $scanOutput) {
+            $parts = $line -split '\s+', 4
+            if ($parts.Length -lt 4) { continue }
+            $mode = $parts[0]; $type = $parts[1]; $tier = $parts[2]; $relpath = $parts[3]
+            $relpath = $relpath -replace '%20', ' '
+            $source = if ($type -eq "dir") { $emptyDir.FullName } else { $emptyFile.FullName }
+            $MaskArgs += "-v", "${source}:/project/workspace/${relpath}:ro"
+        }
+        Write-Host "Mask: $($MaskArgs.Count/2) path(s) masked"  # each -v is 2 args
+    }
+}
+
 $dockerArgs = @(
     "run", "--rm"
 ) + $TtyFlags + @(
@@ -286,7 +313,7 @@ $dockerArgs = @(
     "-e", "DEEPAGENTS_STATE_DIR=/project/state",
     "-v", "${MountWorkspace}:/project/workspace",
     "-v", "${StateHostDir}:/project/state"
-) + $SrcMountArgs
+) + $SrcMountArgs + $MaskArgs
 
 # Git identity: mount host .gitconfig read-only into the agent user's home (uid 10001 -> /home/agent),
 # not /root (container runs USER agent). Never mount ~/.ssh into an autonomous-agent container -
@@ -333,5 +360,12 @@ try {
             Remove-Item -Recurse -Force $EphemeralDir
         }
         Write-Host "Ephemeral: workspace changes discarded."
+    }
+    # Clean up mask temp files
+    if ($emptyFile -and (Test-Path $emptyFile.FullName)) {
+        Remove-Item -Force $emptyFile.FullName -ErrorAction SilentlyContinue
+    }
+    if ($emptyDir -and (Test-Path $emptyDir.FullName)) {
+        Remove-Item -Recurse -Force $emptyDir.FullName -ErrorAction SilentlyContinue
     }
 }

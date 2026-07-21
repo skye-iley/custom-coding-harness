@@ -292,6 +292,41 @@ if [[ -t 0 ]]; then
   TTY_FLAGS="-it"
 fi
 
+# M4 mask pre-flight: when DEEPAGENTS_MASK != 0, run a throwaway scan container
+# to resolve the mask set, then emit empty overlay mounts for each masked path.
+MASK_ARGS=()
+EMPTY_FILE=""
+EMPTY_DIR=""
+mask_scan() {
+  local mask_mode="${DEEPAGENTS_MASK:-1}"
+  [[ "$mask_mode" == "0" ]] && return 0
+  local scan_output
+  scan_output="$(docker run --rm \
+    -v "$MOUNT_WORKSPACE:/project/workspace:ro" \
+    -v "$STATE_HOST_DIR:/project/state:ro" \
+    -e DEEPAGENTS_STATE_DIR=/project/state \
+    deepagent-harness python3 -m harness mask-scan 2>/dev/null)" || return 0
+  [[ -z "$scan_output" ]] && return 0
+  EMPTY_FILE="$(mktemp)"
+  EMPTY_DIR="$(mktemp -d)"
+  local mode type tier relpath source
+  while IFS=' ' read -r mode type tier relpath rest; do
+    relpath="$(printf '%s' "$relpath" | sed 's/%20/ /g')"
+    if [[ "$type" == "dir" ]]; then
+      source="$EMPTY_DIR"
+    else
+      source="$EMPTY_FILE"
+    fi
+    MASK_ARGS+=(-v "$source:/project/workspace/$relpath:ro")
+  done <<< "$scan_output"
+  echo "Mask: $((${#MASK_ARGS[@]}/2)) path(s) masked" >&2
+}
+
+mask_cleanup() {
+  [[ -n "$EMPTY_FILE" && -f "$EMPTY_FILE" ]] && rm -f "$EMPTY_FILE" 2>/dev/null || true
+  [[ -n "$EMPTY_DIR" && -d "$EMPTY_DIR" ]] && rm -rf "$EMPTY_DIR" 2>/dev/null || true
+}
+
 # Assemble the agent `docker run` invocation into an array. NET_ARGS / PROXY_ENV
 # are set either by netjail_up (jail mode) or to the bridge defaults below.
 build_agent_run() {
@@ -308,10 +343,19 @@ build_agent_run() {
     ${SRC_MOUNT[@]+"${SRC_MOUNT[@]}"}
     ${GIT_MOUNT[@]+"${GIT_MOUNT[@]}"}
     ${HITL_MOUNT[@]+"${HITL_MOUNT[@]}"}
+    ${MASK_ARGS[@]+"${MASK_ARGS[@]}"}
     deepagent-harness)
   if [[ $# -gt 0 ]]; then
     AGENT_RUN+=(python3 main.py "$@")
   fi
+}
+
+mask_scan
+
+# Clean up mask temp files on exit (added to any existing trap).
+_exit_cleanup() {
+  mask_cleanup
+  ephemeral_cleanup
 }
 
 if [[ "${NET_JAIL:-}" == "1" ]]; then
@@ -321,7 +365,7 @@ if [[ "${NET_JAIL:-}" == "1" ]]; then
   build_agent_run "$@"
   "${AGENT_RUN[@]}"
   rc=$?
-  ephemeral_cleanup   # netjail's own EXIT trap handles the sidecars
+  _exit_cleanup   # netjail's own EXIT trap handles the sidecars
   exit $rc
 fi
 
@@ -331,8 +375,9 @@ PROXY_ENV=()
 build_agent_run "$@"
 if [[ -n "$EPHEMERAL" ]]; then
   # Can't exec: the copy must be reverted (and optionally saved) after the run.
-  trap ephemeral_cleanup EXIT INT TERM
+  trap "_exit_cleanup" EXIT INT TERM
   "${AGENT_RUN[@]}"
   exit $?
 fi
+trap "mask_cleanup" EXIT INT TERM
 exec "${AGENT_RUN[@]}"

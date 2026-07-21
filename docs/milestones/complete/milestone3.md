@@ -21,7 +21,7 @@ First implementation pass. Authoritative detail on what shipped, deviations, and
 | **S1** interrupt spine + channel | ✅ built | `interrupt.py` + `hitl.run_interrupt_loop`; restart round-trip via checkpoint. |
 | **S2** deterministic pause tier | ✅ built | `PauseMiddleware` gates `tool.start` + `review_triggers`; **PR gate (`session.end`) now a blocking approval** (`cli._pr_approval` + `hitl.should_gate_pr`/`make_pr_gate_request`) — interactive veto for strict/guided, deny skips git-pr; headless/autonomous proceed. **Deviation:** middleware, not a `workflows.py` `pause` step (steps can't suspend the graph). |
 | **S3** `ask_human` tool | ✅ built | `hitl.make_ask_human_tool`. |
-| **S4** system-event interrupts | ◑ partial | `provider_error` wired (retry/abort). `missing_price` + `permission_denied` recognized but **not enforced** (follow-ups). |
+| **S4** system-event interrupts | ✅ partial | `provider_error` wired (retry/abort). `permission_denied` wired via M4 (path-guard denial escalates to HITL spine). `missing_price` recognized but **not enforced** (follow-up). |
 | **S5** policy & headless behavior | ✅ built | `headless_decision` fail-closed + `EXIT_INTERRUPT_ABORT`. Shadow-mode UX still open (§6). |
 | **S6** REPL ergonomics | ✅ built | PR-a (`prompt_toolkit` input) + PR-b (`choose` arrow-key menu, `cli._arrow_select`/`ReplChannel(select=…)`, typed fallback on Esc/no-TTY). |
 | **S7** interrupt audit trail | ✅ built | `audit.py` → `.agent_telemetry/interrupts.jsonl` (scrubbed, no context payload). |

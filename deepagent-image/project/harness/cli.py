@@ -27,10 +27,12 @@ from harness.agent import (
     DEFAULT_TASK,
     build_agent,
     final_message_text,
+    make_mask_add_tool,
     make_recall_past_tool,
     make_refresh_workspace_tool,
     resolve_workspace,
 )
+from harness.pathguard import PathGuardDenied
 from harness.cost import (
     BudgetExceeded,
     CostTrackerMiddleware,
@@ -1060,6 +1062,14 @@ def dispatch(argv: list[str]) -> int:
         from harness.memadmin import memadmin_main
 
         return memadmin_main(argv)
+    if argv and argv[0] == "mask-scan":
+        from harness.mask_scan import mask_scan_main
+
+        return mask_scan_main(argv[1:])
+    if argv and argv[0] == "doctor":
+        from harness.doctor import doctor_main
+
+        return doctor_main(argv[1:])
     return main()
 
 
@@ -1178,12 +1188,46 @@ def main() -> int:
                 if ask_human is not None:
                     tools.append(ask_human)
 
+            # M4: mask_add tool (raise-only, next-run) — registered when mask
+            # is enabled (DEEPAGENTS_MASK != 0). Takes effect next session.
+            mask_enabled = os.environ.get("DEEPAGENTS_MASK", "1").strip() != "0"
+            if mask_enabled:
+                mask_tool = make_mask_add_tool()
+                if mask_tool is not None:
+                    tools.append(mask_tool)
+
+            # M4: path-guard denial → HITL permission_denied interrupt (S4).
+            # When HITL is on and permission_denied is enabled, build a callback
+            # that raises an interrupt for in-bounds non-floor denials.
+            # Floor paths and escape denials are never approvable.
+            on_path_denied = None
+            if hitl_conf is not None and hitl_conf.system_interrupt_enabled("permission_denied"):
+                from harness import interrupt as interrupt_mod
+
+                def _make_denied_callback(workspace_path, hitl_cfg):
+                    def _on_denied(target: str, base: str):
+                        import os as _os
+                        relpath = _os.path.relpath(target, base)
+                        # Hard-deny floor or escape paths
+                        req = interrupt_mod.new_request(
+                            interrupt_mod.KIND_APPROVE,
+                            f"Path access denied: '{relpath}' is outside workspace or is a floor path",
+                            source=interrupt_mod.SOURCE_SYSTEM,
+                            default=False,
+                            meta={"path": relpath, "op": "read/write", "tier": "floor/escape"},
+                        )
+                        raise interrupt_mod.raise_interrupt(req)
+                    return _on_denied
+
+                on_path_denied = _make_denied_callback(workspace, hitl_conf)
+
             agent = build_agent(
                 chat_model,
                 workspace,
                 tools=tools,
                 middleware=middleware,
                 checkpointer=checkpointer,
+                on_path_denied=on_path_denied,
             )
             if args.headless:
                 # P2: one-shot batch — run the task(s), emit one JSON result on

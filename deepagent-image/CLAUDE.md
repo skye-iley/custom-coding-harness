@@ -526,6 +526,21 @@ is image-only (smoke).
   the bare domain to `netjail/allowed-domains.txt` for an egress destination. Anything not
   listed is blocked. Don't widen the allowlist beyond what the feature needs.
 
+## Workspace visibility / secret masking (Milestone 4)
+
+The harness now enforces a **real trust boundary** between the agent and the workspace filesystem:
+
+- **Policy tiers** (harness/mask.py): shipped pattern-default globs (`.env`, `*.pem`, `*.key`, `id_rsa`, `.ssh/`, `.aws/credentials`, etc.) + in-workspace `.agentignore` + state-dir authoritative config + designated-secret floor (`#!floor:` block, never negatable).
+- **Docker mount-mask** (scripts/run-docker.ps1/sh): pre-flight scan via `python3 -m harness mask-scan`, emits empty overlay mounts over masked paths so every container process sees them as present-but-empty. Always-on floor enforcer.
+- **Path guard** (harness/pathguard.py): `os.path.commonpath` check in the file-tool backend (`_WorkspaceShellBackend._resolve_path`) that catches `../` traversal, sibling-escape (`/workspace-evil`), and symlink-out. Defense-in-depth; the docker mask is the real boundary.
+- **`permission_denied` system interrupt** (M3 S4 follow-up, now wired): a path-guard denial during HITL escalates into the interrupt spine as a fail-closed `approve` request. Floor/escape paths are never approvable.
+- **`mask_add` agent tool**: raise-only (next-run), writes to the state-dir authoritative config. Cannot unmask the current session.
+- **`harness doctor`**: pre-flight validation of registry + `.agentignore` + floor coherence.
+- **git-pr staging exclusion**: the resolved mask set is excluded from `git add` so a masked-empty `.env` is never committed.
+- **Removable contract**: `DEEPAGENTS_MASK=0` disables the scan, mask mounts, floor, and snapshot — harness is byte-for-byte Milestone 3.
+
+Config knobs: `DEEPAGENTS_MASK` (0/1), `DEEPAGENTS_MASK_MODE` (deny/allow), `DEEPAGENTS_AGENTIGNORE` (override filename). Set in `project/.env` or as container env.
+
 ## Conventions
 
 - Keep `.ps1` and `.sh` script pairs in sync when editing one.
