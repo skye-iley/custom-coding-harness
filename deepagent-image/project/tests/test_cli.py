@@ -326,6 +326,30 @@ def test_cost_totals_unpriced_floor_is_null(monkeypatch):
     assert usd is None and prov is None
 
 
+# --- run banner respects the headless stdout contract ----------------------
+
+def test_run_banner_goes_to_stderr_when_headless(capsys):
+    # Regression: headless run_batch reserves stdout for its single JSON line.
+    # The Model/Workspace/Task/Topic preamble must NOT print to stdout in that
+    # mode (it would prepend non-JSON lines a caller then fails to parse).
+    cli._print_run_banner("prov:model", "/ws", "do a thing", "mytopic", headless=True)
+    cap = capsys.readouterr()
+    assert cap.out == ""  # nothing on the machine-readable channel
+    assert "Model: prov:model" in cap.err
+    assert "Task: do a thing" in cap.err
+    assert "Topic: mytopic" in cap.err
+
+
+def test_run_banner_goes_to_stdout_when_interactive(capsys):
+    # Interactive keeps the human-facing preamble on stdout (unchanged behavior).
+    cli._print_run_banner("prov:model", "/ws", "do a thing", None, headless=False)
+    cap = capsys.readouterr()
+    assert "Model: prov:model" in cap.out
+    assert "Workspace: /ws" in cap.out
+    assert "Topic" not in cap.out  # no topic passed => no Topic line
+    assert cap.err == ""
+
+
 # --- run_repl resilience: a turn error must not crash the session -----------
 
 class _BoomAgent:

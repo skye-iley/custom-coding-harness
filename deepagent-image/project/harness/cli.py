@@ -318,6 +318,24 @@ def _stage(message: str) -> None:
     print(f"[harness] {message}", file=sys.stderr)
 
 
+def _print_run_banner(model, workspace, task, topic, headless: bool) -> None:
+    """The Model/Workspace/Task/Topic preamble.
+
+    Headless (`run_batch`) reserves stdout for the single JSON result line, so in
+    that mode the banner rides stderr with the stage markers — never onto the
+    machine-readable channel a caller parses (`--headless` would otherwise print
+    three lines + a blank ahead of the JSON, breaking a naive stdout parse).
+    Interactive keeps it on stdout as the human-facing preamble, unchanged."""
+    banner = sys.stderr if headless else sys.stdout
+    print(f"Model: {model}", file=banner)
+    print(f"Workspace: {workspace}", file=banner)
+    if task:
+        print(f"Task: {task}", file=banner)
+    if topic:
+        print(f"Topic: {topic}", file=banner)
+    print(file=banner)
+
+
 def _err_detail(exc: Exception) -> str:
     """A one-line, length-capped rendering of an exception's message for a stage
     marker. Collapses whitespace so a multi-line provider payload stays on one
@@ -1111,13 +1129,7 @@ def main() -> int:
             archive_conn, run_id, args.thread_id, provider_name, bare_model, topic=args.topic
         )
 
-    print(f"Model: {model}")
-    print(f"Workspace: {workspace}")
-    if task:
-        print(f"Task: {task}")
-    if args.topic:
-        print(f"Topic: {args.topic}")
-    print()
+    _print_run_banner(model, workspace, task, args.topic, headless=args.headless)
 
     # session.start / session.end bracket the whole run (process scope), so they
     # fire once even though the agent is invoked once per turn within the loop.
