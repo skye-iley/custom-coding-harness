@@ -297,11 +297,17 @@ if ($MaskMode -eq "" -or $MaskMode -eq "1") {
         -v "${StateHostDir}:/project/state" `
         -e "DEEPAGENTS_STATE_DIR=/project/state" `
         deepagent-harness python3 -m harness mask-scan 2>$scanErr.FullName
+    $scanRc = $LASTEXITCODE
     if ((Get-Item $scanErr.FullName).Length -gt 0) {
         Get-Content $scanErr.FullName | ForEach-Object { Write-Host $_ }
     }
     Remove-Item -Force $scanErr.FullName -ErrorAction SilentlyContinue
-    if ($LASTEXITCODE -eq 0 -and $scanOutput) {
+    if ($scanRc -ne 0) {
+        # Fail closed: never launch the agent unmasked when masking is enabled.
+        Write-Error "[mask] FATAL: mask-scan failed (exit $scanRc) - refusing to launch unmasked. Fix the scan or set DEEPAGENTS_MASK=0 to disable masking."
+        exit 1
+    }
+    if ($scanOutput) {
         $emptyFile = New-TemporaryFile
         $emptyDir = New-Item -ItemType Directory -Path ([System.IO.Path]::GetTempPath()) -Name ([System.IO.Path]::GetRandomFileName())
         foreach ($line in $scanOutput) {

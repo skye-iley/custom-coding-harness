@@ -528,12 +528,17 @@ is image-only (smoke).
 
 ## Workspace visibility / secret masking (Milestone 4)
 
+> **Status: in-progress** (`docs/milestones/in-progress/milestone4.md`), code on `feat/milestone_4`,
+> slices A–G landed, not yet merged. The 30 checkable boundary invariants live **separately** in
+> `docs/milestones/in-progress/milestone4_invariants.md` (the test-facing companion) — consult them
+> when adding or reviewing tests around this boundary; they fold into the milestone doc on completion.
+
 The harness now enforces a **real trust boundary** between the agent and the workspace filesystem:
 
 - **Policy tiers** (harness/mask.py): shipped pattern-default globs (`.env`, `*.pem`, `*.key`, `id_rsa`, `.ssh/`, `.aws/credentials`, etc.) + in-workspace `.agentignore` + state-dir authoritative config + designated-secret floor (`#!floor:` block, never negatable).
 - **Docker mount-mask** (scripts/run-docker.ps1/sh): pre-flight scan via `python3 -m harness mask-scan`, emits empty overlay mounts over masked paths so every container process sees them as present-but-empty. Always-on floor enforcer.
 - **Path guard** (harness/pathguard.py): `os.path.commonpath` check in the file-tool backend (`_WorkspaceShellBackend._resolve_path`) that catches `../` traversal, sibling-escape (`/workspace-evil`), and symlink-out. Defense-in-depth; the docker mask is the real boundary.
-- **`permission_denied` system interrupt** (M3 S4 follow-up, now wired): a path-guard denial during HITL escalates into the interrupt spine as a fail-closed `approve` request. Floor/escape paths are never approvable.
+- **`permission_denied` system interrupt** (M3 S4 follow-up — **deferred in v1**, §11.3 v1-honesty): the seam exists (`build_agent(on_path_denied=…)`) but `cli.py` wires `on_path_denied=None`, so a path-guard denial is always a plain refused tool result (`PathGuardDenied`), never an approval offer. The pathguard only blocks outright escapes, which are un-approvable by definition — so there is nothing to approve in v1. Wiring an in-bounds mask-denial approval flow is a follow-up. Invariants 15–17 are aspirational until then; 18 (off-HITL plain refusal) is the v1 behaviour for all denials.
 - **`mask_add` agent tool**: raise-only (next-run), writes to the state-dir authoritative config. Cannot unmask the current session.
 - **`harness doctor`**: pre-flight validation of registry + `.agentignore` + floor coherence.
 - **git-pr staging exclusion**: the resolved mask set is excluded from `git add` so a masked-empty `.env` is never committed.

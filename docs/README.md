@@ -10,11 +10,44 @@ next*, the milestone doc wins.
 
 | Path | What lives here |
 |------|-----------------|
-| `milestones/complete/` | **Built** milestones — shipped scope, kept as a record. |
 | `milestones/planned/` | **Not-yet-built** milestones — the forward plan. |
+| `milestones/in-progress/` | **Being built** milestones — doc + a separate invariants doc + code on a feature branch. |
+| `milestones/complete/` | **Built + merged** milestones — shipped scope, kept as a record. |
 | `features/` | Named feature plans that aren't numbered milestones. |
 | `specs/` | Focused technical specs referenced by the code and design doc. |
 | `archive/` | Superseded compound-engineering artifacts (brainstorms, ideation, plans) kept for history. |
+
+## Milestone lifecycle
+
+A milestone moves through three folders. What each stage carries is deliberate:
+
+1. **`planned/` — docs only.** Just the milestone doc (scope, slices, done-when, implementation
+   reference). No code, no invariants doc.
+2. **`in-progress/` — doc + `<milestone>_invariants.md` + code.** When build starts, the doc moves
+   here and gains a **separate invariants doc** — the properties that MUST hold for the milestone to
+   meet its core goal, each phrased as a checkable assertion. It is kept **separate from the milestone
+   doc on purpose**: invariants drive testing, and keeping them out of the planning/implementation
+   prose lets a test author (or reviewer) read the boundary that must hold without wading through
+   *how* it's built. Code lands on the milestone's feature branch.
+3. **`complete/` — doc only, invariants folded in.** On merge, the doc moves here and the invariants
+   are **folded into the milestone doc as a section** (they no longer need to stand alone for testing).
+   The separate `_invariants.md` file does not follow into `complete/`.
+
+## Planned milestones — `milestones/planned/`
+
+*(Empty — no milestone is currently queued. New forward plans land here as docs only.)*
+
+## In-progress milestones — `milestones/in-progress/`
+
+- **`milestone4.md`** — **Real Trust Boundary**: workspace visibility (`.agentignore` +
+  designated-secret floor + docker mount-mask) + path-guard middleware + `permission_denied`
+  interrupt wiring, backed by the §10 security suite and the §12.1 CI / §12.2 `harness doctor`
+  support tier. Buildable-now v1 (no host-userns dep); bwrap fs-tool jail is the stretch layer.
+  Pulls together `docs/features/workspace_visibility.md` + `design_doc.md` §2/§10/§12. Code is on
+  `feat/milestone_4` (slices A–G landed; not yet merged).
+- **`milestone4_invariants.md`** — the 30 checkable invariants the M4 boundary must satisfy
+  (floor / mask / path-guard / interrupt / git-pr / state-isolation / regression / structural),
+  the test-facing companion to `milestone4.md`. Folds into `milestone4.md` on completion.
 
 ## Complete milestones — `milestones/complete/`
 
@@ -28,14 +61,6 @@ next*, the milestone doc wins.
   (deterministic pause middleware, agent `ask_human` tool, system events) + the two `design_doc.md`
   §12 prereqs it rides on (P1 resilience, P2 headless). **Built** — §0 records what shipped vs.
   deferred (`missing_price`/`permission_denied` events, `shadow` policy, clock-pause, S6 PR-b).
-
-## Planned milestones — `milestones/planned/`
-
-- **`milestone4.md`** — **Real Trust Boundary**: workspace visibility (`.agentignore` +
-  designated-secret floor + docker mount-mask) + path-guard middleware + `permission_denied`
-  interrupt wiring, backed by the §10 security suite and the §12.1 CI / §12.2 `harness doctor`
-  support tier. Buildable-now v1 (no host-userns dep); bwrap fs-tool jail is the stretch layer.
-  Pulls together `docs/features/workspace_visibility.md` + `design_doc.md` §2/§10/§12.
 
 ## Feature plans — `features/`
 

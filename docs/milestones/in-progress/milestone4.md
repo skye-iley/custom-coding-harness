@@ -1,7 +1,9 @@
 # Milestone 4 — Real Trust Boundary (Workspace Visibility + Path Guard)
 
-> **Status:** ✅ Built (v1 — slices A–G). Stretch H (bwrap fs-tool jail) not yet built;
-> deferred v2 (overlayfs view) not yet built. See PR1–PR5 for the shipped commits.
+> **Status:** 🚧 In-progress (v1 — slices A–G built, on `feat/milestone_4`, not yet merged).
+> Stretch H (bwrap fs-tool jail) not yet built; deferred v2 (overlayfs view) not yet built. See
+> PR1–PR5 for the commits. The checkable boundary invariants live separately in
+> `milestone4_invariants.md` (folds in here on completion — see the lifecycle in `docs/README.md`).
 > Promotes the
 > `design_doc.md` **§2 Workspace Visibility & Secret Masking** + **Path Guard** designs, backed by the
 > **§10 security verification suite**, into a built, tested slice — and pulls in the two `design_doc.md`
@@ -455,6 +457,14 @@ passes), so it does not violate the §13 removable seam. Only the *interrupt esc
 HITL-gated.
 
 ### 11.3 `permission_denied` interrupt (slice D) — `agent.py` + `hitl.py`
+
+> **Build status: SEAM ONLY — escalation deferred.** The `on_path_denied` parameter exists on
+> `build_agent` and the backend honours it (`agent.py`), but `cli.main` currently hardcodes
+> `on_path_denied=None` — it does **not** pass a callback even when HITL + the `permission_denied`
+> system interrupt are enabled. So in v1 a path-guard denial is **always** a plain refused tool
+> result (the off-HITL path below); the interrupt escalation, approve-once flow, and audit record
+> are **not active**. The design below is the target; wiring the callback is a follow-up. Invariants
+> 15–17 are aspirational until then.
 
 The denial must become a `GraphInterrupt` when HITL is on, or a plain refused tool result when it is
 off. The seam:

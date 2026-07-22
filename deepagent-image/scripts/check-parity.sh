@@ -37,6 +37,23 @@ for pair in "${pairs[@]}"; do
   echo "$ps1 ($ps1_lines lines) vs $sh ($sh_lines lines) - diff $diff lines"
 done
 
+# Semantic parity (M4 trust boundary): markers that MUST appear in BOTH
+# run-docker.{ps1,sh}. Line-count diff can't catch a fail-closed guard or a
+# mask pre-flight dropped from one script only — this does. Mirror of check-parity.ps1.
+markers=(
+  "harness mask-scan"
+  "refusing to launch unmasked"
+  "DEEPAGENTS_MASK"
+)
+rd_ps1="$ROOT/scripts/run-docker.ps1"
+rd_sh="$ROOT/scripts/run-docker.sh"
+for m in "${markers[@]}"; do
+  if ! grep -qF "$m" "$rd_ps1" || ! grep -qF "$m" "$rd_sh"; then
+    echo "PARITY: marker missing from one of run-docker.{ps1,sh}: '$m'" >&2
+    FAILED=1
+  fi
+done
+
 if [[ $FAILED -ne 0 ]]; then
   echo "PARITY CHECK FAILED" >&2
   exit 1

@@ -175,6 +175,31 @@ try {
     & docker @maskArgs
     if ($LASTEXITCODE -ne 0) { throw "mask resolution check failed" }
 
+    # M4 fail-closed: a mask-scan failure MUST abort the launch, never run unmasked.
+    # (1) mask-scan signals failure via a nonzero exit on a poisoned config; (2) both
+    # launchers key their abort on that. Regression guard for the run-docker.{ps1,sh}
+    # fail-closed contract (a scan error must not degrade to a maskless launch).
+    $scanFailDir = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName())
+    New-Item -ItemType Directory -Force -Path $scanFailDir | Out-Null
+    "secret`n#!mode: allow" | Set-Content -Path (Join-Path $scanFailDir ".agentignore") -Encoding ascii
+    $failArgs = @("run", "--rm") + $NetArgs + $ProxyEnv + @(
+        "-v", "${scanFailDir}:/project/workspace:ro",
+        "-e", "AGENT_WORKSPACE=/project/workspace", "-e", "DEEPAGENTS_STATE_DIR=/tmp/mask-state",
+        "deepagent-harness", "python3", "-m", "harness", "mask-scan")
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    & docker @failArgs 2>$null | Out-Null
+    $scanRc = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
+    Remove-Item -Recurse -Force $scanFailDir -ErrorAction SilentlyContinue
+    if ($scanRc -eq 0) { throw "M4 fail-closed: mask-scan exited 0 on a poisoned .agentignore (expected nonzero)" }
+    foreach ($launcher in @("run-docker.ps1", "run-docker.sh")) {
+        if (-not (Select-String -Path (Join-Path $Root "scripts\$launcher") -Pattern 'refusing to launch unmasked' -Quiet)) {
+            throw "M4 fail-closed: $launcher lost its fail-closed guard"
+        }
+    }
+    Write-Host "M4 fail-closed: mask-scan aborts on failure + launchers guarded - ok"
+
     # Full suite via pytest discovery on the test image. -v names every test case
     # (file::test PASSED/FAILED); -ra recaps non-passing tests at the end. Failures
     # print the failing test id, file:line, and asserted values by default.

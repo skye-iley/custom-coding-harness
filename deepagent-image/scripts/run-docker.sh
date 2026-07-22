@@ -320,7 +320,7 @@ mask_scan() {
     -v "$STATE_HOST_DIR:/project/state" \
     -e DEEPAGENTS_STATE_DIR=/project/state \
     deepagent-harness python3 -m harness mask-scan 2>"$scan_err")" \
-    || { [[ -s "$scan_err" ]] && cat "$scan_err" >&2; rm -f "$scan_err"; return 0; }
+    || { echo "[mask] FATAL: mask-scan failed — refusing to launch unmasked. Fix the scan or set DEEPAGENTS_MASK=0 to disable masking." >&2; [[ -s "$scan_err" ]] && cat "$scan_err" >&2; rm -f "$scan_err"; exit 1; }
   # Surface mask-scan diagnostics (protection-reduction, symlink-escape warnings).
   [[ -s "$scan_err" ]] && cat "$scan_err" >&2
   rm -f "$scan_err"

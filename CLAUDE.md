@@ -5,9 +5,12 @@ coding agent against a mounted workspace, with provider-agnostic model selection
 secret-safe containers.
 
 - `design_doc.md` — full target vision (multi-agent, FSM routing, bubblewrap jail, telemetry-to-PR).
-- `docs/` — spec docs, organized by type. See `docs/README.md` for the full map. In short:
-  - `docs/milestones/complete/` — **built** milestones (`mvp.md`, `milestone1.md`, `milestone2.md`,
-    `milestone3.md`). These record shipped scope; the code is authoritative where they drift.
+- `docs/` — spec docs, organized by type. See `docs/README.md` for the full map, including the
+  **milestone lifecycle** (`planned/` docs-only → `in-progress/` doc + separate `_invariants.md` +
+  code → `complete/` doc-only with invariants folded in). In short:
+  - `docs/milestones/complete/` — **built + merged** milestones (`mvp.md`, `milestone1.md`,
+    `milestone2.md`, `milestone3.md`). These record shipped scope; the code is authoritative where
+    they drift.
     - `mvp.md` — the shipped baseline: one-command containerized Deep Agents coding agent.
     - `milestone1.md` — cost/token visibility + resource caps.
     - `milestone2.md` — present/past memory (fresh-by-default thread + separate on-demand archive).
@@ -15,11 +18,16 @@ secret-safe containers.
     - `milestone3.md` — human-in-the-loop (one `interrupt()` spine, three trigger sources) + the §12
       resilience/headless prereqs it rides on. **Built** — see §0 build status for what shipped vs.
       deferred, and the "Human-in-the-loop" section in `deepagent-image/CLAUDE.md`.
-  - `docs/milestones/planned/` — **not-yet-built** milestones. Wins over `design_doc.md` for
-    "what we build next." *(`milestone4.md` — **Built**: see PR1–PR5. Real Trust Boundary:
-    workspace visibility (`.agentignore`, 3-tier policy, designated-secret floor), docker
-    mount-mask, path-guard middleware, `permission_denied` interrupt wiring, `harness doctor`,
-    CI pipeline, security test suite. Stretch H (bwrap fs-tool jail) is not yet built.)*
+  - `docs/milestones/in-progress/` — **being built** milestones (doc + separate invariants doc + code
+    on a feature branch). *(`milestone4.md` — **Real Trust Boundary**, code on `feat/milestone_4`,
+    slices A–G landed, not yet merged: workspace visibility (`.agentignore`, 3-tier policy,
+    designated-secret floor), docker mount-mask, path-guard middleware, `harness doctor`, CI pipeline,
+    security test suite. Slice D (`permission_denied` interrupt) is **seam-only — escalation deferred**
+    (`cli.main` wires `on_path_denied=None`; a denial is a plain refused tool result in v1). Stretch H
+    (bwrap fs-tool jail) not yet built. `milestone4_invariants.md` — the 30 checkable boundary invariants that drive its tests;
+    folds into `milestone4.md` on completion.)*
+  - `docs/milestones/planned/` — **not-yet-built** milestones (docs only). Wins over `design_doc.md`
+    for "what we build next." *(Currently empty.)*
   - `docs/features/workspace_visibility.md` — **named feature plan** (not a numbered milestone): restrict
     which workspace paths an agent can see (`.agentignore` policy, designated-secret floor, docker-mask
     → bwrap fs-tool jail → optional overlayfs). **Planned** — summarized in `design_doc.md` §2.
