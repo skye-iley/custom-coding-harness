@@ -415,6 +415,12 @@ def resolve(
     # --- step 2 & 3: walk workspace and match ----------------------------------
     entries = _walk_workspace(workspace)
     masked_set: dict[str, str] = {}  # relpath -> tier
+    # Paths a rule EXPLICITLY made visible (a `!`-negation in deny mode, or an
+    # allow-list entry in allow mode). Distinct from a path that is merely
+    # not-directly-matched but sits under a masked dir (implicitly covered by the
+    # dir overlay). Minimization (step 5) must not whole-empty a dir that holds an
+    # explicitly-visible descendant, or the overlay would blank it (§9.3).
+    explicitly_visible: set[str] = set()
 
     # Build ordered rule list with tier info
     all_rules: list[tuple[str, dict]] = []  # (tier, rule)
@@ -460,15 +466,18 @@ def resolve(
         is_masked = False
         matched_tier: str | None = None
         default_ever_matched = False
+        last_was_negation = False
 
         for tier, rule in all_rules:
             if _matches_pattern(rule, relpath, is_dir):
                 if rule["negated"]:
                     is_masked = False
                     matched_tier = None
+                    last_was_negation = True
                 else:
                     is_masked = True
                     matched_tier = tier
+                    last_was_negation = False
                     if tier == TIER_DEFAULT:
                         default_ever_matched = True
 
@@ -478,11 +487,14 @@ def resolve(
             if default_ever_matched:
                 masked_set[relpath] = TIER_DEFAULT
             elif matched_tier == TIER_USER and is_masked:
+                explicitly_visible.add(relpath)  # allow-listed → intentionally visible
                 continue
             else:
                 masked_set[relpath] = matched_tier or TIER_DEFAULT
         elif is_masked and matched_tier:
             masked_set[relpath] = matched_tier
+        elif last_was_negation:
+            explicitly_visible.add(relpath)  # negated → intentionally visible
 
     # --- step 4: floor enforcement ---------------------------------------------
     # Re-check: any negation / allow that targets a floor path is dropped
@@ -498,43 +510,78 @@ def resolve(
                 masked_set[rel] = TIER_FLOOR
 
     # --- step 5: minimize emissions ---------------------------------------------
-    # For each dir in masked_set, check if ALL children are masked.
-    # If so, emit one dir entry and skip children.
+    # Emit the shallowest masked node. A masked dir may be whole-tree-emptied
+    # (one `dir` overlay) ONLY when every descendant is also masked; a masked dir
+    # that holds a visible (e.g. `!`-negated) descendant CANNOT be whole-emptied —
+    # docker overlay is all-or-nothing, so overlaying the dir would hide the
+    # visible child too. For such a dir, emit its masked leaves individually and
+    # leave the dir itself un-overlaid (§9.3). Floor dirs never carry a negation,
+    # so they always whole-emit.
 
     all_masked = dict(masked_set)
-    dir_items = {r for r, t in all_masked.items() if any(e["relpath"] == r and e["is_dir"] for e in entries)}
-    file_items = {r for r, t in all_masked.items() if any(e["relpath"] == r and not e["is_dir"] for e in entries)}
+    entry_by_rel = {e["relpath"]: e for e in entries}
+    all_rels = [e["relpath"] for e in entries]
+
+    def _masked_ancestor_tier(rel: str) -> str | None:
+        """Tier of the nearest masked ANCESTOR dir, else None.
+
+        A dir-only pattern (``.ssh/``) masks only the dir entry; its contents are
+        hidden implicitly by the whole-dir overlay. So an entry with a masked
+        ancestor dir is effectively masked even when no rule matched it directly.
+        """
+        parts = rel.split("/")
+        for i in range(len(parts) - 1, 0, -1):
+            anc = "/".join(parts[:i])
+            if anc in all_masked and entry_by_rel.get(anc, {}).get("is_dir"):
+                return all_masked[anc]
+        return None
+
+    # Effective mask set: directly-masked entries + everything under a masked dir,
+    # minus anything a rule explicitly made visible (negated / allow-listed).
+    eff: dict[str, str] = {}
+    for e in entries:
+        rel = e["relpath"]
+        if rel in explicitly_visible:
+            continue
+        if rel in all_masked:
+            eff[rel] = all_masked[rel]
+            continue
+        anc_tier = _masked_ancestor_tier(rel)
+        if anc_tier is not None:
+            eff[rel] = anc_tier
+
+    def _has_visible_descendant(d: str) -> bool:
+        prefix = d + "/"
+        return any(rel.startswith(prefix) and rel not in eff for rel in all_rels)
+
+    masked_dirs = {r for r in eff if entry_by_rel.get(r, {}).get("is_dir")}
+    whole_dirs = {d for d in masked_dirs if not _has_visible_descendant(d)}
 
     final_entries: list[MaskEntry] = []
     consumed: set[str] = set()
 
-    for d in sorted(dir_items):
+    # Whole-emittable dirs, shallowest first, consuming every masked descendant
+    # (a nested whole-dir is thereby skipped — covered by its ancestor overlay).
+    for d in sorted(whole_dirs, key=lambda p: (p.count("/"), p)):
         if d in consumed:
             continue
-        children = {
-            r for r in file_items
-            if r.startswith(d + "/") and not consumed.intersection({r})
-        }
-        if children:
-            has_visible = False
-            for c in children:
-                if c not in all_masked:
-                    has_visible = True
-                    break
-            if not has_visible:
-                final_entries.append(MaskEntry(relpath=d, type="dir", tier=all_masked[d]))
-                consumed.add(d)
-                consumed.update(children)
-            else:
-                final_entries.append(MaskEntry(relpath=d, type="dir", tier=all_masked[d]))
-                consumed.add(d)
-        else:
-            final_entries.append(MaskEntry(relpath=d, type="dir", tier=all_masked[d]))
-            consumed.add(d)
+        final_entries.append(MaskEntry(relpath=d, type="dir", tier=eff[d]))
+        consumed.add(d)
+        for r in eff:
+            if r.startswith(d + "/"):
+                consumed.add(r)
 
-    for r in sorted(file_items):
-        if r not in consumed:
-            final_entries.append(MaskEntry(relpath=r, type="file", tier=all_masked[r]))
+    # Remaining masked FILES individually (incl. leaves under a partial dir). A
+    # masked dir with an explicitly-visible descendant is deliberately NOT emitted
+    # — overlaying it would blank the visible child; its masked file leaves emit
+    # here instead, leaving the dir itself (and the visible child) un-overlaid.
+    for r in sorted(eff):
+        if r in consumed:
+            continue
+        e = entry_by_rel.get(r)
+        if e and e["is_dir"]:
+            continue
+        final_entries.append(MaskEntry(relpath=r, type="file", tier=eff[r]))
 
     result.masked = final_entries
 

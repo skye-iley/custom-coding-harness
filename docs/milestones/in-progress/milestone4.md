@@ -583,8 +583,11 @@ guard (§11.2) stays on because it has no false positives on legitimate file ops
 **Holds (v1):**
 - A **designated-secret floor path** reads empty to *every* process in the container (the docker mask
   changes the real mounted fs), and no `.agentignore` negation, allow-list entry, or `mask_add` can
-  expose it. Enforced redundantly: (1) docker mask always emits it; (2) the resolver drops any negation
-  of it; (3) the file backend explicitly refuses it (belt-and-suspenders); (4) bwrap never binds it (H).
+  expose it. Enforced redundantly — **v1 has legs (1)+(2)**: (1) docker mask always emits it; (2) the
+  resolver drops any negation of it. **Legs (3)+(4) are aspirational, not built in v1:** (3) a file
+  backend that explicitly refuses a floor path (belt-and-suspenders) — the current backend only checks
+  for workspace escape, so a floor file is protected solely by the docker overlay reading empty; (4)
+  bwrap never binds it (slice H). The "≥3 independent legs" redundancy becomes real with H.
 - A **pattern-default / general masked path** reads empty to every process (same mechanism), whole-tree
   deny-list, "present-but-empty".
 - A **path-guard traversal** (`../`, absolute, in-workspace symlink whose target escapes) is refused for

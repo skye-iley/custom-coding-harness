@@ -13,7 +13,7 @@ Floor (designated-secret tier — the inviolable core)
 2. Floor never negatable. No .agentignore !-negation, allow-list entry, or #!mode: allow can expose a floor path. Resolver drops such entries + warns.
 3. Floor never approvable. permission_denied interrupt never offers approve for a floor path. Hard-deny, no offer.
 4. Floor always emitted. Floor mask mounts applied even in allow mode, even with bwrap off, even when the rest of masking is minimized.
-5. Floor redundant. Enforced ≥3 ways independently: docker mask emits it, resolver drops negations of it, file backend refuses it. No single layer failure exposes it.
+5. Floor redundant. **v1: enforced ≥2 ways independently** — docker mask always emits it, and the resolver drops any negation/allow of it. **The 3rd leg (file backend explicitly refuses a floor path) is NOT built in v1** — `agent.py:_resolve_path` only checks for workspace escape (`pathguard.validate_path`), it has no floor/mask awareness; a floor file simply reads empty because the docker overlay changed the real fs. The backend-refusal leg (and bwrap never-binds-it) is **aspirational — lands with slice H**. So in v1 no single layer failure exposes the floor across the two built legs, but the "≥3 independent" redundancy is not yet real. *(Tested: `TestFloorRedundancy` documents the two working legs and marks the 3rd aspirational.)*
 6. Floor unreachable via alias. Symlink whose realpath targets a floor path is itself masked (no re-exposure through a link).
 
 Mask (pattern-default + general tier)
@@ -56,7 +56,7 @@ State isolation
 
 Regression / config integrity
 
-22. Weakened floor fails CI. Deliberately weakened floor → doctor non-zero → CI red. Boundary cannot silently regress.
+22. Weakened floor fails CI — **partial in v1.** A floor **negation/allow** (a `!`/allow entry targeting a floor path) → doctor **error** → non-zero → CI red (built + tested: `test_doctor_detects_floor_negation`). A floor **removal** (the `#!floor:` block deleted entirely) → doctor **warning** (visible in the summary) but **rc 0 — does NOT fail CI**: doctor cannot know a floor "should" be present when the block is gone, and a legitimately floor-less workspace must still pass. So negation-weakening is caught; deletion-weakening is only surfaced, not blocked. A hard "floor is required → error" gate belongs in a seeded security regression test, not doctor semantics (tracked TODO in `test_doctor_warns_missing_floor`).
 23. doctor reuses runtime resolver. doctor validates via the real mask.resolve — validation cannot drift from enforcement.
 24. Protection reduction is loud. A path masked last launch but absent now → loud warning (snapshot diff). Never silent.
 25. CI keyless. Every tier runs with no provider keys. Security suite runs on every push/PR (host + image tiers).

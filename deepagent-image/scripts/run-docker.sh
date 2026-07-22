@@ -313,12 +313,19 @@ mask_scan() {
   local mask_mode="${DEEPAGENTS_MASK:-$(_env_file_get DEEPAGENTS_MASK)}"
   mask_mode="${mask_mode:-1}"
   [[ "$mask_mode" == "0" ]] && return 0
+  # Forward DEEPAGENTS_MASK_MODE (deny/allow, §13) into the scan container so the
+  # resolver honours it — the scan gets no --env-file, so without this the env
+  # knob is silently ignored and `allow` degrades to `deny` (under-masking).
+  local scan_mode="${DEEPAGENTS_MASK_MODE:-$(_env_file_get DEEPAGENTS_MASK_MODE)}"
+  local mode_env=()
+  [[ -n "$scan_mode" ]] && mode_env=(-e "DEEPAGENTS_MASK_MODE=$scan_mode")
   local scan_output scan_err
   scan_err="$(mktemp)"
   scan_output="$(docker run --rm \
     -v "$MOUNT_WORKSPACE:/project/workspace:ro" \
     -v "$STATE_HOST_DIR:/project/state" \
     -e DEEPAGENTS_STATE_DIR=/project/state \
+    ${mode_env[@]+"${mode_env[@]}"} \
     deepagent-harness python3 -m harness mask-scan 2>"$scan_err")" \
     || { echo "[mask] FATAL: mask-scan failed — refusing to launch unmasked. Fix the scan or set DEEPAGENTS_MASK=0 to disable masking." >&2; [[ -s "$scan_err" ]] && cat "$scan_err" >&2; rm -f "$scan_err"; exit 1; }
   # Surface mask-scan diagnostics (protection-reduction, symlink-escape warnings).

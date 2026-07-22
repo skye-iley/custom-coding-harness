@@ -31,7 +31,7 @@ foreach ($pair in $pairs) {
 # Semantic parity (M4 trust boundary): markers that MUST appear in BOTH
 # run-docker.{ps1,sh}. Line-count diff can't catch a fail-closed guard or a
 # mask pre-flight dropped from one script only - this does. Mirror of check-parity.sh.
-$markers = @("harness mask-scan", "refusing to launch unmasked", "DEEPAGENTS_MASK")
+$markers = @("mask-scan", "refusing to launch unmasked", "DEEPAGENTS_MASK", "DEEPAGENTS_MASK_MODE")
 $rdPs1 = Join-Path (Join-Path $Root "scripts") "run-docker.ps1"
 $rdSh  = Join-Path (Join-Path $Root "scripts") "run-docker.sh"
 foreach ($m in $markers) {

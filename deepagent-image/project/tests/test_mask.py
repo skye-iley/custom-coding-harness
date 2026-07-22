@@ -164,6 +164,7 @@ class TestMaskAdd:
 
 class TestMinimization:
     def test_whole_dir_emitted_for_masked_dir(self, tmp_path):
+        """A fully-masked dir emits ONE dir line; children are not emitted."""
         ws = _make_workspace(tmp_path, {
             "vendor/private/pkg.py": "secret",
             "vendor/private/data.txt": "also secret",
@@ -172,7 +173,33 @@ class TestMinimization:
         ignore.write_text("vendor/private/\n", encoding="utf-8")
         result = mask.resolve(str(ws), str(tmp_path / "state"))
         types = {(e.relpath, e.type) for e in result.masked}
-        assert ("vendor/private", "dir") in types or True
+        assert ("vendor/private", "dir") in types
+        # Minimized: the children are covered by the dir overlay, not emitted.
+        rels = {e.relpath for e in result.masked}
+        assert "vendor/private/pkg.py" not in rels
+        assert "vendor/private/data.txt" not in rels
+
+    def test_masked_dir_with_negated_child_emits_per_leaf(self, tmp_path):
+        """Regression: a masked dir with a visible (negated) descendant must NOT
+        be whole-tree-emptied — docker overlay is all-or-nothing, so a `dir`
+        overlay would blank the visible child too (§9.3, invariant 8). The masked
+        leaves must emit individually and the dir itself must NOT be emitted."""
+        ws = _make_workspace(tmp_path, {
+            ".ssh/id_rsa": "PRIVATE",
+            ".ssh/config": "Host example",
+        })
+        # .ssh/ is a shipped pattern-default (dir-only); negate config to keep it visible.
+        (ws / ".agentignore").write_text("!.ssh/config\n", encoding="utf-8")
+        result = mask.resolve(str(ws), str(tmp_path / "state"))
+        emitted = {(e.relpath, e.type) for e in result.masked}
+        rels = {e.relpath for e in result.masked}
+        # The visible negated child is NOT in the resolved mask set...
+        assert ".ssh/config" not in rels
+        # ...and — the bug — the whole `.ssh` dir must NOT be emitted as an overlay,
+        # or the visible child would read empty at runtime.
+        assert (".ssh", "dir") not in emitted
+        # The masked sibling still hides, emitted as an individual file leaf.
+        assert (".ssh/id_rsa", "file") in emitted
 
 
 class TestAllowMode:
@@ -200,6 +227,65 @@ class TestAllowMode:
         deny_result = mask.resolve(str(ws), str(tmp_path / "state"), mode="deny")
         assert ".env" in {e.relpath for e in allow_result.masked}
         assert ".env" in {e.relpath for e in deny_result.masked}
+
+
+class TestFloorRedundancy:
+    """Invariant 5: floor enforced ≥2 ways (3rd leg aspirational).
+
+    Two legs verified here:
+      1. Docker mask emits: floor paths always appear in the resolved mask set
+         regardless of mode (deny or allow) or in-workspace negation.
+      2. Resolver drops negations: negations of floor paths produce a warning
+         and the floor path stays masked.
+
+    The third leg — file backend refuses floor paths in _resolve_path —
+    is NOT yet implemented (the backend only checks workspace escape, not
+    floor membership). Invariant doc should reflect 2 legs, not 3, until
+    the backend leg ships.
+    """
+
+    def test_floor_emitted_in_deny_mode(self, tmp_path):
+        ws = _make_workspace(tmp_path, {"id_rsa": "PRIVATE KEY", ".env": "SECRET"})
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / "agentignore").write_text("#!floor:\nid_rsa\n", encoding="utf-8")
+        result = mask.resolve(str(ws), str(state_dir), mode="deny")
+        floor_paths = {e.relpath for e in result.masked if e.tier == mask.TIER_FLOOR}
+        assert "id_rsa" in floor_paths
+        assert ".env" in {e.relpath for e in result.masked}  # pattern-default still masked
+
+    def test_floor_emitted_in_allow_mode(self, tmp_path):
+        """Allow mode must still mask floor paths (invariant 4: floor always emitted)."""
+        ws = _make_workspace(tmp_path, {"id_rsa": "PRIVATE KEY", "app.py": "print(1)"})
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / "agentignore").write_text("#!floor:\nid_rsa\n", encoding="utf-8")
+        result = mask.resolve(str(ws), str(state_dir), mode="allow")
+        floor_paths = {e.relpath for e in result.masked if e.tier == mask.TIER_FLOOR}
+        assert "id_rsa" in floor_paths
+        # app.py is allow-listed (no neg rule means it isn't)
+        # In allow mode without an allow-list, everything except pattern-defaults is masked.
+        assert "app.py" in {e.relpath for e in result.masked}
+
+    def test_floor_negation_dropped_with_warning(self, tmp_path):
+        """Negation of a floor path is dropped + warning emitted (leg 2)."""
+        ws = _make_workspace(tmp_path, {"id_rsa": "PRIVATE KEY"})
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / "agentignore").write_text("#!floor:\nid_rsa\n", encoding="utf-8")
+        (ws / ".agentignore").write_text("!id_rsa\n", encoding="utf-8")
+        result = mask.resolve(str(ws), str(state_dir))
+        assert "id_rsa" in {e.relpath for e in result.masked}
+        assert any("negation for floor path" in w for w in result.warnings)
+
+    def test_floor_emitted_even_without_agentignore(self, tmp_path):
+        """Floor paths are emitted even when no in-workspace .agentignore exists."""
+        ws = _make_workspace(tmp_path, {"id_rsa": "PRIVATE KEY"})
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / "agentignore").write_text("#!floor:\nid_rsa\n", encoding="utf-8")
+        result = mask.resolve(str(ws), str(state_dir))
+        assert "id_rsa" in {e.relpath for e in result.masked}
 
 
 class TestFloorWarning:

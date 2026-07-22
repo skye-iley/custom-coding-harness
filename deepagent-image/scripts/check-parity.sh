@@ -41,9 +41,10 @@ done
 # run-docker.{ps1,sh}. Line-count diff can't catch a fail-closed guard or a
 # mask pre-flight dropped from one script only — this does. Mirror of check-parity.ps1.
 markers=(
-  "harness mask-scan"
+  "mask-scan"
   "refusing to launch unmasked"
   "DEEPAGENTS_MASK"
+  "DEEPAGENTS_MASK_MODE"
 )
 rd_ps1="$ROOT/scripts/run-docker.ps1"
 rd_sh="$ROOT/scripts/run-docker.sh"

@@ -129,7 +129,7 @@ def doctor_main(argv: list[str]) -> int:
         floor_count = sum(1 for e in mask_result.masked if e.tier == "floor")
         if floor_count == 0:
             records.append((
-                "info",
+                "warning",
                 "no designated-secret floor paths configured — "
                 "relying on pattern-defaults. Add #!floor: block to state-dir agentignore to enable."
             ))

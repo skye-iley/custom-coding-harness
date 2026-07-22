@@ -292,11 +292,29 @@ if ($MaskMode -eq "" -or $MaskMode -eq "1") {
     # Surface mask-scan diagnostics (protection-reduction / symlink warnings) instead
     # of dropping stderr; stdout stays the parseable grammar.
     $scanErr = New-TemporaryFile
-    $scanOutput = & docker run --rm `
-        -v "${MountWorkspace}:/project/workspace:ro" `
-        -v "${StateHostDir}:/project/state" `
-        -e "DEEPAGENTS_STATE_DIR=/project/state" `
-        deepagent-harness python3 -m harness mask-scan 2>$scanErr.FullName
+    # Forward DEEPAGENTS_MASK_MODE (deny/allow, §13) into the scan container so the
+    # resolver honours it — the scan gets no --env-file, so without this the env
+    # knob is silently ignored and `allow` degrades to `deny` (under-masking).
+    $ScanMode = $env:DEEPAGENTS_MASK_MODE
+    if ([string]::IsNullOrEmpty($ScanMode)) {
+        $modeLine = Select-String -Path $EnvFile -Pattern '^\s*DEEPAGENTS_MASK_MODE\s*=' -ErrorAction SilentlyContinue | Select-Object -Last 1
+        if ($modeLine) {
+            $ScanMode = ($modeLine.Line -replace '^\s*DEEPAGENTS_MASK_MODE\s*=', '').Trim().Trim('"').Trim("'")
+        }
+    }
+    $ScanModeArgs = @()
+    if (-not [string]::IsNullOrEmpty($ScanMode)) {
+        $ScanModeArgs = @("-e", "DEEPAGENTS_MASK_MODE=$ScanMode")
+    }
+    $scanRunArgs = @(
+        "run", "--rm",
+        "-v", "${MountWorkspace}:/project/workspace:ro",
+        "-v", "${StateHostDir}:/project/state",
+        "-e", "DEEPAGENTS_STATE_DIR=/project/state"
+    ) + $ScanModeArgs + @(
+        "deepagent-harness", "python3", "-m", "harness", "mask-scan"
+    )
+    $scanOutput = & docker @scanRunArgs 2>$scanErr.FullName
     $scanRc = $LASTEXITCODE
     if ((Get-Item $scanErr.FullName).Length -gt 0) {
         Get-Content $scanErr.FullName | ForEach-Object { Write-Host $_ }
