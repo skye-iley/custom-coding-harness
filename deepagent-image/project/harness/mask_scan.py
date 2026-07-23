@@ -67,13 +67,6 @@ def mask_scan_main(argv: list[str]) -> int:
         for w in result.warnings:
             print(f"mask-scan: warning: {w}", file=sys.stderr)
 
-    if result.protection_reduced:
-        print(
-            f"mask-scan: protection reduced — {len(result.reduced_paths)} path(s) "
-            f"no longer masked: {', '.join(result.reduced_paths)}",
-            file=sys.stderr,
-        )
-
     return 0
 
 

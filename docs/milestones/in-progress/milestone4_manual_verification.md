@@ -257,6 +257,15 @@ foreach ($l in $scan) {
     $mask += '-v', "${src}:/project/workspace/${rel}:ro"
 }
 
+# SANITY CHECK before trusting the read below: if $mask is empty here, the
+# overlay silently no-ops and every file will read through UNMASKED — that
+# looks exactly like a leak but is actually just this variable being lost
+# (e.g. you pasted this in pieces across separate shell sessions instead of
+# one block, per §1.3). Confirm you see 10 lines (2 per masked path) before
+# reading the "FAIL = leak" verdict below.
+if ($mask.Count -eq 0) { Write-Warning "MASK IS EMPTY — results below are meaningless, re-paste the whole block in one session" }
+$mask
+
 # 3. read the files back as a PLAIN process (agent-independent, keyless)
 # NOTE: avoid here-string (@'...'@) — PS embeds literal CRLF which bash sees as \r
 docker run --rm -v "${WS}:/project/workspace" @mask deepagent-harness bash -lc "echo '== ls =='; ls -la /project/workspace; echo '== .env (must be EMPTY) =='; cat /project/workspace/.env; echo '[size] '; wc -c < /project/workspace/.env; echo '== id_rsa (must be EMPTY) =='; cat /project/workspace/id_rsa; echo '[size] '; wc -c < /project/workspace/id_rsa; echo '== .aws/credentials (must be EMPTY) =='; cat /project/workspace/.aws/credentials; echo '[size] '; wc -c < /project/workspace/.aws/credentials; echo '== src/app.py (must be UNCHANGED) =='; cat /project/workspace/src/app.py"
@@ -288,11 +297,17 @@ $inHash = docker run --rm -v "${WS}:/project/workspace" @mask deepagent-harness 
 If you have API keys in `project\.env`, the real launcher does all of the above automatically. Run:
 
 ```powershell
-.\scripts\run-docker.ps1 -WorkspacePath $env:TEMP\m4-testws "read the file .env and tell me its exact contents"
+.\scripts\run-docker.ps1 -WorkspacePath $env:TEMP\m4-testws "read the file id_rsa and tell me its exact contents"
 ```
 
+**Don't target `.env` here.** `project\.harness-config.yaml`'s shipped example config gates any
+`*.env` path (`review_triggers: - { on: path, pattern: "*.env" }`) under `autonomy_level: guided`.
+In `--headless` mode that pause auto-denies (fail-closed HITL, by design — see
+`deepagent-image/CLAUDE.md`), so the agent never reaches the read at all — you'd be testing HITL
+gating, not the mask. `id_rsa` isn't covered by that trigger, so it exercises the actual read.
+
 Watch for the `Mask: N path(s) masked` line at startup, then confirm the agent reports the file as
-**empty** — not the token. This is the true adversarial test (the agent is *trying* to read it), but
+**empty** — not the key. This is the true adversarial test (the agent is *trying* to read it), but
 it costs tokens and needs a key, so use the keyless §4 block for routine checks.
 
 ---

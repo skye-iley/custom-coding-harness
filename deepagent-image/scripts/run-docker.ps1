@@ -314,8 +314,17 @@ if ($MaskMode -eq "" -or $MaskMode -eq "1") {
     ) + $ScanModeArgs + @(
         "deepagent-harness", "python3", "-m", "harness", "mask-scan"
     )
+    # Native command stderr must not become a terminating error under
+    # ErrorActionPreference=Stop (see Remove-ContainerIfExists above) — mask-scan
+    # writes EXPECTED warnings to stderr (protection-reduction, floor-negation),
+    # and without this override the launcher would crash on any of them instead
+    # of printing and continuing per invariant 24 ("protection reduction is loud",
+    # not fatal).
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     $scanOutput = & docker @scanRunArgs 2>$scanErr.FullName
     $scanRc = $LASTEXITCODE
+    $ErrorActionPreference = $prevEap
     if ((Get-Item $scanErr.FullName).Length -gt 0) {
         Get-Content $scanErr.FullName | ForEach-Object { Write-Host $_ }
     }
