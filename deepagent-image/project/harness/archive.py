@@ -27,13 +27,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from harness._compat import compat_import
+
 # Only ArchiveMiddleware needs the real AgentMiddleware base; fall back to
 # `object` when langchain is absent so `import harness.archive` still works for
 # the stdlib-only host tests (same pattern as cost.py).
-try:  # pragma: no cover - exercised differently in-container vs. test host
-    from langchain.agents.middleware.types import AgentMiddleware
-except ModuleNotFoundError:  # pragma: no cover
-    AgentMiddleware = object  # type: ignore[assignment,misc]
+AgentMiddleware = compat_import("langchain.agents.middleware.types", "AgentMiddleware")  # type: ignore[assignment,misc]
 
 # Env knob: DEEPAGENTS_ARCHIVE=0 disables the past archive entirely (§3).
 ARCHIVE_ENV = "DEEPAGENTS_ARCHIVE"

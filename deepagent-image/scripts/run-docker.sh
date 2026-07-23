@@ -60,17 +60,7 @@ HOST_GW=(--add-host=host.docker.internal:host-gateway)
 # gather its inputs (uname / /proc / docker info) and act on the result.
 USER_FLAGS=()
 HOME_DIR="/home/agent"
-_uname_s="$(uname -s 2>/dev/null || echo unknown)"
-_is_wsl="$(_detect_is_wsl)"
-# docker info distinguishes a native-Linux engine from Docker Desktop, and is
-# only consulted on the auto-detect path for a non-WSL Linux host — skip the
-# daemon round-trip when MAP_HOST_USER is explicit, or on macOS/WSL where the
-# uname/proc checks already decide the outcome.
-_docker_os="unknown"
-if [[ -z "${MAP_HOST_USER:-}" && "$_uname_s" == "Linux" && "$_is_wsl" != "1" ]]; then
-  _docker_os="$(docker info --format '{{.OperatingSystem}}' 2>/dev/null || echo unknown)"
-fi
-if [[ "$(_should_map_host_user "$_uname_s" "$_is_wsl" "$_docker_os" "${MAP_HOST_USER:-}")" == "1" ]]; then
+if [[ "$(_should_map_host_user_auto)" == "1" ]]; then
   HOST_UID="${HOST_UID:-$(id -u)}"
   HOST_GID="${HOST_GID:-$(id -g)}"
 fi

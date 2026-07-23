@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Callable
 
 from harness import audit, interrupt
+from harness._compat import compat_import
 from harness.config import Config, match_triggers
 from harness.interrupt import (
     InterruptRequest,
@@ -40,10 +41,7 @@ from harness.interrupt import (
     render,
 )
 
-try:  # image-only base; degrade to object on a bare host (mirrors cost.py)
-    from langchain.agents.middleware.types import AgentMiddleware
-except ModuleNotFoundError:  # pragma: no cover - off-image
-    AgentMiddleware = object  # type: ignore[assignment,misc]
+AgentMiddleware = compat_import("langchain.agents.middleware.types", "AgentMiddleware")  # type: ignore[assignment,misc]
 
 
 @dataclass

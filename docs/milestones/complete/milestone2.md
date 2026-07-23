@@ -213,15 +213,10 @@ core invariant (Def-of-Done 4).
 
 ### 2.5 Removable contract
 
-Like the Milestone 1 cost tracker, this is additive middleware + optional wiring:
-- `ArchiveMiddleware` is appended only when archiving is enabled (default on; `DEEPAGENTS_ARCHIVE=0`
-  to disable). When absent, no `past.sqlite` is created and nothing taps the turns.
-- Delete `harness/archive.py`, drop its `cli.py` wiring, and restore the `--thread-id` default to
-  `"default"` → the harness is byte-for-byte Milestone 1. The smoke test must pass in both states.
-
-The §2.6 lifecycle subcommands are keyless read/delete tools over the DBs; deleting `memadmin.py`
-with `archive.py` restores the byte-for-byte-M1 contract too (the `threads` half then simply has no
-`past.sqlite` to inspect — `checkpoints.sqlite` is M1's own).
+This milestone follows the [removable contract](../../docs/README.md#glossary) — `DEEPAGENTS_ARCHIVE=0` 
+disables M2, falling back to M1. Delete `harness/archive.py`, `harness/memadmin.py` and their 
+`cli.py` wiring, restore the `--thread-id` default to `"default"`, and the harness is 
+byte-for-byte Milestone 1.
 
 ### 2.6 Memory lifecycle — inspect & prune both stores
 

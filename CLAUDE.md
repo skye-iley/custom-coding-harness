@@ -85,6 +85,36 @@ piped/non-interactive stdin collapses to a single turn for CI/smoke. See `docs/m
 
 `.sh` equivalents exist for each script — **keep the `.ps1` and `.sh` pairs in sync** when editing one.
 
+### Script Pair Maintenance (`.ps1` ↔ `.sh`)
+
+This repo maintains **parallel PowerShell and Bash scripts** for cross-platform compatibility:
+- `build.ps1` ↔ `build.sh`
+- `verify.ps1` ↔ `verify.sh`
+- `smoke.ps1` ↔ `smoke.sh`
+- `run-docker.ps1` ↔ `run-docker.sh`
+
+**Sync rule:** When you edit one, **keep the pair in sync**. Both must implement the 
+same logic and support the same flags. This is a known maintenance burden; a 
+cross-platform wrapper was considered but rejected due to the depth of Windows/Unix 
+differences (file paths, robocopy vs. rsync, registry vs. env var probing, etc.).
+
+**Known sync points (track when editing):**
+- `run-docker.ps1` ↔ `run-docker.sh`: ephemeral workspace copy, NetJail setup, state-dir derivation.
+- `smoke.ps1` ↔ `smoke.sh`: pytest invocation, image staging, artifact handling.
+- Both: launcher environment defaults (CPUS, MEMORY, PIDS_LIMIT).
+
+**Verification:** `./scripts/check-parity.sh` (bash) / `.\scripts\check-parity.ps1` (ps1) 
+validates critical sections match (see script for the parity rules).
+
+### Launcher environment (host-side, **not** `.env`)
+
+Host-side launcher variables (MAP_HOST_USER, CPUS, MEMORY, NET_JAIL, etc.) are 
+documented in detail in **[deepagent-image/CLAUDE.md — Launcher environment](./deepagent-image/CLAUDE.md#launcher-environment-host-side-not-env)**.
+
+The key distinction: `.env` is container-bound (via `--env-file`); launcher vars 
+are read by the host shell *before* `docker run` and affect container startup 
+parameters only.
+
 ## Hard rules
 
 - **Secrets live in `deepagent-image/project/.env` only.** It is gitignored and never `COPY`ed into

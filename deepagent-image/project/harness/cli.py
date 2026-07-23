@@ -57,6 +57,19 @@ from harness.workflows import (
 )
 
 
+def _env_defaults() -> dict:
+    """Build argparse defaults from environment variables."""
+    return {
+        "thread_id": os.getenv("DEEPAGENTS_THREAD_ID")
+                     or f"session-{datetime.now():%Y%m%d-%H%M%S}",
+        "topic": os.getenv("DEEPAGENTS_TOPIC") or None,
+        "headless": os.getenv("DEEPAGENTS_HEADLESS", "").strip().lower() in _TRUTHY,
+        "max_cost": _env_float("DEEPAGENTS_MAX_COST"),
+        "max_tokens": _env_int("DEEPAGENTS_MAX_TOKENS"),
+        "workspace": os.getenv("AGENT_WORKSPACE", str(Path.cwd() / "workspace")),
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a LangChain Deep Agents coding harness.")
     parser.add_argument("task", nargs="*", help="Task for the agent. Defaults to a workspace inspection.")
@@ -65,42 +78,37 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Model spec, for example 'openai:gpt-5.5' or 'google_genai:gemini-3.5-flash'.",
     )
+    defaults = _env_defaults()
+    parser.set_defaults(**defaults)
+
     parser.add_argument(
         "--workspace",
-        default=os.getenv("AGENT_WORKSPACE", str(Path.cwd() / "workspace")),
         help="Directory exposed to the coding agent.",
     )
     parser.add_argument(
         "--thread-id",
-        default=os.getenv("DEEPAGENTS_THREAD_ID") or f"session-{datetime.now():%Y%m%d-%H%M%S}",
         help="Present thread id. Fresh per run unless set; pass a prior id to resume it.",
     )
     parser.add_argument(
         "--topic",
-        default=os.getenv("DEEPAGENTS_TOPIC") or None,
         help="Continual-topic label for this run; scopes recall by default (also DEEPAGENTS_TOPIC).",
     )
     parser.add_argument("--stream", action="store_true", help="Print raw LangGraph stream events.")
     parser.add_argument(
         "--headless",
         action="store_true",
-        default=os.getenv("DEEPAGENTS_HEADLESS", "").strip().lower() in _TRUTHY,
         help="One-shot batch mode: run the task(s) to completion, emit one JSON "
         "result on stdout, and exit (no interactive prompt). Interrupts resolve "
         "by the fail-closed headless policy (also DEEPAGENTS_HEADLESS).",
     )
-    # Cost/token tracker (Milestone 1). Budgets default unset = no ceiling; env
-    # fallbacks let the container be capped via --env-file without editing argv.
     parser.add_argument(
         "--max-cost",
         type=float,
-        default=_env_float("DEEPAGENTS_MAX_COST"),
         help="End the session once cumulative USD cost crosses this (also DEEPAGENTS_MAX_COST).",
     )
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=_env_int("DEEPAGENTS_MAX_TOKENS"),
         help="End the session once cumulative tokens cross this (also DEEPAGENTS_MAX_TOKENS).",
     )
     return parser.parse_args()

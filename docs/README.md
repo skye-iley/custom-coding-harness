@@ -83,3 +83,16 @@ fixtures, and the `runtime`/`test` Dockerfile split). Not live guidance — read
 - `2026-06-25-test-suite-revamp-ideation.html` — ideation (ce-ideate).
 - `2026-06-25-shared-test-infra-requirements.md` — requirements brainstorm (ce-brainstorm).
 - `2026-06-25-shared-test-infra-multistage-plan.md` — implementation plan (ce-plan).
+
+## Glossary
+
+**Removable contract:** A feature whose code can be deleted and the harness 
+reverts to prior-milestone behavior *byte-for-byte*, with no residual coupling. 
+Examples:
+  - `DEEPAGENTS_MASK=0` disables M4 masking, leaving M3 unchanged.
+  - `DEEPAGENTS_ARCHIVE=0` disables M2 past archive, falling back to M1.
+  - Deleting `archive.py` + `memadmin.py` and rewiring defaults reverts to M1.
+
+Removable contracts ensure features can be disabled or removed without leaving 
+dead code or partial state behind. Each milestone doc lists its removable contract 
+as part of "Def-of-Done."
