@@ -11,6 +11,8 @@ from deepagents.backends import LocalShellBackend
 from langchain.agents.middleware.types import AgentMiddleware
 
 from harness.loaders import _read_optional_text
+from harness.mask import append_deny
+from harness.pathguard import PathGuardDenied, validate_path
 from harness.providers import PROVIDERS
 
 DEFAULT_TASK = "inspect workspace, summarize structure."
@@ -179,7 +181,7 @@ class _WorkspaceShellBackend(LocalShellBackend):
     (see tests/test_agent.py::test_backend_guards_upstream_resolve_path).
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, on_path_denied=None, **kwargs):
         if not any(
             "_resolve_path" in klass.__dict__ for klass in LocalShellBackend.__mro__
         ):
@@ -188,6 +190,7 @@ class _WorkspaceShellBackend(LocalShellBackend):
                 "path de-nesting in _WorkspaceShellBackend is dead. Re-check the "
                 "upstream backend API and update the override."
             )
+        self._on_path_denied = on_path_denied
         super().__init__(*args, **kwargs)
 
     def _resolve_path(self, key: str) -> Path:
@@ -196,7 +199,18 @@ class _WorkspaceShellBackend(LocalShellBackend):
             marker = "/" + str(self.cwd).lstrip("/")
             if vpath == marker or vpath.startswith(marker + "/"):
                 key = vpath[len(marker):] or "/"
-        return super()._resolve_path(key)
+        resolved = super()._resolve_path(key)
+        base = self.root_dir if hasattr(self, "root_dir") else str(self.cwd)
+        if base:
+            try:
+                validate_path(str(resolved), base)
+            except PathGuardDenied:
+                if self._on_path_denied:
+                    if self._on_path_denied(str(resolved), base) is not True:
+                        raise
+                else:
+                    raise
+        return resolved
 
 
 def make_recall_past_tool(conn, default_topic: str | None):
@@ -273,6 +287,52 @@ def make_refresh_workspace_tool(workspace: Path):
     return refresh_workspace
 
 
+def make_mask_add_tool(state_dir: str | Path | None = None):
+    """Build the `mask_add` agent tool (raise-only, next-run).
+
+    Lets the model add a path to the state-dir authoritative config so it is
+    masked on the *next* run. Cannot unmask a path in the current session.
+    Gated behind DEEPAGENTS_MASK != 0. Returns None if langchain's tool
+    decorator is unavailable.
+    """
+    from langchain_core.tools import tool
+
+    from harness.mask import append_deny, append_floor
+
+    if state_dir is None:
+        sd = os.environ.get("DEEPAGENTS_STATE_DIR", "")
+        state_dir = Path(sd) if sd else None
+
+    @tool
+    def mask_add(path: str, tier: str = "deny") -> str:
+        """Add PATH to the mask set (state-dir authoritative config).
+
+        Takes effect on the NEXT run — the current session's mask is frozen
+        at launch. `tier` is "deny" (pattern-default/general tier) or "floor"
+        (designated-secret tier, never negatable). Floor is for credentials
+        that must never leak; deny is for everything else. The operator can
+        always override next launch by editing .agentignore.
+        """
+        import os
+        from pathlib import Path
+
+        sd = state_dir
+        if sd is None:
+            raw = os.environ.get("DEEPAGENTS_STATE_DIR", "")
+            sd = Path(raw) if raw else None
+        if sd is None:
+            return "mask_add: DEEPAGENTS_STATE_DIR not set — cannot persist"
+        sd = Path(sd)
+        sd.mkdir(parents=True, exist_ok=True)
+        if tier == "floor":
+            append_floor(str(sd), path)
+            return f"added floor path '{path}' — will be masked next run (never negatable)"
+        append_deny(str(sd), path)
+        return f"added deny path '{path}' — will be masked next run"
+
+    return mask_add
+
+
 def resolve_workspace(raw: str) -> Path:
     workspace = Path(raw).expanduser().resolve()
     # The image sets DEEPAGENTS_IN_CONTAINER=1 (see Dockerfile). An explicit
@@ -331,6 +391,7 @@ def build_agent(
     tools: list | None = None,
     middleware: list[AgentMiddleware] | None = None,
     checkpointer: Any = None,
+    on_path_denied: callable | None = None,
 ):
     workspace.mkdir(parents=True, exist_ok=True)
     backend = _WorkspaceShellBackend(
@@ -338,6 +399,7 @@ def build_agent(
         virtual_mode=True,
         inherit_env=False,
         env=_agent_shell_env(),
+        on_path_denied=on_path_denied,
     )
 
     agents_md = _read_optional_text(Path.cwd() / "AGENTS.md")

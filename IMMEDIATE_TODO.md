@@ -1,9 +1,11 @@
-# IMMEDIATE_TODO — Fix: native-Linux bind-mount permission failure (sqlite checkpointer)
+# ✅ COMPLETED — Native-Linux Bind-Mount Permission Fix
 
-Status: **built.** Auto host-uid mapping on native Linux (`scripts/lib/hostmap.sh` +
-`run-docker.sh`), launcher-knobs docs, and the decision-matrix unit test
-(`project/tests/test_hostmap.py`) are in. Priority was: high — harness did not run out-of-the-box
-on native (non-WSL) Linux.
+**Completed:** 2026-07-23  
+**Shipped in:** feat/milestone_4 slices A–G (not yet merged to main)  
+**Test coverage:** `project/tests/test_hostmap.py` (decision matrix + unit tests)  
+**Implementation:** `scripts/lib/hostmap.sh`, `run-docker.sh` lines 63–76, `run-docker.ps1` (Windows no-op)
+
+This document records the problem, design, and solution for archival. The fix is production-ready.
 
 ## Symptom
 

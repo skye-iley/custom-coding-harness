@@ -27,6 +27,7 @@ from harness.agent import (
     DEFAULT_TASK,
     build_agent,
     final_message_text,
+    make_mask_add_tool,
     make_recall_past_tool,
     make_refresh_workspace_tool,
     resolve_workspace,
@@ -56,6 +57,19 @@ from harness.workflows import (
 )
 
 
+def _env_defaults() -> dict:
+    """Build argparse defaults from environment variables."""
+    return {
+        "thread_id": os.getenv("DEEPAGENTS_THREAD_ID")
+                     or f"session-{datetime.now():%Y%m%d-%H%M%S}",
+        "topic": os.getenv("DEEPAGENTS_TOPIC") or None,
+        "headless": os.getenv("DEEPAGENTS_HEADLESS", "").strip().lower() in _TRUTHY,
+        "max_cost": _env_float("DEEPAGENTS_MAX_COST"),
+        "max_tokens": _env_int("DEEPAGENTS_MAX_TOKENS"),
+        "workspace": os.getenv("AGENT_WORKSPACE", str(Path.cwd() / "workspace")),
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a LangChain Deep Agents coding harness.")
     parser.add_argument("task", nargs="*", help="Task for the agent. Defaults to a workspace inspection.")
@@ -64,42 +78,37 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Model spec, for example 'openai:gpt-5.5' or 'google_genai:gemini-3.5-flash'.",
     )
+    defaults = _env_defaults()
+    parser.set_defaults(**defaults)
+
     parser.add_argument(
         "--workspace",
-        default=os.getenv("AGENT_WORKSPACE", str(Path.cwd() / "workspace")),
         help="Directory exposed to the coding agent.",
     )
     parser.add_argument(
         "--thread-id",
-        default=os.getenv("DEEPAGENTS_THREAD_ID") or f"session-{datetime.now():%Y%m%d-%H%M%S}",
         help="Present thread id. Fresh per run unless set; pass a prior id to resume it.",
     )
     parser.add_argument(
         "--topic",
-        default=os.getenv("DEEPAGENTS_TOPIC") or None,
         help="Continual-topic label for this run; scopes recall by default (also DEEPAGENTS_TOPIC).",
     )
     parser.add_argument("--stream", action="store_true", help="Print raw LangGraph stream events.")
     parser.add_argument(
         "--headless",
         action="store_true",
-        default=os.getenv("DEEPAGENTS_HEADLESS", "").strip().lower() in _TRUTHY,
         help="One-shot batch mode: run the task(s) to completion, emit one JSON "
         "result on stdout, and exit (no interactive prompt). Interrupts resolve "
         "by the fail-closed headless policy (also DEEPAGENTS_HEADLESS).",
     )
-    # Cost/token tracker (Milestone 1). Budgets default unset = no ceiling; env
-    # fallbacks let the container be capped via --env-file without editing argv.
     parser.add_argument(
         "--max-cost",
         type=float,
-        default=_env_float("DEEPAGENTS_MAX_COST"),
         help="End the session once cumulative USD cost crosses this (also DEEPAGENTS_MAX_COST).",
     )
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=_env_int("DEEPAGENTS_MAX_TOKENS"),
         help="End the session once cumulative tokens cross this (also DEEPAGENTS_MAX_TOKENS).",
     )
     return parser.parse_args()
@@ -1060,6 +1069,14 @@ def dispatch(argv: list[str]) -> int:
         from harness.memadmin import memadmin_main
 
         return memadmin_main(argv)
+    if argv and argv[0] == "mask-scan":
+        from harness.mask_scan import mask_scan_main
+
+        return mask_scan_main(argv[1:])
+    if argv and argv[0] == "doctor":
+        from harness.doctor import doctor_main
+
+        return doctor_main(argv[1:])
     return main()
 
 
@@ -1178,12 +1195,27 @@ def main() -> int:
                 if ask_human is not None:
                     tools.append(ask_human)
 
+            # M4: mask_add tool (raise-only, next-run) — registered when mask
+            # is enabled (DEEPAGENTS_MASK != 0). Takes effect next session.
+            mask_enabled = os.environ.get("DEEPAGENTS_MASK", "1").strip() != "0"
+            if mask_enabled:
+                mask_tool = make_mask_add_tool()
+                if mask_tool is not None:
+                    tools.append(mask_tool)
+
+            # M4: path-guard denial — pathguard only denies outright escapes,
+            # which are never approvable. No HITL interrupt for v1; the
+            # permission_denied system_interrupt seam is reserved for future
+            # in-bounds mask denials (§11.3 v1 honesty).
+            on_path_denied = None
+
             agent = build_agent(
                 chat_model,
                 workspace,
                 tools=tools,
                 middleware=middleware,
                 checkpointer=checkpointer,
+                on_path_denied=on_path_denied,
             )
             if args.headless:
                 # P2: one-shot batch — run the task(s), emit one JSON result on

@@ -1,6 +1,10 @@
 # Milestone 4 — Real Trust Boundary (Workspace Visibility + Path Guard)
 
-> **Status:** ⬜ Planned. Successor to `docs/milestones/complete/milestone3.md` (HITL). Promotes the
+> **Status:** 🚧 In-progress (v1 — slices A–G built, on `feat/milestone_4`, not yet merged).
+> Stretch H (bwrap fs-tool jail) not yet built; deferred v2 (overlayfs view) not yet built. See
+> PR1–PR5 for the commits. The checkable boundary invariants live separately in
+> `milestone4_invariants.md` (folds in here on completion — see the lifecycle in `docs/README.md`).
+> Promotes the
 > `design_doc.md` **§2 Workspace Visibility & Secret Masking** + **Path Guard** designs, backed by the
 > **§10 security verification suite**, into a built, tested slice — and pulls in the two `design_doc.md`
 > §12 operational items this work structurally needs (**§12.1 CI**, **§12.2 `harness doctor`**). The
@@ -454,6 +458,14 @@ HITL-gated.
 
 ### 11.3 `permission_denied` interrupt (slice D) — `agent.py` + `hitl.py`
 
+> **Build status: SEAM ONLY — escalation deferred.** The `on_path_denied` parameter exists on
+> `build_agent` and the backend honours it (`agent.py`), but `cli.main` currently hardcodes
+> `on_path_denied=None` — it does **not** pass a callback even when HITL + the `permission_denied`
+> system interrupt are enabled. So in v1 a path-guard denial is **always** a plain refused tool
+> result (the off-HITL path below); the interrupt escalation, approve-once flow, and audit record
+> are **not active**. The design below is the target; wiring the callback is a follow-up. Invariants
+> 15–17 are aspirational until then.
+
 The denial must become a `GraphInterrupt` when HITL is on, or a plain refused tool result when it is
 off. The seam:
 
@@ -571,8 +583,11 @@ guard (§11.2) stays on because it has no false positives on legitimate file ops
 **Holds (v1):**
 - A **designated-secret floor path** reads empty to *every* process in the container (the docker mask
   changes the real mounted fs), and no `.agentignore` negation, allow-list entry, or `mask_add` can
-  expose it. Enforced redundantly: (1) docker mask always emits it; (2) the resolver drops any negation
-  of it; (3) the file backend explicitly refuses it (belt-and-suspenders); (4) bwrap never binds it (H).
+  expose it. Enforced redundantly — **v1 has legs (1)+(2)**: (1) docker mask always emits it; (2) the
+  resolver drops any negation of it. **Legs (3)+(4) are aspirational, not built in v1:** (3) a file
+  backend that explicitly refuses a floor path (belt-and-suspenders) — the current backend only checks
+  for workspace escape, so a floor file is protected solely by the docker overlay reading empty; (4)
+  bwrap never binds it (slice H). The "≥3 independent legs" redundancy becomes real with H.
 - A **pattern-default / general masked path** reads empty to every process (same mechanism), whole-tree
   deny-list, "present-but-empty".
 - A **path-guard traversal** (`../`, absolute, in-workspace symlink whose target escapes) is refused for

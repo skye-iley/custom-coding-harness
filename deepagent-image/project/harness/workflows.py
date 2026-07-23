@@ -27,10 +27,9 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-try:  # present in the image; absent on a bare test host (mirrors cost.py)
-    from langchain.agents.middleware.types import AgentMiddleware
-except ModuleNotFoundError:  # pragma: no cover - exercised only off-image
-    AgentMiddleware = object  # type: ignore[assignment,misc]
+from harness._compat import compat_import
+
+AgentMiddleware = compat_import("langchain.agents.middleware.types", "AgentMiddleware")  # type: ignore[assignment,misc]
 
 
 # The 7 lifecycle hook points (§3). session.* fire once around the whole run in

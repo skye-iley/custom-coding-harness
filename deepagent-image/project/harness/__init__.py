@@ -13,6 +13,11 @@ Split out of the original single-file main.py for navigation:
   audit.py      Milestone 3 S7: scrubbed interrupt audit trail (interrupts.jsonl)
   hitl.py       Milestone 3 glue: interrupt resume loop, pause gate, ask_human
   cli.py        argparse + main() (the run loop, checkpointer, session workflows)
+  mask.py       Milestone 4 resolver: gitignore-parity matcher, 3-tier policy,
+                designated-secret floor, snapshot + protection-reduction checks
+  mask_scan.py  Milestone 4 CLI wrapper for mask resolution (mask-scan subcommand)
+  pathguard.py  Milestone 4 defense-in-depth traversal check (commonpath guard)
+  doctor.py     Milestone 4 pre-flight config validation (doctor subcommand)
 
 Entry points (both run cli.main from WORKDIR /project):
   python3 main.py        thin shim at the package parent

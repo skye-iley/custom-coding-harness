@@ -5,9 +5,12 @@ coding agent against a mounted workspace, with provider-agnostic model selection
 secret-safe containers.
 
 - `design_doc.md` — full target vision (multi-agent, FSM routing, bubblewrap jail, telemetry-to-PR).
-- `docs/` — spec docs, organized by type. See `docs/README.md` for the full map. In short:
-  - `docs/milestones/complete/` — **built** milestones (`mvp.md`, `milestone1.md`, `milestone2.md`,
-    `milestone3.md`). These record shipped scope; the code is authoritative where they drift.
+- `docs/` — spec docs, organized by type. See `docs/README.md` for the full map, including the
+  **milestone lifecycle** (`planned/` docs-only → `in-progress/` doc + separate `_invariants.md` +
+  code → `complete/` doc-only with invariants folded in). In short:
+  - `docs/milestones/complete/` — **built + merged** milestones (`mvp.md`, `milestone1.md`,
+    `milestone2.md`, `milestone3.md`). These record shipped scope; the code is authoritative where
+    they drift.
     - `mvp.md` — the shipped baseline: one-command containerized Deep Agents coding agent.
     - `milestone1.md` — cost/token visibility + resource caps.
     - `milestone2.md` — present/past memory (fresh-by-default thread + separate on-demand archive).
@@ -15,10 +18,16 @@ secret-safe containers.
     - `milestone3.md` — human-in-the-loop (one `interrupt()` spine, three trigger sources) + the §12
       resilience/headless prereqs it rides on. **Built** — see §0 build status for what shipped vs.
       deferred, and the "Human-in-the-loop" section in `deepagent-image/CLAUDE.md`.
-  - `docs/milestones/planned/` — **not-yet-built** milestones. Wins over `design_doc.md` for
-    "what we build next." *(`milestone4.md` — **Real Trust Boundary**: workspace visibility +
-    path guard + `permission_denied` interrupt, backed by §10 security suite + §12.1 CI / §12.2
-    doctor. v1 buildable now; bwrap jail is the stretch layer.)*
+  - `docs/milestones/in-progress/` — **being built** milestones (doc + separate invariants doc + code
+    on a feature branch). *(`milestone4.md` — **Real Trust Boundary**, code on `feat/milestone_4`,
+    slices A–G landed, not yet merged: workspace visibility (`.agentignore`, 3-tier policy,
+    designated-secret floor), docker mount-mask, path-guard middleware, `harness doctor`, CI pipeline,
+    security test suite. Slice D (`permission_denied` interrupt) is **seam-only — escalation deferred**
+    (`cli.main` wires `on_path_denied=None`; a denial is a plain refused tool result in v1). Stretch H
+    (bwrap fs-tool jail) not yet built. `milestone4_invariants.md` — the 30 checkable boundary invariants that drive its tests;
+    folds into `milestone4.md` on completion.)*
+  - `docs/milestones/planned/` — **not-yet-built** milestones (docs only). Wins over `design_doc.md`
+    for "what we build next." *(Currently empty.)*
   - `docs/features/workspace_visibility.md` — **named feature plan** (not a numbered milestone): restrict
     which workspace paths an agent can see (`.agentignore` policy, designated-secret floor, docker-mask
     → bwrap fs-tool jail → optional overlayfs). **Planned** — summarized in `design_doc.md` §2.
@@ -75,6 +84,36 @@ turns until you type `/exit` or `/quit` at the `you>` prompt (or Ctrl-D). It nee
 piped/non-interactive stdin collapses to a single turn for CI/smoke. See `docs/milestones/complete/mvp.md` §1a.
 
 `.sh` equivalents exist for each script — **keep the `.ps1` and `.sh` pairs in sync** when editing one.
+
+### Script Pair Maintenance (`.ps1` ↔ `.sh`)
+
+This repo maintains **parallel PowerShell and Bash scripts** for cross-platform compatibility:
+- `build.ps1` ↔ `build.sh`
+- `verify.ps1` ↔ `verify.sh`
+- `smoke.ps1` ↔ `smoke.sh`
+- `run-docker.ps1` ↔ `run-docker.sh`
+
+**Sync rule:** When you edit one, **keep the pair in sync**. Both must implement the 
+same logic and support the same flags. This is a known maintenance burden; a 
+cross-platform wrapper was considered but rejected due to the depth of Windows/Unix 
+differences (file paths, robocopy vs. rsync, registry vs. env var probing, etc.).
+
+**Known sync points (track when editing):**
+- `run-docker.ps1` ↔ `run-docker.sh`: ephemeral workspace copy, NetJail setup, state-dir derivation.
+- `smoke.ps1` ↔ `smoke.sh`: pytest invocation, image staging, artifact handling.
+- Both: launcher environment defaults (CPUS, MEMORY, PIDS_LIMIT).
+
+**Verification:** `./scripts/check-parity.sh` (bash) / `.\scripts\check-parity.ps1` (ps1) 
+validates critical sections match (see script for the parity rules).
+
+### Launcher environment (host-side, **not** `.env`)
+
+Host-side launcher variables (MAP_HOST_USER, CPUS, MEMORY, NET_JAIL, etc.) are 
+documented in detail in **[deepagent-image/CLAUDE.md — Launcher environment](./deepagent-image/CLAUDE.md#launcher-environment-host-side-not-env)**.
+
+The key distinction: `.env` is container-bound (via `--env-file`); launcher vars 
+are read by the host shell *before* `docker run` and affect container startup 
+parameters only.
 
 ## Hard rules
 

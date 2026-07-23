@@ -76,6 +76,8 @@ host, not forwarded into the container. **Do not add them to `.env.example`**: `
 `--env-file` into the container and would never reach the host-side code that reads these. Set them
 inline (`VAR=x ./scripts/run-docker.sh …`) on `.sh`, or via the named `.ps1` params.
 
+See [ENV_VARS.md](./ENV_VARS.md#not-in-env--launcher-environment-host-side) for the authoritative reference of all launcher-side variables.
+
 | Env (`.sh`) | `.ps1` param | Default | Purpose |
 |-------------|--------------|---------|---------|
 | `MAP_HOST_USER` | — | unset → auto | Run the container as your host uid:gid so host-owned bind mounts (state dir + workspace) are writable. `1` force on, `0` force off; **unset auto-enables on a native-Linux engine only** (not WSL/Docker Desktop/OrbStack/macOS). Fixes the turn-1 sqlite `unable to open database file` / `readonly database` crash on bare Linux. Decision logic: `scripts/lib/hostmap.sh`. **macOS:** auto never maps (host uid ≠ the daemon VM's uid). Correct for Docker Desktop/OrbStack (they squash ownership); a colima/lima config whose mount driver *preserves* ownership can still hit the crash, and `MAP_HOST_USER=1` is not a reliable fix there (maps to the macOS uid, not the VM's) — use a squashing mount driver or an in-VM chown. |
@@ -483,6 +485,8 @@ prior behaviour — the removable contract). `google_genai/provider.toml` ships
 differ per model). Note a tight free tier (e.g. 15k TPM) paces a coding turn to
 ~1 call/minute — that is the tier's real ceiling, surfaced instead of 429-thrashed.
 
+See [ENV_VARS.md](./ENV_VARS.md#rate-limiting--request-pacing) for rate-limit environment variables.
+
 Tests: `tests/test_ratelimit.py` (pure math + tier/env resolution), the
 `retry_after_*` cases in `tests/test_resilience.py`. The actual limiter attachment
 is image-only (smoke).
@@ -525,6 +529,122 @@ is image-only (smoke).
   `-NetJail`: add a `<name> <port>` line to `netjail/host-services.txt` for a host service, or
   the bare domain to `netjail/allowed-domains.txt` for an egress destination. Anything not
   listed is blocked. Don't widen the allowlist beyond what the feature needs.
+
+## Workspace visibility / secret masking (Milestone 4)
+
+> **Status: in-progress** — code on `feat/milestone_4`, slices A–G landed.
+> Full spec in `docs/milestones/in-progress/milestone4.md`.
+
+The harness can enforce a trust boundary on the workspace filesystem:
+
+**Config knobs** (set in `project/.env` or at container runtime):
+- `DEEPAGENTS_MASK` (default 1): Enable/disable the masking scan and empty-overlay mounts.
+  Set to 0 for Milestone 3 parity (byte-for-byte unchanged).
+- `DEEPAGENTS_MASK_MODE` (default "deny"): Visibility mode.
+  - "deny": Agent sees everything except masked paths (present-but-empty).
+  - "allow": Agent sees only allow-listed paths (requires `.agentignore` to opt paths in).
+- `DEEPAGENTS_AGENTIGNORE` (default ".agentignore"): Override the in-workspace config filename.
+
+### Quick-Start: In-Workspace `.agentignore` File
+
+The `.agentignore` file (gitignore syntax) in your workspace root controls which paths 
+the agent sees. Default globs (`.env`, `*.pem`, `.aws/credentials`, etc.) are **always 
+masked** — even `.agentignore` cannot unmask them.
+
+**Example 1: Deny mode (default) — Agent sees everything except masked paths:**
+```
+# .agentignore (in workspace root)
+
+# Mask additional sensitive files
+private/notes.md
+config/secrets.yaml
+
+# Unmask a default glob (deny mode only):
+!.env.local                    # this .env variant is readable
+
+# Designated-secret floor (can never be negated):
+#!floor:
+id_rsa
+.ssh/
+~/.aws/credentials
+#!floor-end
+```
+
+**Example 2: Allow mode — Agent sees *only* what you explicitly allow:**
+```
+# .agentignore with #!mode:allow
+
+#!mode:allow
+
+# Paths the agent CAN see (gitignore negation):
+!src/
+!tests/
+!README.md
+!package.json
+
+# Everything else is hidden (including defaults like .env)
+```
+
+**Defaults (always masked, can't be unmasked):**
+```
+.env, .env.*, *.pem, *.key, id_rsa, id_ed25519, .ssh/, .aws/credentials, .netrc,
+.npmrc, .git-credentials, credentials.json, *.p12, *.pfx
+```
+
+See `docs/features/workspace_visibility.md` (§3, full syntax) for advanced rules.
+
+**Removable contract:** Set `DEEPAGENTS_MASK=0` and the harness behaves byte-for-byte like M3.
+
+## Interactive REPL Commands (in-container)
+
+When a session is running, type these at the `you>` prompt:
+
+| Command | Purpose | Example |
+|---------|---------|---------|
+| `/exit` | End session deterministically (no LLM involved) | `/exit` |
+| `/quit` | Alias for `/exit` | `/quit` |
+| `Ctrl-D` | EOF — end session | — |
+| `Ctrl-C` | At idle prompt: end session. During turn: cancel that turn. | — |
+| `/topic <name>` | Set or change the continual-topic label for this run (defaults to DEEPAGENTS_TOPIC) | `/topic refactor-auth` |
+| `/recall [query] [--all]` | Recall past sessions. No query lists recent. Query stages context for the next turn. `--all` widens to whole archive. | `/recall authentication issue` |
+| `/show` | Expand a truncated interrupt/approval context (HITL) | (used when an approval prompt is capped) |
+| `/refresh [subpath]` | Pull live host edits into ephemeral workspace copy (ephemeral mode only). Omit subpath to refresh root. | `/refresh src/` |
+
+## Admin Commands (keyless, outside container)
+
+Run these in the host shell; they manage the persistent harness state:
+
+```bash
+# List or manage threads (present conversation)
+harness threads list [--topic LABEL]
+harness threads show <thread-id>
+harness threads rm <thread-id> [--yes]      # requires --yes to confirm
+harness threads prune [--keep N] [--yes]    # keep N most recent, delete rest
+
+# List or manage past sessions (archive)
+harness past list [--topic LABEL]
+harness past show <run-id>
+harness past rm <run-id> [--yes]
+harness past prune [--keep N] [--yes]
+harness past topics                         # list all topics
+```
+
+(Requires the harness venv: `source deepagent-image/.venv/bin/activate` or install locally)
+
+## Feature Toggles & Removable Contracts
+
+Each milestone adds opt-in or removable features. This table shows which are on by default, 
+how to disable them, and what behavior they enable/disable:
+
+| Feature | Milestone | Env Var | Default | When to Set to 0 | Behavior When Off |
+|---------|-----------|---------|---------|------------------|------------------|
+| Past Archive | M2 | `DEEPAGENTS_ARCHIVE` | 1 | Never; use `/recall` when you don't need past runs | Sessions not recorded in `past.sqlite`; `/recall` returns nothing |
+| Workspace Masking | M4 | `DEEPAGENTS_MASK` | 1 | Testing/debugging; or trusting the workspace | Agent can read all files; no empty overlays |
+| Cost Tracking | M1 | n/a (auto) | on | Never; budgets are optional | No per-turn usage line; budgets ignored |
+| HITL | M3 | n/a (config file) | off | (not set by env) | Only if `.harness-config.yaml` exists in project root | No approval gates; agent runs freely |
+
+**Removable contract:** Each "off" state is byte-for-byte identical to the prior milestone 
+(see [Glossary](../docs/README.md#glossary)). E.g., `DEEPAGENTS_MASK=0` ⇒ M3 parity.
 
 ## Conventions
 

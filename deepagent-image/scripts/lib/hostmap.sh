@@ -42,3 +42,17 @@ _detect_is_wsl() {
     echo 0
   fi
 }
+
+# _should_map_host_user_auto — Auto-detect whether to map, collecting all inputs.
+_should_map_host_user_auto() {
+  local uname_s="$(uname -s 2>/dev/null || echo unknown)"
+  local is_wsl="$(_detect_is_wsl)"
+  local docker_os="unknown"
+
+  # Only probe docker on native Linux (skip the daemon call otherwise)
+  if [[ "$uname_s" == "Linux" && "$is_wsl" != "1" && -z "${MAP_HOST_USER:-}" ]]; then
+    docker_os="$(docker info --format '{{.OperatingSystem}}' 2>/dev/null || echo unknown)"
+  fi
+
+  _should_map_host_user "$uname_s" "$is_wsl" "$docker_os" "${MAP_HOST_USER:-}"
+}

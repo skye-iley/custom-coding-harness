@@ -60,17 +60,7 @@ HOST_GW=(--add-host=host.docker.internal:host-gateway)
 # gather its inputs (uname / /proc / docker info) and act on the result.
 USER_FLAGS=()
 HOME_DIR="/home/agent"
-_uname_s="$(uname -s 2>/dev/null || echo unknown)"
-_is_wsl="$(_detect_is_wsl)"
-# docker info distinguishes a native-Linux engine from Docker Desktop, and is
-# only consulted on the auto-detect path for a non-WSL Linux host — skip the
-# daemon round-trip when MAP_HOST_USER is explicit, or on macOS/WSL where the
-# uname/proc checks already decide the outcome.
-_docker_os="unknown"
-if [[ -z "${MAP_HOST_USER:-}" && "$_uname_s" == "Linux" && "$_is_wsl" != "1" ]]; then
-  _docker_os="$(docker info --format '{{.OperatingSystem}}' 2>/dev/null || echo unknown)"
-fi
-if [[ "$(_should_map_host_user "$_uname_s" "$_is_wsl" "$_docker_os" "${MAP_HOST_USER:-}")" == "1" ]]; then
+if [[ "$(_should_map_host_user_auto)" == "1" ]]; then
   HOST_UID="${HOST_UID:-$(id -u)}"
   HOST_GID="${HOST_GID:-$(id -g)}"
 fi
@@ -292,6 +282,66 @@ if [[ -t 0 ]]; then
   TTY_FLAGS="-it"
 fi
 
+# M4 mask pre-flight: when DEEPAGENTS_MASK != 0, run a throwaway scan container
+# to resolve the mask set, then emit empty overlay mounts for each masked path.
+MASK_ARGS=()
+EMPTY_FILE=""
+EMPTY_DIR=""
+# Read a var from project/.env so launcher-side decisions honour the SAME config
+# the container sees (DEEPAGENTS_MASK is a container env per §13; the launcher
+# gates the host-side scan/overlay on it too). Host/launcher env still wins when
+# set — this is only the fallback. Last matching KEY=VALUE line, quotes stripped.
+_env_file_get() {
+  local key="$1"
+  [[ -f "$ENV_FILE" ]] || return 0
+  sed -n "s/^[[:space:]]*${key}=//p" "$ENV_FILE" | tail -1 \
+    | sed 's/[[:space:]]*$//; s/^"//; s/"$//; s/^'"'"'//; s/'"'"'$//'
+}
+
+mask_scan() {
+  # Launcher env wins; else fall back to project/.env; else default on ("1").
+  local mask_mode="${DEEPAGENTS_MASK:-$(_env_file_get DEEPAGENTS_MASK)}"
+  mask_mode="${mask_mode:-1}"
+  [[ "$mask_mode" == "0" ]] && return 0
+  # Forward DEEPAGENTS_MASK_MODE (deny/allow, §13) into the scan container so the
+  # resolver honours it — the scan gets no --env-file, so without this the env
+  # knob is silently ignored and `allow` degrades to `deny` (under-masking).
+  local scan_mode="${DEEPAGENTS_MASK_MODE:-$(_env_file_get DEEPAGENTS_MASK_MODE)}"
+  local mode_env=()
+  [[ -n "$scan_mode" ]] && mode_env=(-e "DEEPAGENTS_MASK_MODE=$scan_mode")
+  local scan_output scan_err
+  scan_err="$(mktemp)"
+  scan_output="$(docker run --rm \
+    -v "$MOUNT_WORKSPACE:/project/workspace:ro" \
+    -v "$STATE_HOST_DIR:/project/state" \
+    -e DEEPAGENTS_STATE_DIR=/project/state \
+    ${mode_env[@]+"${mode_env[@]}"} \
+    deepagent-harness python3 -m harness mask-scan 2>"$scan_err")" \
+    || { echo "[mask] FATAL: mask-scan failed — refusing to launch unmasked. Fix the scan or set DEEPAGENTS_MASK=0 to disable masking." >&2; [[ -s "$scan_err" ]] && cat "$scan_err" >&2; rm -f "$scan_err"; exit 1; }
+  # Surface mask-scan diagnostics (protection-reduction, symlink-escape warnings).
+  [[ -s "$scan_err" ]] && cat "$scan_err" >&2
+  rm -f "$scan_err"
+  [[ -z "$scan_output" ]] && return 0
+  EMPTY_FILE="$(mktemp)"
+  EMPTY_DIR="$(mktemp -d)"
+  local mode type tier relpath source
+  while IFS=' ' read -r mode type tier relpath rest; do
+    relpath="$(printf '%s' "$relpath" | sed 's/%20/ /g')"
+    if [[ "$type" == "dir" ]]; then
+      source="$EMPTY_DIR"
+    else
+      source="$EMPTY_FILE"
+    fi
+    MASK_ARGS+=(-v "$source:/project/workspace/$relpath:ro")
+  done <<< "$scan_output"
+  echo "Mask: $((${#MASK_ARGS[@]}/2)) path(s) masked" >&2
+}
+
+mask_cleanup() {
+  [[ -n "$EMPTY_FILE" && -f "$EMPTY_FILE" ]] && rm -f "$EMPTY_FILE" 2>/dev/null || true
+  [[ -n "$EMPTY_DIR" && -d "$EMPTY_DIR" ]] && rm -rf "$EMPTY_DIR" 2>/dev/null || true
+}
+
 # Assemble the agent `docker run` invocation into an array. NET_ARGS / PROXY_ENV
 # are set either by netjail_up (jail mode) or to the bridge defaults below.
 build_agent_run() {
@@ -308,10 +358,19 @@ build_agent_run() {
     ${SRC_MOUNT[@]+"${SRC_MOUNT[@]}"}
     ${GIT_MOUNT[@]+"${GIT_MOUNT[@]}"}
     ${HITL_MOUNT[@]+"${HITL_MOUNT[@]}"}
+    ${MASK_ARGS[@]+"${MASK_ARGS[@]}"}
     deepagent-harness)
   if [[ $# -gt 0 ]]; then
     AGENT_RUN+=(python3 main.py "$@")
   fi
+}
+
+mask_scan
+
+# Clean up mask temp files on exit (added to any existing trap).
+_exit_cleanup() {
+  mask_cleanup
+  ephemeral_cleanup
 }
 
 if [[ "${NET_JAIL:-}" == "1" ]]; then
@@ -321,7 +380,7 @@ if [[ "${NET_JAIL:-}" == "1" ]]; then
   build_agent_run "$@"
   "${AGENT_RUN[@]}"
   rc=$?
-  ephemeral_cleanup   # netjail's own EXIT trap handles the sidecars
+  _exit_cleanup   # netjail's own EXIT trap handles the sidecars
   exit $rc
 fi
 
@@ -331,8 +390,15 @@ PROXY_ENV=()
 build_agent_run "$@"
 if [[ -n "$EPHEMERAL" ]]; then
   # Can't exec: the copy must be reverted (and optionally saved) after the run.
-  trap ephemeral_cleanup EXIT INT TERM
+  trap "_exit_cleanup" EXIT INT TERM
   "${AGENT_RUN[@]}"
   exit $?
 fi
-exec "${AGENT_RUN[@]}"
+# Can't exec: the mask overlay sources (empty temp file/dir) must outlive the
+# container run, then be cleaned up after it exits. exec would replace the shell
+# so the EXIT trap never fires; and cleaning up before exec deletes the overlay
+# sources out from under `docker run` (docker then fails mounting a dir onto a
+# masked file). So run non-exec and let the trap clean up post-run.
+trap "mask_cleanup" EXIT INT TERM
+"${AGENT_RUN[@]}"
+exit $?

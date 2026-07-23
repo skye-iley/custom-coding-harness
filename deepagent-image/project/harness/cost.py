@@ -23,14 +23,13 @@ import os
 import sys
 from dataclasses import dataclass, field
 
+from harness._compat import compat_import
+
 # The pricing/energy math is pure stdlib so it can be unit-tested on a bare
 # interpreter (no langchain). Only CostTrackerMiddleware needs the real
 # AgentMiddleware base; fall back to `object` when langchain is absent so
 # `import harness.cost` still works for the math-only tests.
-try:  # pragma: no cover - exercised differently in-container vs. test host
-    from langchain.agents.middleware.types import AgentMiddleware
-except ModuleNotFoundError:  # pragma: no cover
-    AgentMiddleware = object  # type: ignore[assignment,misc]
+AgentMiddleware = compat_import("langchain.agents.middleware.types", "AgentMiddleware")  # type: ignore[assignment,misc]
 
 # Registry rates are declared per MILLION tokens (human-friendly for hand-fill);
 # energy is declared per token in watt-hours. Keep these conversions in one place.

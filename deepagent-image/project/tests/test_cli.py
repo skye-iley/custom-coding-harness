@@ -127,6 +127,28 @@ def test_dispatch_routes_sync_models(monkeypatch):
     assert seen["argv"] == ["--dry-run"]
 
 
+def test_dispatch_routes_mask_scan(monkeypatch):
+    # M4: `-m harness mask-scan` routes to mask_scan_main, not the agent loop.
+    import harness.mask_scan as ms
+
+    seen = {}
+    monkeypatch.setattr(ms, "mask_scan_main", lambda argv: seen.update(argv=argv) or 0)
+    monkeypatch.setattr(cli, "main", lambda: pytest.fail("agent loop must not run for mask-scan"))
+    assert cli.dispatch(["mask-scan", "/ws", "/state"]) == 0
+    assert seen["argv"] == ["/ws", "/state"]
+
+
+def test_dispatch_routes_doctor(monkeypatch):
+    # M4: `-m harness doctor` routes to doctor_main, not the agent loop.
+    import harness.doctor as doc
+
+    seen = {}
+    monkeypatch.setattr(doc, "doctor_main", lambda argv: seen.update(argv=argv) or 0)
+    monkeypatch.setattr(cli, "main", lambda: pytest.fail("agent loop must not run for doctor"))
+    assert cli.dispatch(["doctor", "/ws"]) == 0
+    assert seen["argv"] == ["/ws"]
+
+
 # --- _is_exit_command ------------------------------------------------------
 
 @pytest.mark.parametrize("line", ["/exit", "/quit", " /EXIT ", "/Quit\n"])

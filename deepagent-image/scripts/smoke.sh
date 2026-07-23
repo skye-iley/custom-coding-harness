@@ -147,6 +147,31 @@ fi
 docker run --rm ${NET_ARGS[@]+"${NET_ARGS[@]}"} ${PROXY_ENV[@]+"${PROXY_ENV[@]}"} \
   deepagent-harness python3 -c "import deepagents, langgraph, langchain_openai; from harness.cli import main; from harness.cost import CostTrackerMiddleware; print('runtime import ok')"
 
+# M4 smoke: verify mask resolution works end-to-end by running mask-scan
+docker run --rm ${NET_ARGS[@]+"${NET_ARGS[@]}"} ${PROXY_ENV[@]+"${PROXY_ENV[@]}"} \
+  deepagent-harness python3 -c "from harness.mask import resolve; r = resolve('/tmp', '/tmp'); print(f'mask OK: {len(r.masked)} entries')"
+
+# M4 fail-closed: a mask-scan failure MUST abort the launch, never run unmasked.
+# (1) mask-scan signals failure via a nonzero exit on a poisoned config; (2) both
+# launchers key their abort on that. Regression guard for the run-docker.{sh,ps1}
+# fail-closed contract (a scan error must not degrade to a maskless launch).
+scan_fail_dir="$(mktemp -d)"
+printf 'secret\n#!mode: allow\n' > "$scan_fail_dir/.agentignore"   # directive-after-pattern -> SystemExit
+if docker run --rm ${NET_ARGS[@]+"${NET_ARGS[@]}"} ${PROXY_ENV[@]+"${PROXY_ENV[@]}"} \
+     -v "$scan_fail_dir:/project/workspace:ro" \
+     -e AGENT_WORKSPACE=/project/workspace -e DEEPAGENTS_STATE_DIR=/tmp/mask-state \
+     deepagent-harness python3 -m harness mask-scan >/dev/null 2>&1; then
+  rm -rf "$scan_fail_dir"
+  echo "M4 fail-closed: mask-scan exited 0 on a poisoned .agentignore (expected nonzero)" >&2
+  exit 1
+fi
+rm -rf "$scan_fail_dir"
+for launcher in run-docker.sh run-docker.ps1; do
+  grep -qF 'refusing to launch unmasked' "$ROOT/scripts/$launcher" \
+    || { echo "M4 fail-closed: $launcher lost its fail-closed guard" >&2; exit 1; }
+done
+echo "M4 fail-closed: mask-scan aborts on failure + launchers guard against unmasked launch — ok"
+
 # Full suite via pytest discovery on the test image. -v names every test case
 # (file::test PASSED/FAILED); -ra recaps non-passing tests at the end. Failures
 # print the failing test id, file:line, and asserted values by default.
