@@ -487,13 +487,17 @@ HITL-gated.
 >    A denial is evidence the agent tried to escape; the in-workspace audit log is in-bounds for the
 >    path guard, so the agent's own `write_file`/shell could truncate exactly the record that
 >    incriminates it. The state dir is the same isolation M2 gave `past.sqlite` (invariant 20).
->    **Honest scope**, two limits inherited from the M2 state-dir seam: (a) it defeats the *file*-tool
->    tamper path, not the shell one — the shell tool is container-root-bounded, not guard-covered
->    (invariant 14), so it can still reach the state dir by absolute path until the bwrap jail (H);
->    (b) it holds only when `DEEPAGENTS_STATE_DIR` is set (`run-docker` always sets it to
->    `/project/state`) — otherwise `archive.state_dir` falls back to `<workspace>/.deepagents`, back
->    inside the agent's reach. A raw `docker run` without the state mount gets no isolation here,
->    exactly as it gets none for `past.sqlite`.
+>    **Honest scope — one standing limit, one closed.** *Standing:* it defeats the *file*-tool tamper
+>    path, not the shell one — the shell tool is container-root-bounded, not guard-covered
+>    (invariant 14), so it can still reach the state dir by absolute path until the bwrap jail (H).
+>    *Closed:* the sink resolves through `archive.state_dir`, which falls back to
+>    `<workspace>/.deepagents` when `DEEPAGENTS_STATE_DIR` is unset — back inside the agent's reach.
+>    Both launchers always set it, and HITL-on already implies `run-docker` (the config file is
+>    gitignored and un-`COPY`ed, so only a bind-mount puts it in `/project`), which makes the fallback
+>    unreachable in practice for this sink — but it rested on an unchecked launcher convention until
+>    `harness doctor` began erroring on an in-container state dir inside the workspace (§12.1). The two
+>    are **not equivalent**: the shell limit is unconditionally true today, the state-dir one was
+>    contingent and is now asserted.
 >
 > An audit-write failure never fails the turn, but is **reported to stderr** rather than swallowed —
 > a lost record of a boundary violation is itself worth surfacing, and it matches the other three
@@ -550,6 +554,16 @@ if any `error`. Keyless, stdlib, reuses the real loaders so validation can't dri
   defaults or a `#!floor:` block resolve to ≥1 masked path), and **no** `!`/allow-list entry targets a
   floor path (surface `mask.resolve`'s warnings as **errors** here). A deliberately weakened floor →
   non-zero exit → CI red (§1 done-when).
+- **State-dir isolation (new, M4):** `doctor.state_dir_inside_workspace` (realpath + `commonpath`, not
+  `startswith`, so `<ws>-state` is correctly a sibling) → **error when `DEEPAGENTS_IN_CONTAINER=1`**.
+  `archive.state_dir` falls back to `<workspace>/.deepagents` when `DEEPAGENTS_STATE_DIR` is unset,
+  which in-container puts `checkpoints.sqlite` / `past.sqlite` / `denials.jsonl` back inside the
+  workspace bind-mount — in-bounds for the path guard and writable by the agent's own file tools,
+  including the log recording its own escape attempts. Both launchers set the var; **nothing asserted
+  they had to** until this check, so the isolation in invariants 20 / 17a rested on an unchecked
+  launcher convention. Off-container the same layout is the *documented* bare-host default with no
+  container boundary to protect, so it is **info, not error** — doctor must not fail every legitimate
+  host run.
 
 `scripts/verify.{ps1,sh}` optionally call `doctor` after the import check.
 
@@ -731,7 +745,7 @@ Ship the floor first; harden after. Each PR is independently reviewable and leav
 |------|-------|------|
 | `tests/test_mask.py` | gitignore parity (negation, `**`, nesting, anchored vs floating, dir-only, last-match-wins); symlink canonicalization + symlink-out masking; mode classification (deny/allow); **floor invariant** (a `!`/allow entry targeting a floor path does **not** expose it — regression); emission grammar + minimization (whole-dir vs per-leaf under a negated descendant); snapshot diff / protection-reduction warning; `mask_add` raise-only (append helper) | host |
 | `tests/test_pathguard.py` | in-bounds pass; `../` traversal refuse; absolute-path refuse; **sibling escape** (`/workspace-evil` vs `/workspace` — `commonpath` not `startswith`); in-workspace symlink-out refuse; `relative_to` never raises (cross-drive / no-common-prefix degrade to the abs target, so a denial can't be replaced by a `ValueError`) | host |
-| `tests/test_doctor.py` | floor-negation misconfig → non-zero; dangling `default_model` → non-zero; `rate_table` missing pricing → non-zero; clean shipped registry → zero; keyless (no keys/network) | host |
+| `tests/test_doctor.py` | floor-negation misconfig → non-zero; dangling `default_model` → non-zero; `rate_table` missing pricing → non-zero; clean shipped registry → zero; keyless (no keys/network); **state-dir isolation**: in-container state dir inside the workspace → non-zero, outside → zero, bare host inside → zero (documented default); `<ws>-state` sibling is not "inside" | host |
 | `tests/test_cli.py` (add) | `dispatch("mask-scan")` / `dispatch("doctor")` route correctly; git-pr exclusion wiring reads the snapshot | host |
 | `tests/test_workflows.py` (add) | git-pr staging **excludes** the mask set — a masked `.env` is not staged (§15.1) | host (`sh`-gated) |
 | `tests/test_agent.py` (add) | `_WorkspaceShellBackend._resolve_path` refuses an escape; `on_path_denied=None` → `PathGuardDenied` as tool error (**invariant 18's actual assertion**, not just the wiring predicate); the guard passes a legit in-workspace path; the backend calls `on_path_denied(resolved, base)` on a denial and honors its return value (generic seam contract, independent of D's own always-deny policy); a refusal always prints `path-guard DENIED` to **stderr** with stdout clean, handler or not, and stays quiet when a handler approves | image-only (`importorskip`) |

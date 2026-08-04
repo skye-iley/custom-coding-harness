@@ -102,3 +102,54 @@ def test_doctor_detects_floor_negation(tmp_path):
     ignore.write_text("!.env\n", encoding="utf-8")
     rc = doctor.doctor_main([str(ws), str(state)])
     assert rc == 1, "doctor should detect floor negation and return non-zero"
+
+
+# --- state-dir isolation (M4 invariants 20 / 17a) --------------------------
+
+
+def test_state_dir_inside_workspace_predicate(tmp_path):
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    assert doctor.state_dir_inside_workspace(ws / ".deepagents", ws) is True
+    assert doctor.state_dir_inside_workspace(ws, ws) is True
+    assert doctor.state_dir_inside_workspace(tmp_path / "state", ws) is False
+
+
+def test_state_dir_sibling_is_not_inside(tmp_path):
+    # commonpath, not startswith: `<ws>-state` shares a string prefix with `<ws>`
+    # but is a sibling, and must not be judged as inside it.
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    sibling = tmp_path / "workspace-state"
+    sibling.mkdir()
+    assert doctor.state_dir_inside_workspace(sibling, ws) is False
+
+
+def test_in_container_state_dir_inside_workspace_is_an_error(tmp_path, monkeypatch):
+    # The DEEPAGENTS_STATE_DIR fallback (<workspace>/.deepagents) puts the M2
+    # stores and the M4 denial log back in-bounds for the agent's file tools.
+    # Both launchers set the var; nothing else asserted that they had to.
+    monkeypatch.setenv("DEEPAGENTS_IN_CONTAINER", "1")
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    rc = doctor.doctor_main([str(ws), str(ws / ".deepagents")])
+    assert rc == 1
+
+
+def test_in_container_state_dir_outside_workspace_passes(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEEPAGENTS_IN_CONTAINER", "1")
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    assert doctor.doctor_main([str(ws), str(state)]) == 0
+
+
+def test_bare_host_state_dir_inside_workspace_is_not_an_error(tmp_path, monkeypatch):
+    # Off-container `<workspace>/.deepagents` is the documented default layout
+    # and there is no container boundary to protect — doctor must not fail every
+    # legitimate bare-host run.
+    monkeypatch.delenv("DEEPAGENTS_IN_CONTAINER", raising=False)
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    assert doctor.doctor_main([str(ws), str(ws / ".deepagents")]) == 0

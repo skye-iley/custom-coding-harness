@@ -373,8 +373,12 @@ code drifts from it in two deliberate places, noted below.
   workspace log is in-bounds for the path guard, so the agent's own file tools could
   truncate it (same isolation rationale as M2's `past.sqlite`). Closes the file-tool
   tamper path only — the shell tool is container-root-bounded, not guard-covered, so
-  it can still reach the state dir until the bwrap jail. The *refusal* is unchanged
-  off-HITL. **`missing_price` is a
+  it can still reach the state dir until the bwrap jail. That isolation depends on
+  `DEEPAGENTS_STATE_DIR` being set (`archive.state_dir` otherwise falls back to
+  `<workspace>/.deepagents`, back inside the mount); both launchers set it, and
+  **`harness doctor` now errors** when an in-container state dir resolves inside the
+  workspace, so it is a checked property rather than a convention. The *refusal* is
+  unchanged off-HITL. **`missing_price` is a
   recognized config key but not yet enforced** — it would need `cost.py` to raise an
   interrupt, which the acyclic import guard (cost imports no sibling) forbids, so it
   belongs in a separate reader middleware. Follow-up.
