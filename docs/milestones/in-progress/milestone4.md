@@ -608,13 +608,19 @@ tools, shell, any future MCP fs tool — is inside the namespace, because the *p
 fs tool cannot reopen the bypass, since there is no bypass to reopen. That is a strictly stronger
 guarantee than the per-call design's construction-time method-set check.
 
-**Slice D's deferred branch (invariant 16).** §11.3 deferred the "approve a one-off in-bounds
-exception" flow to H because v1 had no denial that was *ever* approvable — a masked file was
-present-but-empty at the mount layer, never an explicit denial. Under the jail a masked read **is**
-an explicit denial, so the approvable case finally exists. H therefore carries the interactive
-approve branch: `hitl.make_path_denied_handler` gains a path that may return `True` for an
-**in-bounds, non-floor** denial, while a floor path or a traversal stays hard-deny with no offer
-(§16 fork 4, unchanged). This is scope H inherited and §0/§17 did not list.
+**Slice D's deferred branch (invariant 16) — still deferred, and re-exec is why.** §11.3 deferred the
+"approve a one-off in-bounds exception" flow to H on the reasoning that a jail would turn a masked
+read into an *explicit denial* worth offering an approve on. That holds for the **per-call** design
+(the jailed worker would refuse the op) but **not** for re-exec: masked paths are overmounted empty
+in the namespace, so a masked read still *succeeds and returns empty*, exactly as at the docker-mask
+layer. No new denial type appears.
+
+So invariant 16 remains structurally-present-but-unreachable, unchanged from v1: every
+`PathGuardDenied` the guard can raise is still a true workspace escape, still never approvable. The
+approvable case now needs something that makes a masked read explicitly fail — `hide` mode
+(deferred v2) or an overlayfs view (slice I) — not this slice. Building the approve branch here would
+still be dead code. **This corrects the earlier reading of H's inherited scope**, which was written
+against the per-call design.
 
 ## 12. Support tier
 
