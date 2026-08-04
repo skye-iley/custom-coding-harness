@@ -368,3 +368,44 @@ def test_err_detail_walks_cause_chain():
     assert "ChatGoogleGenerativeAIError" in detail
     assert "429 quota exceeded" in detail          # underlying cause surfaced
     assert "<-" in detail
+
+
+# --- S4: permission_denied path-guard handler (M4 slice D) -------------------
+
+
+def test_path_denied_handler_always_denies(tmp_path):
+    # A workspace escape is never approvable -- the handler must return a
+    # non-True value regardless, so the backend re-raises PathGuardDenied.
+    handler = hitl.make_path_denied_handler(tmp_path)
+    result = handler("/outside/etc/passwd", "/workspace")
+    assert result is not True
+
+
+def test_path_denied_handler_audits_the_denial(tmp_path):
+    handler = hitl.make_path_denied_handler(tmp_path)
+    handler("/workspace-evil/secret", "/workspace")
+
+    records = audit.read_records(tmp_path)
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["source"] == it.SOURCE_SYSTEM
+    assert rec["kind"] == it.KIND_APPROVE
+    assert rec["resolved_by"] == "system"
+    assert rec["resolved_value"] == "False"
+    assert rec["meta"]["reason"] == "workspace escape"
+    assert rec["meta"]["op"] == "file"
+    # path/context never leak file contents -- only the relpath is recorded
+    assert "path" in rec["meta"]
+
+
+def test_path_denied_handler_never_raises_on_audit_failure(tmp_path, monkeypatch):
+    # An audit write must never fail the turn (same contract as _run_turn_hitl's
+    # provider-error audit call) -- a denial still resolves even if the disk
+    # write fails.
+    handler = hitl.make_path_denied_handler(tmp_path)
+
+    def _boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(audit, "record_interrupt", _boom)
+    assert handler("/outside/x", "/workspace") is not True

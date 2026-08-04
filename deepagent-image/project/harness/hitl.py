@@ -25,6 +25,7 @@ Only imported/wired when ``.harness-config.yaml`` is present (config.load_config
 from __future__ import annotations
 
 import json
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -323,6 +324,45 @@ def make_ask_human_tool(default_source: str = interrupt.SOURCE_ASK_HUMAN):
         return interrupt.raise_interrupt(request)
 
     return ask_human
+
+
+# --- S4: permission_denied system interrupt (M4 slice D) --------------------
+
+
+def make_path_denied_handler(workspace: Path):
+    """Build the ``on_path_denied`` callback ``_WorkspaceShellBackend`` calls on a
+    path-guard denial (M4 slice D — completes the M3 S4 follow-up).
+
+    ``pathguard.validate_path`` only ever denies a true workspace escape
+    (``commonpath`` mismatch — traversal, absolute path, symlink-out); it has no
+    floor/mask awareness, that leg is deferred to the bwrap slice (H). A true
+    escape is **never approvable** — honoring an operator "yes" here would let a
+    single mis-click defeat the path guard (design_doc.md §2 threat model) — so
+    this does not suspend the graph or offer a choice. It makes the denial
+    visible in the ``permission_denied`` audit trail instead of a silent
+    ``PermissionError``, then always denies.
+
+    Wired only when HITL is on and the ``permission_denied`` system interrupt is
+    enabled (``cli.main``); ``on_path_denied=None`` (HITL off, or the interrupt
+    disabled) keeps today's plain refused-tool-result behaviour unchanged.
+    """
+
+    def _on_path_denied(resolved: str, base: str) -> bool:
+        relpath = os.path.relpath(resolved, base) if base else resolved
+        request = new_request(
+            interrupt.KIND_APPROVE,
+            f"path-guard denied an out-of-workspace access: {relpath}",
+            default=False,
+            source=interrupt.SOURCE_SYSTEM,
+            meta={"path": relpath, "op": "file", "reason": "workspace escape"},
+        )
+        try:
+            audit.record_interrupt(workspace, request, False, resolved_by="system")
+        except Exception:  # noqa: BLE001 -- an audit write must never fail a turn
+            pass
+        return False
+
+    return _on_path_denied
 
 
 # --- S2: deterministic pause gate --------------------------------------------

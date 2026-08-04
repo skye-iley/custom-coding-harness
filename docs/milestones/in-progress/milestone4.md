@@ -458,42 +458,45 @@ HITL-gated.
 
 ### 11.3 `permission_denied` interrupt (slice D) — `agent.py` + `hitl.py`
 
-> **Build status: SEAM ONLY — escalation deferred.** The `on_path_denied` parameter exists on
-> `build_agent` and the backend honours it (`agent.py`), but `cli.main` currently hardcodes
-> `on_path_denied=None` — it does **not** pass a callback even when HITL + the `permission_denied`
-> system interrupt are enabled. So in v1 a path-guard denial is **always** a plain refused tool
-> result (the off-HITL path below); the interrupt escalation, approve-once flow, and audit record
-> are **not active**. The design below is the target; wiring the callback is a follow-up. Invariants
-> 15–17 are aspirational until then.
+> **Build status: BUILT — audit-only, no approve offer.** `cli.main` now passes
+> `hitl.make_path_denied_handler(workspace)` as `on_path_denied` whenever HITL is on and
+> `hitl_conf.system_interrupt_enabled("permission_denied")` (`cli._should_audit_path_denials`). A
+> path-guard denial is now **visible in `interrupts.jsonl`** instead of a silent `PermissionError` —
+> but it does **not** suspend the graph or offer an approve choice. This resolves the tension the
+> original design left open (see the two superseded paragraphs this replaced): `pathguard.py` has no
+> floor/mask awareness — it only ever fires on a genuine `commonpath` mismatch, i.e. a real workspace
+> escape — and a real escape must never be a thing an operator's mis-click can wave through
+> (design_doc.md §2/§14 threat model, invariant 3 "Floor never approvable"). Since **every**
+> `PathGuardDenied` v1 can produce is exactly that never-approvable case, there is no decision to
+> actually offer, so the handler skips `raise_interrupt`/`GraphInterrupt` entirely: it audits directly
+> (`audit.record_interrupt`, `resolved_by="system"`, `meta={path, op, reason}`) and always returns a
+> non-`True` value, so the backend re-raises `PathGuardDenied` unchanged. Invariants 15/17/18 are now
+> built and tested; invariant 16 (the approvable-exception branch) remains structurally present-but-
+> unreachable in v1 — see the invariants doc.
+>
+> **What would change this.** The "approve a one-off exception" UX described in earlier drafts of
+> this section needs a denial that is genuinely **in-bounds but masked/non-floor** — a case that does
+> not exist yet, because a masked file is present-but-empty at the docker-mount layer (§11.1), not
+> intercepted as a denial at all. That case (and the interactive approve flow it would justify) is
+> real work for the bwrap file-tool jail (H), where each denied read becomes explicit. Building the
+> approve branch now, with nothing able to reach it, would be dead code — deferred, not forgotten.
 
-The denial must become a `GraphInterrupt` when HITL is on, or a plain refused tool result when it is
-off. The seam:
+The seam:
 
-- `build_agent` (`agent.py:328`) gains an optional `on_path_denied` callback (default `None`). `cli.main`
-  passes a callback **only when `hitl_conf is not None`** and the `permission_denied` system interrupt
-  is enabled (`hitl_conf.system_interrupt_enabled("permission_denied")`). The callback closes over the
-  request-builder — no `cost.py`-style cycle, because `agent.py` already imports freely and `interrupt`
-  imports no harness sibling.
-- `_WorkspaceShellBackend` catches `PathGuardDenied` from `pathguard.validate_path`. If `on_path_denied`
-  is set and the path is **in-bounds-but-masked / non-floor**, it calls it → the callback raises
-  `interrupt.raise_interrupt(new_request(KIND_APPROVE, prompt, default=False, source=SOURCE_SYSTEM,
-  meta={...}))`. This runs **inside the tool node**, exactly where `ask_human` (S3,
-  `hitl.make_ask_human_tool`) already raises `interrupt()` successfully, so the `GraphInterrupt`
-  propagates to `hitl.run_interrupt_loop` (drained in `run_turn`, `cli.py:507`). On **approve** →
-  return the resolved path (allow once); on **deny** → re-raise `PathGuardDenied` (→ tool error
-  result). Audit both via `audit.record_interrupt`.
-- **Never approvable:** a designated-secret **floor** path, or a path whose realpath is **outside** the
-  workspace (a true escape). Those raise `PathGuardDenied` straight through (no interrupt offer) — the
-  operator cannot grant an escape. `default=False` also fail-closes the headless/non-TTY path (§6).
+- `build_agent` (`agent.py:394`) takes an optional `on_path_denied` callback (default `None`). `cli.main`
+  passes one **only when `hitl_conf is not None`** and the `permission_denied` system interrupt is
+  enabled (`cli._should_audit_path_denials`). `hitl.make_path_denied_handler` closes over `workspace` —
+  no `cost.py`-style cycle, because `hitl.py` already imports `audit`/`interrupt` freely.
+- `_WorkspaceShellBackend._resolve_path` catches `PathGuardDenied` from `pathguard.validate_path` and,
+  when `on_path_denied` is set, calls it with `(resolved, base)`. The handler records an audit entry
+  (`kind=KIND_APPROVE`, `default=False`, `source=SOURCE_SYSTEM`, `meta={path, op:"file",
+  reason:"workspace escape"}`, `resolved_value=False`) and returns non-`True`, so the backend
+  re-raises `PathGuardDenied` regardless of HITL state — behaviour is identical on-HITL vs. off-HITL,
+  the only difference is whether it's logged. An audit-write failure never fails the turn (caught and
+  swallowed, matching the `_run_turn_hitl` provider-error audit call's contract).
 - **Off-HITL:** `on_path_denied is None` → the backend re-raises `PathGuardDenied` → deepagents returns
-  it as the tool's error result. Byte-for-byte a blocked call today.
-
-**v1 honesty:** with the docker mask, an in-workspace masked file simply reads **empty** — there is no
-per-read denial to intercept. So in v1 the `permission_denied` interrupt fires primarily on
-**path-guard traversal denials** (a visible, audited, fail-closed event). The full "approve a one-off
-read of a masked pattern/general path" UX lands with the bwrap file-tool jail (H), where each denied
-read is explicit. D's v1 deliverable is: the interrupt is wired, audited, floor-safe, and fail-closed;
-the approvable-exception path exists for in-bounds non-floor denials.
+  it as the tool's error result. Byte-for-byte a blocked call today, and byte-for-byte what happens
+  on-HITL too except for the audit line — this is a visibility feature, not a behavior change.
 
 ## 12. Support tier
 
@@ -677,8 +680,9 @@ Ship the floor first; harden after. Each PR is independently reviewable and leav
   sources, `DEEPAGENTS_MASK`/`_MODE` knobs, the git-pr staging exclusion (§15.1), smoke assertion.
   First real secret-hiding across all tools.
 - **PR3 — slices C + D (path guard + interrupt):** `pathguard.py` + backend wiring +
-  `tests/test_pathguard.py`; the `permission_denied` interrupt seam + `test_hitl`/`test_interrupt`
-  additions; `mask_add` tool. Completes the M3 S4 follow-up.
+  `tests/test_pathguard.py`; the `on_path_denied` seam + `mask_add` tool. D's audit-only wiring
+  (`hitl.make_path_denied_handler`, `cli._should_audit_path_denials`) landed as a follow-up commit —
+  see §11.3. Completes the M3 S4 follow-up.
 - **PR4 — slice E (`harness doctor`):** `doctor.py` + dispatch + `tests/test_doctor.py`; `verify` hook.
 - **PR5 — slice F (CI):** `.github/workflows/ci.yml` + `check-parity.{sh,ps1}`. Turns G's tests into a
   gate.
@@ -695,9 +699,11 @@ Ship the floor first; harden after. Each PR is independently reviewable and leav
 | `tests/test_doctor.py` | floor-negation misconfig → non-zero; dangling `default_model` → non-zero; `rate_table` missing pricing → non-zero; clean shipped registry → zero; keyless (no keys/network) | host |
 | `tests/test_cli.py` (add) | `dispatch("mask-scan")` / `dispatch("doctor")` route correctly; git-pr exclusion wiring reads the snapshot | host |
 | `tests/test_workflows.py` (add) | git-pr staging **excludes** the mask set — a masked `.env` is not staged (§15.1) | host (`sh`-gated) |
-| `tests/test_agent.py` (add) | `_WorkspaceShellBackend._resolve_path` refuses an escape; `on_path_denied=None` → `PathGuardDenied` as tool error; the guard passes a legit in-workspace path | image-only (`importorskip`) |
-| `tests/test_hitl.py` / `test_interrupt.py` (add) | `permission_denied` request shape (`meta` path/tier, `default=False`); floor path never offers approve; headless fail-closes | host |
-| smoke (`scripts/smoke.{ps1,sh}`) | keyless turn: a seeded `.env` in the workspace reads empty to the agent; graph-side `permission_denied` suspend/resume | image (smoke) |
+| `tests/test_agent.py` (add) | `_WorkspaceShellBackend._resolve_path` refuses an escape; `on_path_denied=None` → `PathGuardDenied` as tool error; the guard passes a legit in-workspace path; the backend calls `on_path_denied(resolved, base)` on a denial and honors its return value (generic seam contract, independent of D's own always-deny policy) | image-only (`importorskip`) |
+| `tests/test_hitl.py` (add) | `make_path_denied_handler` always returns non-`True`; audits via `audit.record_interrupt` (`resolved_by="system"`, `meta` carries path/op/reason); an audit-write failure never raises | host |
+| `tests/test_audit.py` (add) | `record_interrupt` persists `meta` (regression — it silently dropped `meta` for every interrupt kind before D); string `meta` values are scrubbed, non-string values pass through | host |
+| `tests/test_cli.py` (add) | `_should_audit_path_denials`: off when `hitl_conf is None`; off when `permission_denied` disabled; on when enabled | image-only |
+| smoke (`scripts/smoke.{ps1,sh}`) | keyless turn: a seeded `.env` in the workspace reads empty to the agent | image (smoke) |
 
 Conventions per `deepagent-image/CLAUDE.md` → "Test suite layout": no keys/network/real model calls;
 all writes to `tmp_path`; every floor/guard behaviour ships with a regression test.

@@ -32,18 +32,19 @@ Path guard (defense-in-depth)
 
 permission_denied interrupt (completes M3 S4)
 
-> **v1: DEFERRED (§11.3 v1-honesty).** The permission_denied interrupt is **not wired** in v1 —
-> `cli.py` passes `on_path_denied=None`, so a path-guard denial is always a plain refused tool
-> result (invariant 18), never an approval offer. In v1 the pathguard only blocks outright escapes,
-> which are un-approvable by definition, so there is nothing to approve and no interrupt to raise.
-> Invariants 15–17 describe the **target** wired behaviour and are **aspirational for v1** — they
-> become checkable only when the seam is wired (a future in-bounds mask-denial approval flow).
-> Invariant 18 is the one that holds in v1 and IS tested.
+> **v1: BUILT, audit-only (§11.3).** `cli._should_audit_path_denials` wires `hitl.make_path_denied_handler`
+> as `on_path_denied` when HITL is on and the `permission_denied` system interrupt is enabled. Every
+> `PathGuardDenied` v1 can produce is a true workspace escape (pathguard has no floor/mask awareness) —
+> never approvable by design (invariant 16) — so the handler does not raise a `GraphInterrupt` or offer
+> a choice; it audits directly (`audit.record_interrupt`, `resolved_by="system"`) and always denies.
+> Invariants 15, 17, 18 are built and tested. Invariant 16 remains structurally-present-but-unreachable:
+> the "approve an in-bounds masked exception" flow needs a denial type that doesn't exist until the
+> bwrap file-tool jail (H) makes a masked-read denial explicit.
 
-15. *(deferred)* Fail-closed. Headless / non-TTY / no-default → deny (default=False). Never hang, never default-allow. *(No interrupt path exists in v1; the pathguard itself is always fail-closed — a denial raises PathGuardDenied.)*
-16. *(deferred)* Approvable scope bounded. Operator may approve one-off only for in-bounds, non-floor path. Escape (realpath outside workspace) never approvable. *(Nothing is approvable in v1 — structurally satisfied but not exercised.)*
-17. *(deferred)* Audited without leaking. Every denial recorded via audit.record_interrupt — path/tier/op in meta, never file contents. *(No record_interrupt call for path denials in v1; PathGuardDenied surfaces as a raw tool error.)*
-18. Off-HITL = plain refusal. No .harness-config.yaml → denial is a normal refused tool result (PathGuardDenied), byte-for-byte a blocked call in M3. **This is the v1 behaviour for *all* denials.**
+15. Fail-closed. Headless / non-TTY / no-default → deny (default=False). Never hang, never default-allow. **Built.** No interrupt suspends the graph for this denial type (nothing to decide), so there is nothing to hang on; the pathguard itself is always fail-closed — a denial raises `PathGuardDenied` — and the audit-only handler never returns `True`. *(`test_hitl.py::test_path_denied_handler_always_denies`.)*
+16. *(deferred)* Approvable scope bounded. Operator may approve one-off only for in-bounds, non-floor path. Escape (realpath outside workspace) never approvable. *(Nothing is approvable in v1 — structurally satisfied but not exercised: `hitl.make_path_denied_handler` has no code path that returns `True`.)*
+17. Audited without leaking. Every denial recorded via audit.record_interrupt — path/tier/op in meta, never file contents. **Built.** `record_interrupt` now persists `meta` (previously silently dropped for every interrupt kind, not just this one — fixed alongside D); `op`/`reason` are recorded, `tier` is omitted (pathguard has no tier concept — every v1 denial is escape-type, not floor-tiered). *(`test_audit.py::test_meta_is_persisted`, `test_hitl.py::test_path_denied_handler_audits_the_denial`.)*
+18. Off-HITL = plain refusal. No .harness-config.yaml → denial is a normal refused tool result (PathGuardDenied), byte-for-byte a blocked call in M3. **Built.** Identical on-HITL vs. off-HITL except for the audit line — this slice adds visibility, not a behavior change. *(`test_cli.py::test_should_audit_path_denials_off_when_hitl_off`.)*
 
 git-pr (secret-handling hazard)
 

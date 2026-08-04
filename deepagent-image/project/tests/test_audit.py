@@ -79,3 +79,31 @@ def test_append_accumulates(tmp_path):
     audit.record_interrupt(tmp_path, _req(), True, env={})
     audit.record_interrupt(tmp_path, _req(), False, env={})
     assert len(audit.read_records(tmp_path)) == 2
+
+
+def test_meta_is_persisted(tmp_path):
+    # Regression: record_interrupt used to silently drop `meta` entirely, so a
+    # path-guard denial's path/op/reason never reached the audit log despite the
+    # source claiming to carry it (M4 slice D).
+    r = it.new_request(
+        it.KIND_APPROVE,
+        "path-guard denied an out-of-workspace access: ../etc/passwd",
+        source=it.SOURCE_SYSTEM,
+        meta={"path": "../etc/passwd", "op": "file", "reason": "workspace escape"},
+    )
+    rec = audit.record_interrupt(tmp_path, r, False, env={}, resolved_by="system")
+    assert rec["meta"] == {"path": "../etc/passwd", "op": "file", "reason": "workspace escape"}
+
+    back = audit.read_records(tmp_path)
+    assert back == [rec]
+
+
+def test_meta_string_values_are_scrubbed(tmp_path):
+    env = {"MY_TOKEN": "abcdef123456xyz"}
+    r = it.new_request(
+        it.KIND_APPROVE, "denied", source=it.SOURCE_SYSTEM,
+        meta={"path": "abcdef123456xyz", "count": 3},
+    )
+    rec = audit.record_interrupt(tmp_path, r, False, env=env)
+    assert "abcdef123456xyz" not in rec["meta"]["path"]
+    assert rec["meta"]["count"] == 3  # non-string values pass through untouched

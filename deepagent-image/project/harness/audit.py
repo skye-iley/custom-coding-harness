@@ -100,6 +100,7 @@ def record_interrupt(
         "resolved_by": resolved_by,
         "raised_at": raised_at or _now(),
         "resolved_at": resolved_at or _now(),
+        "meta": {k: (scrub(v, env) if isinstance(v, str) else v) for k, v in request.meta.items()},
     }
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")

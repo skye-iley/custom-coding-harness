@@ -191,6 +191,50 @@ def test_backend_guards_upstream_resolve_path(workspace_sandbox):
     )
 
 
+# --- _WorkspaceShellBackend on_path_denied seam (M4 slice D) ---------------
+#
+# deepagents' own LocalShellBackend._resolve_path already rejects most
+# traversal/absolute-escape forms before our override's pathguard check even
+# runs (pathguard is a belt-and-suspenders backstop, per its module docstring).
+# So to exercise OUR guard-calling logic in isolation -- independent of exactly
+# which escape shapes the current upstream version happens to catch first --
+# these stub out the parent resolution to simulate an upstream that returns an
+# out-of-bounds path unchecked.
+
+def test_backend_calls_on_path_denied_on_escape(workspace_sandbox, monkeypatch):
+    outside = str(workspace_sandbox.parent / "evil" / "x")
+    monkeypatch.setattr(agent.LocalShellBackend, "_resolve_path", lambda self, key: outside)
+
+    seen = {}
+
+    def _on_denied(resolved, base):
+        seen["resolved"] = resolved
+        seen["base"] = base
+        return False  # never approve -- matches hitl.make_path_denied_handler
+
+    backend = agent._WorkspaceShellBackend(
+        root_dir=str(workspace_sandbox), virtual_mode=True, inherit_env=False, env={},
+        on_path_denied=_on_denied,
+    )
+    with pytest.raises(agent.PathGuardDenied):
+        backend._resolve_path("whatever")
+    assert seen == {"resolved": outside, "base": str(workspace_sandbox)}
+
+
+def test_backend_honors_true_return_from_on_path_denied(workspace_sandbox, monkeypatch):
+    # Generic seam test: if a callback ever DOES approve (True), the backend
+    # must not re-raise. hitl.make_path_denied_handler never returns True in
+    # v1 (tested separately) -- this proves the backend-side contract only.
+    outside = str(workspace_sandbox.parent / "evil" / "x")
+    monkeypatch.setattr(agent.LocalShellBackend, "_resolve_path", lambda self, key: outside)
+
+    backend = agent._WorkspaceShellBackend(
+        root_dir=str(workspace_sandbox), virtual_mode=True, inherit_env=False, env={},
+        on_path_denied=lambda resolved, base: True,
+    )
+    backend._resolve_path("whatever")  # should not raise
+
+
 # --- build_agent prompt assembly (AGENTS.md append) ------------------------
 
 def test_build_agent_appends_agents_md(workspace_sandbox, monkeypatch):

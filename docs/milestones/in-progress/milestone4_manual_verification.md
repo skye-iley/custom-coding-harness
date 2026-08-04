@@ -38,9 +38,11 @@ The boundary is the **Docker container + the docker mount-mask**, *not* a sandbo
 file that exists, `ls` shows it, but `cat` yields nothing and its size is 0.
 
 **Known v1 gaps (do not treat these as bugs):**
-- The `permission_denied` HITL interrupt is **seam-only** — `cli.main` wires `on_path_denied=None`.
-  A path-guard denial is always a plain refused tool result, never an approval prompt. Invariants
-  15–17 are aspirational. Do not test for an approval flow; it does not exist yet.
+- The `permission_denied` HITL interrupt is **audit-only** — a path-guard denial is always a plain
+  refused tool result (never an approval prompt), but when HITL is on and the interrupt is enabled,
+  it is now also logged to `.agent_telemetry/interrupts.jsonl` (`resolved_by: "system"`). Do not test
+  for an approval flow; there is nothing to approve — every v1 denial is a true workspace escape,
+  which is never approvable by design.
 - The floor's "3rd independent leg" (a file backend that explicitly refuses a floor path) is **not
   built**. In v1 a floor file is protected by the docker overlay reading empty + the resolver
   dropping negations — two legs, not three.

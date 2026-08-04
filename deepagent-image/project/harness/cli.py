@@ -732,6 +732,12 @@ def _run_turn_hitl(agent, text, config, *, stream, extra_messages, hitl_ctx):
             raise
 
 
+def _should_audit_path_denials(hitl_conf) -> bool:
+    """True when a path-guard denial should be wired to the permission_denied
+    audit trail (M4 slice D) -- HITL is on and the system interrupt is enabled."""
+    return hitl_conf is not None and hitl_conf.system_interrupt_enabled("permission_denied")
+
+
 def _build_hitl_ctx(hitl_conf, workspace: Path, session, interactive: bool, headless: bool):
     """Assemble the per-run HitlContext, or None when HITL is off. The REPL
     channel reuses the same line-read seam the prompt loop uses (so history /
@@ -1203,11 +1209,16 @@ def main() -> int:
                 if mask_tool is not None:
                     tools.append(mask_tool)
 
-            # M4: path-guard denial — pathguard only denies outright escapes,
-            # which are never approvable. No HITL interrupt for v1; the
-            # permission_denied system_interrupt seam is reserved for future
-            # in-bounds mask denials (§11.3 v1 honesty).
-            on_path_denied = None
+            # M4 slice D: path-guard denial -> permission_denied audit trail.
+            # pathguard only ever denies outright workspace escapes, which are
+            # never approvable (hitl.make_path_denied_handler), so this never
+            # suspends the graph for a decision -- it only makes the denial
+            # visible in interrupts.jsonl instead of a silent PermissionError.
+            on_path_denied = (
+                hitl.make_path_denied_handler(workspace)
+                if _should_audit_path_denials(hitl_conf)
+                else None
+            )
 
             agent = build_agent(
                 chat_model,

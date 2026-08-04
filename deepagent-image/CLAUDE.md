@@ -359,11 +359,15 @@ code drifts from it in two deliberate places, noted below.
   tool result (trusted input, §6). Registered next to `recall_past`, gated on HITL.
 - **S4 system interrupts** — **`provider_error` is wired** (REPL-level retry/abort
   after P1 exhaustion, `cli._run_turn_hitl`; `switch provider` deferred — needs an
-  agent rebuild). **`missing_price` and `permission_denied` are recognized config
-  keys but not yet enforced** — `missing_price` would need `cost.py` to raise an
+  agent rebuild). **`permission_denied` is wired, audit-only** (Milestone 4 slice D,
+  `hitl.make_path_denied_handler` + `cli._should_audit_path_denials`): a path-guard
+  denial (always a true workspace escape in v1 — `pathguard.py` has no floor/mask
+  awareness) is logged to `interrupts.jsonl` when HITL is on, but never suspends the
+  graph or offers an approve choice — a real escape can't be a thing an operator's
+  mis-click waves through. Off-HITL behaviour is unchanged. **`missing_price` is a
+  recognized config key but not yet enforced** — it would need `cost.py` to raise an
   interrupt, which the acyclic import guard (cost imports no sibling) forbids, so it
-  belongs in a separate reader middleware; `permission_denied` rides on the §2/§10
-  path-guard/NetJail gates. Both are follow-ups.
+  belongs in a separate reader middleware. Follow-up.
 - **P2 headless (`cli.run_batch`, `--headless` / `DEEPAGENTS_HEADLESS`)** — one-shot:
   run the task(s) to completion, emit one JSON result on **stdout** (final message,
   thread id, tokens, cost, branch, exit code; stage markers stay on stderr). PR URL

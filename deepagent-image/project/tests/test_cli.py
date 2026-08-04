@@ -149,6 +149,27 @@ def test_dispatch_routes_doctor(monkeypatch):
     assert seen["argv"] == ["/ws"]
 
 
+# --- _should_audit_path_denials (M4 slice D) --------------------------------
+
+
+def test_should_audit_path_denials_off_when_hitl_off():
+    assert cli._should_audit_path_denials(None) is False
+
+
+def test_should_audit_path_denials_off_when_interrupt_disabled():
+    import harness.config as hitl_config
+
+    conf = hitl_config.Config(system_interrupts={"permission_denied": False})
+    assert cli._should_audit_path_denials(conf) is False
+
+
+def test_should_audit_path_denials_on_when_enabled():
+    import harness.config as hitl_config
+
+    conf = hitl_config.Config(system_interrupts={"permission_denied": True})
+    assert cli._should_audit_path_denials(conf) is True
+
+
 # --- _is_exit_command ------------------------------------------------------
 
 @pytest.mark.parametrize("line", ["/exit", "/quit", " /EXIT ", "/Quit\n"])

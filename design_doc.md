@@ -73,6 +73,49 @@ thread id), isolates workspace dependencies in a workspace-local conda env, and 
 
 ---
 
+## Product Identity — Core vs. Peripheral
+
+> Orthogonal to the ✅/🟡/⬜/🔬 build-status matrix above. That matrix says *what's built*; this says
+> *what the harness isn't itself without*, regardless of build order. Some core items ship late
+> because they have real dependencies — later ≠ optional. Anything not listed here is default
+> priority: built when it's next in line, not because it defines the product.
+
+### Core identity — dependency chain (ship order = dependency order)
+
+1. **M4 slice H — bwrap fs-tool jail** (`docs/milestones/in-progress/milestone4.md` §4H; design_doc
+   §2 Bubblewrap Configuration). The real allow-list boundary — routes **both** shell and file tools
+   through the jail. Everything below that claims per-agent isolation is aspirational without it;
+   today's boundary is the docker mount-mask (deny-list, present-but-empty), not a sandbox.
+2. **`HarnessProfile`** (§2 "HarnessProfile dynamic bind mounts", §4 "Specialized Profiles") —
+   per-agent scoped tool/bind config. Depends on (1): profile bind-scoping is only real once bwrap
+   enforces it; today there's a fixed bind list and no profile object at all.
+3. **Per-agent `NetworkPolicy`** (§2 "Per-Agent Network Policy") — subtractive egress/host-service/
+   net-tool gating per agent, layered on the container-wide NetJail (built). Depends on (2) —
+   `NetworkPolicy` is a field on `HarnessProfile`. App-layer/env-based, not kernel-enforced, so it's a
+   real but soft boundary on its own; meaningful mainly paired with (1).
+4. **Config-driven allowlist selection** (§2, `@group` / `enabled.txt`) — small, near-independent;
+   makes (3)'s container-wide allowlist operable from a menu instead of hand-edited comment toggles.
+5. **Routing gate — LLM-or-script based, not the FSM classifier** (§3 "Funnel", §4 "Router
+   Architecture"). Core identity is *routing exists* (a per-input gate selects a target), not the
+   specific Qwen/FSM-constrained-output implementation — that stays 🔬 research, no accuracy baseline.
+   Ship a deterministic-predicate or plain-LLM-call gate first (§3 already specs this: "a funnel ships
+   with a trivial deterministic gate and upgrades to a classifier/LLM criterion without changing
+   shape"); the FSM classifier is one future gate criterion, not a prerequisite.
+6. **Multi-agent funnel** (§5, "classifier→orchestrator→worker") — the control-flow action of (5),
+   dispatching to N targets. Depends on (5) for the gate and (2)/(3) for scoping what each funneled
+   agent can touch — a funnel with no per-agent isolation is one trust boundary shared by every
+   subagent, which undercuts the point of funneling.
+
+### Core identity — independent of the chain above
+
+- **Telemetry** (§8 Observability + §12.7 Cost/telemetry persistence) — session-level trace/metrics
+  plus PR-appended summaries. The cost tracker (M1, built) already computes the data; this is the
+  missing on-disk sink (`usage.jsonl`) and PR-surface (§8 "PR Metadata").
+- **File-read middleware** (§13) — per-file read-time shaping (tag-gated hide/note regions,
+  progressive disclosure). Standalone seam; no dependency on the chain above.
+
+---
+
 ## 2. Sandboxing Strategy & Container Layout
 > **Status:** 🟡 Partial — single container + conda isolation + secret provisioning + persistent workspace + resource limits + opt-in container-wide NetJail (deny-all egress + allowlist) built; dual-container, bubblewrap jail (built but not wired in), `HarnessProfile` binds + per-agent network policy + config-driven allowlist selection, and path guard **planned**. See the status matrix above.
 

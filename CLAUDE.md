@@ -22,8 +22,11 @@ secret-safe containers.
     on a feature branch). *(`milestone4.md` — **Real Trust Boundary**, code on `feat/milestone_4`,
     slices A–G landed, not yet merged: workspace visibility (`.agentignore`, 3-tier policy,
     designated-secret floor), docker mount-mask, path-guard middleware, `harness doctor`, CI pipeline,
-    security test suite. Slice D (`permission_denied` interrupt) is **seam-only — escalation deferred**
-    (`cli.main` wires `on_path_denied=None`; a denial is a plain refused tool result in v1). Stretch H
+    security test suite. Slice D (`permission_denied` interrupt) is **built, audit-only** — a path-guard
+    denial (always a true workspace escape in v1; pathguard has no floor/mask awareness) is now logged
+    to `interrupts.jsonl` when HITL is on, but never offers an interactive approve — a real escape must
+    never be a thing an operator's mis-click can wave through, and every denial pathguard can currently
+    produce is exactly that never-approvable case. Off-HITL behaviour is unchanged. Stretch H
     (bwrap fs-tool jail) not yet built. `milestone4_invariants.md` — the 30 checkable boundary invariants that drive its tests;
     folds into `milestone4.md` on completion.)*
   - `docs/milestones/planned/` — **not-yet-built** milestones (docs only). Wins over `design_doc.md`
