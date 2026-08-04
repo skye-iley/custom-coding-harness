@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from deepagents import create_deep_agent
 from deepagents.backends import LocalShellBackend
@@ -204,11 +205,25 @@ class _WorkspaceShellBackend(LocalShellBackend):
         if base:
             try:
                 validate_path(str(resolved), base)
-            except PathGuardDenied:
-                if self._on_path_denied:
-                    if self._on_path_denied(str(resolved), base) is not True:
-                        raise
-                else:
+            except PathGuardDenied as exc:
+                approved = (
+                    self._on_path_denied(str(resolved), base) is True
+                    if self._on_path_denied
+                    else False
+                )
+                if not approved:
+                    # Unconditional, HITL or not. The structured record in the
+                    # state dir is HITL-gated, but a workspace escape must never
+                    # be *silent* to the operator: without this the only trace is
+                    # the tool-error string the model reads back, which it can
+                    # quietly route around. Same ground-truth-over-model reasoning
+                    # as PauseMiddleware's "DENIED — NOT executed" line. stderr, so
+                    # the headless JSON stdout contract is untouched.
+                    print(
+                        f"[harness] path-guard DENIED — {exc.relpath} escapes the "
+                        "workspace; access refused",
+                        file=sys.stderr,
+                    )
                     raise
         return resolved
 
@@ -391,7 +406,7 @@ def build_agent(
     tools: list | None = None,
     middleware: list[AgentMiddleware] | None = None,
     checkpointer: Any = None,
-    on_path_denied: callable | None = None,
+    on_path_denied: Callable[[str, str], bool] | None = None,
 ):
     workspace.mkdir(parents=True, exist_ok=True)
     backend = _WorkspaceShellBackend(

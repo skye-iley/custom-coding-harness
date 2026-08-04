@@ -362,9 +362,19 @@ code drifts from it in two deliberate places, noted below.
   agent rebuild). **`permission_denied` is wired, audit-only** (Milestone 4 slice D,
   `hitl.make_path_denied_handler` + `cli._should_audit_path_denials`): a path-guard
   denial (always a true workspace escape in v1 — `pathguard.py` has no floor/mask
-  awareness) is logged to `interrupts.jsonl` when HITL is on, but never suspends the
-  graph or offers an approve choice — a real escape can't be a thing an operator's
-  mis-click waves through. Off-HITL behaviour is unchanged. **`missing_price` is a
+  awareness) never suspends the graph or offers an approve choice — a real escape
+  can't be a thing an operator's mis-click waves through. It surfaces on **two
+  channels with different gating**: (1) an operator `[harness] path-guard DENIED — …`
+  line on **stderr from `agent._resolve_path`, always, HITL or not** — off-HITL the
+  only other trace is the tool-error string the *model* reads back, which it can
+  quietly route around; and (2) a structured record in **`<state-dir>/denials.jsonl`**
+  when HITL is on. That record deliberately does **not** go in the in-workspace
+  `interrupts.jsonl`: a denial is evidence the agent tried to escape, and the
+  workspace log is in-bounds for the path guard, so the agent's own file tools could
+  truncate it (same isolation rationale as M2's `past.sqlite`). Closes the file-tool
+  tamper path only — the shell tool is container-root-bounded, not guard-covered, so
+  it can still reach the state dir until the bwrap jail. The *refusal* is unchanged
+  off-HITL. **`missing_price` is a
   recognized config key but not yet enforced** — it would need `cost.py` to raise an
   interrupt, which the acyclic import guard (cost imports no sibling) forbids, so it
   belongs in a separate reader middleware. Follow-up.
@@ -386,8 +396,13 @@ code drifts from it in two deliberate places, noted below.
   the channel stays host-testable with a fake `select` and the non-TTY path is
   unchanged.
 - **S7 audit (`audit.py`)** — appends a scrubbed record (id, kind, prompt, resolved
-  value, source, timestamps — **never the context payload**) to
-  `<workspace>/.agent_telemetry/interrupts.jsonl`, git-ignored and git-pr-excluded.
+  value, source, `meta`, timestamps — **never the context payload**) to one of **two
+  sinks**. Default: `<workspace>/.agent_telemetry/interrupts.jsonl`, git-ignored and
+  git-pr-excluded — the HITL UX trail, and agent-writable. Boundary denials instead
+  pass `sink=audit.denials_path(archive.state_dir(workspace))` →
+  `<state-dir>/denials.jsonl`, outside the workspace mount (see S4 above). `meta` is
+  scrubbed **recursively**, since it is a free dict and a nested value would
+  otherwise be a blind spot around the §10 backstop.
 
 **Budget/clock pause on interrupt (§6 "pause the clock") is not yet wired** — the M1
 cost/resource caps still tick while a human is deciding; tracked as a follow-up.

@@ -16,6 +16,7 @@ from _bootstrap import _load
 it = _load("harness.interrupt")
 cfg = _load("harness.config")
 audit = _load("harness.audit")
+archive = _load("harness.archive")
 hitl = _load("harness.hitl")
 
 
@@ -373,6 +374,20 @@ def test_err_detail_walks_cause_chain():
 # --- S4: permission_denied path-guard handler (M4 slice D) -------------------
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_state_dir(monkeypatch):
+    """The denial sink resolves through ``archive.state_dir``, which honors
+    DEEPAGENTS_STATE_DIR. Clear it so these tests read the tmp_path layout and
+    never write to a real run's state dir."""
+    monkeypatch.delenv(archive.STATE_DIR_ENV, raising=False)
+
+
+def _denials(workspace):
+    return audit.read_records(
+        workspace, sink=audit.denials_path(archive.state_dir(workspace))
+    )
+
+
 def test_path_denied_handler_always_denies(tmp_path):
     # A workspace escape is never approvable -- the handler must return a
     # non-True value regardless, so the backend re-raises PathGuardDenied.
@@ -385,7 +400,7 @@ def test_path_denied_handler_audits_the_denial(tmp_path):
     handler = hitl.make_path_denied_handler(tmp_path)
     handler("/workspace-evil/secret", "/workspace")
 
-    records = audit.read_records(tmp_path)
+    records = _denials(tmp_path)
     assert len(records) == 1
     rec = records[0]
     assert rec["source"] == it.SOURCE_SYSTEM
@@ -398,10 +413,55 @@ def test_path_denied_handler_audits_the_denial(tmp_path):
     assert "path" in rec["meta"]
 
 
-def test_path_denied_handler_never_raises_on_audit_failure(tmp_path, monkeypatch):
-    # An audit write must never fail the turn (same contract as _run_turn_hitl's
-    # provider-error audit call) -- a denial still resolves even if the disk
-    # write fails.
+def test_path_denied_record_is_marked_audit_only(tmp_path):
+    # kind=approve + resolved_value=False otherwise reads, on replay, as "a human
+    # was asked and declined". Nobody was asked -- this denial type has no approve
+    # branch at all, and the record must say so.
+    handler = hitl.make_path_denied_handler(tmp_path)
+    handler("/outside/x", "/workspace")
+
+    assert _denials(tmp_path)[0]["meta"]["audit_only"] is True
+
+
+def test_path_denied_record_lands_outside_the_workspace(tmp_path):
+    # The record of an escape ATTEMPT must not sit where the escaping agent's own
+    # file tools can truncate it. It goes to the state dir (M4 invariant 20), not
+    # <workspace>/.agent_telemetry/ (which is in-bounds for the path guard).
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    handler = hitl.make_path_denied_handler(workspace)
+    handler(str(tmp_path / "evil" / "secret"), str(workspace))
+
+    assert len(_denials(workspace)) == 1
+    # nothing was written to the agent-reachable in-workspace sink
+    assert audit.read_records(workspace) == []
+    assert not audit.interrupts_path(workspace).exists()
+
+
+def test_path_denied_handler_survives_relpath_failure(tmp_path, monkeypatch):
+    # os.path.relpath raises on inputs a real denial can produce (another Windows
+    # drive; an empty path on posix). The handler runs INSIDE the backend's
+    # `except PathGuardDenied` block, so a second exception here would replace the
+    # PermissionError the tool layer expects -- and drop the record.
+    import os as _os
+
+    def _boom(*a, **k):
+        raise ValueError("path is on mount 'C:', start on mount 'D:'")
+
+    monkeypatch.setattr(_os.path, "relpath", _boom)
+    handler = hitl.make_path_denied_handler(tmp_path)
+
+    assert handler("/outside/x", "/workspace") is not True
+    records = _denials(tmp_path)
+    assert len(records) == 1                       # still audited
+    assert records[0]["meta"]["path"] == "/outside/x"  # degraded to the abs path
+
+
+def test_path_denied_handler_never_raises_on_audit_failure(tmp_path, monkeypatch, capsys):
+    # An audit write must never fail the turn -- a denial still resolves even if
+    # the disk write fails. But it must not be SILENT either: this is the record
+    # of a boundary violation, so a failed write is itself reported to stderr
+    # (matching the other three record_interrupt call sites).
     handler = hitl.make_path_denied_handler(tmp_path)
 
     def _boom(*a, **k):
@@ -409,3 +469,7 @@ def test_path_denied_handler_never_raises_on_audit_failure(tmp_path, monkeypatch
 
     monkeypatch.setattr(audit, "record_interrupt", _boom)
     assert handler("/outside/x", "/workspace") is not True
+
+    err = capsys.readouterr().err
+    assert "failed to record path denial" in err
+    assert "disk full" in err

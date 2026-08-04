@@ -23,10 +23,12 @@ secret-safe containers.
     slices A–G landed, not yet merged: workspace visibility (`.agentignore`, 3-tier policy,
     designated-secret floor), docker mount-mask, path-guard middleware, `harness doctor`, CI pipeline,
     security test suite. Slice D (`permission_denied` interrupt) is **built, audit-only** — a path-guard
-    denial (always a true workspace escape in v1; pathguard has no floor/mask awareness) is now logged
-    to `interrupts.jsonl` when HITL is on, but never offers an interactive approve — a real escape must
-    never be a thing an operator's mis-click can wave through, and every denial pathguard can currently
-    produce is exactly that never-approvable case. Off-HITL behaviour is unchanged. Stretch H
+    denial (always a true workspace escape in v1; pathguard has no floor/mask awareness) never offers
+    an interactive approve — a real escape must never be a thing an operator's mis-click can wave
+    through, and every denial pathguard can currently produce is exactly that never-approvable case.
+    It surfaces as an always-on stderr `path-guard DENIED` line (HITL or not) plus, when HITL is on, a
+    structured record in `<state-dir>/denials.jsonl` — outside the workspace, so the agent can't
+    truncate the evidence of its own escape attempt. The *refusal* is unchanged off-HITL. Stretch H
     (bwrap fs-tool jail) not yet built. `milestone4_invariants.md` — the 30 checkable boundary invariants that drive its tests;
     folds into `milestone4.md` on completion.)*
   - `docs/milestones/planned/` — **not-yet-built** milestones (docs only). Wins over `design_doc.md`

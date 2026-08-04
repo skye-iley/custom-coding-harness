@@ -734,7 +734,11 @@ def _run_turn_hitl(agent, text, config, *, stream, extra_messages, hitl_ctx):
 
 def _should_audit_path_denials(hitl_conf) -> bool:
     """True when a path-guard denial should be wired to the permission_denied
-    audit trail (M4 slice D) -- HITL is on and the system interrupt is enabled."""
+    audit trail (M4 slice D) -- HITL is on and the system interrupt is enabled.
+
+    Gates only the *structured* record (`<state-dir>/denials.jsonl`). The
+    operator-visible stderr line is emitted by the backend unconditionally, so an
+    escape attempt is never silent even with HITL off."""
     return hitl_conf is not None and hitl_conf.system_interrupt_enabled("permission_denied")
 
 
@@ -1212,8 +1216,10 @@ def main() -> int:
             # M4 slice D: path-guard denial -> permission_denied audit trail.
             # pathguard only ever denies outright workspace escapes, which are
             # never approvable (hitl.make_path_denied_handler), so this never
-            # suspends the graph for a decision -- it only makes the denial
-            # visible in interrupts.jsonl instead of a silent PermissionError.
+            # suspends the graph for a decision -- it writes a structured record
+            # to <state-dir>/denials.jsonl (outside the workspace, so the agent
+            # cannot truncate the evidence of its own escape attempt). The
+            # always-on stderr denial line lives in agent._resolve_path.
             on_path_denied = (
                 hitl.make_path_denied_handler(workspace)
                 if _should_audit_path_denials(hitl_conf)

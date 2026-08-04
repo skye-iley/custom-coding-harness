@@ -39,10 +39,18 @@ file that exists, `ls` shows it, but `cat` yields nothing and its size is 0.
 
 **Known v1 gaps (do not treat these as bugs):**
 - The `permission_denied` HITL interrupt is **audit-only** — a path-guard denial is always a plain
-  refused tool result (never an approval prompt), but when HITL is on and the interrupt is enabled,
-  it is now also logged to `.agent_telemetry/interrupts.jsonl` (`resolved_by: "system"`). Do not test
-  for an approval flow; there is nothing to approve — every v1 denial is a true workspace escape,
-  which is never approvable by design.
+  refused tool result (never an approval prompt). Do not test for an approval flow; there is nothing
+  to approve — every v1 denial is a true workspace escape, which is never approvable by design.
+  What you *should* see on a denial:
+  - a `[harness] path-guard DENIED — …` line on **stderr**, always, with or without HITL; and
+  - when HITL is on and the interrupt is enabled, a JSON record in **`<state-dir>/denials.jsonl`**
+    (`resolved_by: "system"`, `meta.audit_only: true`) — under `run-docker` that is
+    `deepagent-image/project/state/<ws-key>/denials.jsonl` on the host, **not** anywhere in the
+    workspace. It is deliberately outside the workspace mount so the agent cannot truncate the
+    record of its own escape attempt.
+- **The denial record is not shell-proof.** The state dir defeats the agent's *file* tools (the path
+  guard refuses it), but the shell tool is bounded only by the container root, so `cat`/`>` on the
+  absolute state-dir path still works until the bwrap jail (slice H). Don't report that as a bug.
 - The floor's "3rd independent leg" (a file backend that explicitly refuses a floor path) is **not
   built**. In v1 a floor file is protected by the docker overlay reading empty + the resolver
   dropping negations — two legs, not three.

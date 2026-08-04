@@ -461,7 +461,7 @@ HITL-gated.
 > **Build status: BUILT — audit-only, no approve offer.** `cli.main` now passes
 > `hitl.make_path_denied_handler(workspace)` as `on_path_denied` whenever HITL is on and
 > `hitl_conf.system_interrupt_enabled("permission_denied")` (`cli._should_audit_path_denials`). A
-> path-guard denial is now **visible in `interrupts.jsonl`** instead of a silent `PermissionError` —
+> path-guard denial is now **visible on two channels** instead of a silent `PermissionError` —
 > but it does **not** suspend the graph or offer an approve choice. This resolves the tension the
 > original design left open (see the two superseded paragraphs this replaced): `pathguard.py` has no
 > floor/mask awareness — it only ever fires on a genuine `commonpath` mismatch, i.e. a real workspace
@@ -469,10 +469,35 @@ HITL-gated.
 > (design_doc.md §2/§14 threat model, invariant 3 "Floor never approvable"). Since **every**
 > `PathGuardDenied` v1 can produce is exactly that never-approvable case, there is no decision to
 > actually offer, so the handler skips `raise_interrupt`/`GraphInterrupt` entirely: it audits directly
-> (`audit.record_interrupt`, `resolved_by="system"`, `meta={path, op, reason}`) and always returns a
-> non-`True` value, so the backend re-raises `PathGuardDenied` unchanged. Invariants 15/17/18 are now
-> built and tested; invariant 16 (the approvable-exception branch) remains structurally present-but-
-> unreachable in v1 — see the invariants doc.
+> (`audit.record_interrupt`, `resolved_by="system"`, `meta={path, op, reason, audit_only}`) and always
+> returns a non-`True` value, so the backend re-raises `PathGuardDenied` unchanged. Invariants
+> 15/17/18 are now built and tested; invariant 16 (the approvable-exception branch) remains
+> structurally present-but-unreachable in v1 — see the invariants doc.
+>
+> **Two channels, deliberately split by gating:**
+>
+> 1. **stderr line — always on, HITL or not.** `agent._resolve_path` prints
+>    `[harness] path-guard DENIED — <relpath> escapes the workspace; access refused` on every refusal.
+>    Ungated because the default posture is HITL-off, and there the *only* other trace of an escape
+>    attempt is the tool-error string the **model** reads back — which it can quietly route around.
+>    Same ground-truth-over-model reasoning as `PauseMiddleware`'s `DENIED — NOT executed` line.
+>    stderr keeps the headless JSON stdout contract intact.
+> 2. **Structured record — HITL-gated, written outside the workspace.** `<state-dir>/denials.jsonl`
+>    (`audit.denials_path(archive.state_dir(workspace))`), **not** `<workspace>/.agent_telemetry/`.
+>    A denial is evidence the agent tried to escape; the in-workspace audit log is in-bounds for the
+>    path guard, so the agent's own `write_file`/shell could truncate exactly the record that
+>    incriminates it. The state dir is the same isolation M2 gave `past.sqlite` (invariant 20).
+>    **Honest scope**, two limits inherited from the M2 state-dir seam: (a) it defeats the *file*-tool
+>    tamper path, not the shell one — the shell tool is container-root-bounded, not guard-covered
+>    (invariant 14), so it can still reach the state dir by absolute path until the bwrap jail (H);
+>    (b) it holds only when `DEEPAGENTS_STATE_DIR` is set (`run-docker` always sets it to
+>    `/project/state`) — otherwise `archive.state_dir` falls back to `<workspace>/.deepagents`, back
+>    inside the agent's reach. A raw `docker run` without the state mount gets no isolation here,
+>    exactly as it gets none for `past.sqlite`.
+>
+> An audit-write failure never fails the turn, but is **reported to stderr** rather than swallowed —
+> a lost record of a boundary violation is itself worth surfacing, and it matches the other three
+> `record_interrupt` call sites.
 >
 > **What would change this.** The "approve a one-off exception" UX described in earlier drafts of
 > this section needs a denial that is genuinely **in-bounds but masked/non-floor** — a case that does
@@ -487,16 +512,23 @@ The seam:
   passes one **only when `hitl_conf is not None`** and the `permission_denied` system interrupt is
   enabled (`cli._should_audit_path_denials`). `hitl.make_path_denied_handler` closes over `workspace` —
   no `cost.py`-style cycle, because `hitl.py` already imports `audit`/`interrupt` freely.
-- `_WorkspaceShellBackend._resolve_path` catches `PathGuardDenied` from `pathguard.validate_path` and,
-  when `on_path_denied` is set, calls it with `(resolved, base)`. The handler records an audit entry
-  (`kind=KIND_APPROVE`, `default=False`, `source=SOURCE_SYSTEM`, `meta={path, op:"file",
-  reason:"workspace escape"}`, `resolved_value=False`) and returns non-`True`, so the backend
-  re-raises `PathGuardDenied` regardless of HITL state — behaviour is identical on-HITL vs. off-HITL,
-  the only difference is whether it's logged. An audit-write failure never fails the turn (caught and
-  swallowed, matching the `_run_turn_hitl` provider-error audit call's contract).
-- **Off-HITL:** `on_path_denied is None` → the backend re-raises `PathGuardDenied` → deepagents returns
-  it as the tool's error result. Byte-for-byte a blocked call today, and byte-for-byte what happens
-  on-HITL too except for the audit line — this is a visibility feature, not a behavior change.
+- `_WorkspaceShellBackend._resolve_path` catches `PathGuardDenied` from `pathguard.validate_path`,
+  calls `on_path_denied(resolved, base)` when one is set, and — unless that returns `True` — prints
+  the stderr denial line and re-raises. The handler records an entry (`kind=KIND_APPROVE`,
+  `default=False`, `source=SOURCE_SYSTEM`, `meta={path, op:"file", reason:"workspace escape",
+  audit_only:True}`, `resolved_value=False`, `resolved_by="system"`) into the state-dir sink and
+  returns non-`True`. `meta["audit_only"]` exists because `kind=approve` + `resolved_value=False`
+  otherwise reads on replay as "a human declined" — nobody was asked; there is no approve branch.
+  `resolved_by="system"` is a fourth value never produced by `hitl.resolve_value` (documented there).
+- The handler computes its relpath via `pathguard.relative_to`, not raw `os.path.relpath`. It runs
+  *inside* the backend's `except PathGuardDenied` block, so a second exception (relpath rejects a
+  different Windows drive, and an empty path on posix) would replace the `PermissionError` the tool
+  layer expects **and** drop the record. `relative_to` degrades to the absolute target instead.
+- **Off-HITL:** `on_path_denied is None` → the backend prints the denial line and re-raises
+  `PathGuardDenied` → deepagents returns it as the tool's error result. The *refusal* is byte-for-byte
+  a blocked call today; what HITL adds is only the structured record. Note the always-on stderr line
+  means a denial is no longer byte-for-byte silent vs. M3 — deliberate, and scoped to an event that
+  could not occur in M3 at all (the guard is M4-new, and has zero false positives per invariant 13).
 
 ## 12. Support tier
 
@@ -578,8 +610,11 @@ provider keys** — every tier is keyless by construction.
 common case; §16 fork 1). The escape hatch is explicit: **`DEEPAGENTS_MASK=0`** disables the scan, the
 mask mounts, the floor, and the snapshot entirely → the harness is byte-for-byte Milestone 3. The path
 guard (§11.2) stays on because it has no false positives on legitimate file ops, and the
-`permission_denied` interrupt stays HITL-gated as before. So: `DEEPAGENTS_MASK=0` **+** no
-`.harness-config.yaml` ⇒ exactly M3.
+`permission_denied` **structured record** stays HITL-gated as before. So: `DEEPAGENTS_MASK=0` **+** no
+`.harness-config.yaml` ⇒ exactly M3 **on every path a legitimate run takes**. The one ungated addition
+is the stderr `path-guard DENIED` line (§11.3), which can only fire on a genuine workspace escape — an
+event M3 had no guard to detect at all, so there is no M3 behaviour for it to differ from. A silent
+boundary violation is not a contract worth preserving.
 
 ## 14. Threat model — what holds, what doesn't
 
@@ -695,13 +730,13 @@ Ship the floor first; harden after. Each PR is independently reviewable and leav
 | File | Cases | Tier |
 |------|-------|------|
 | `tests/test_mask.py` | gitignore parity (negation, `**`, nesting, anchored vs floating, dir-only, last-match-wins); symlink canonicalization + symlink-out masking; mode classification (deny/allow); **floor invariant** (a `!`/allow entry targeting a floor path does **not** expose it — regression); emission grammar + minimization (whole-dir vs per-leaf under a negated descendant); snapshot diff / protection-reduction warning; `mask_add` raise-only (append helper) | host |
-| `tests/test_pathguard.py` | in-bounds pass; `../` traversal refuse; absolute-path refuse; **sibling escape** (`/workspace-evil` vs `/workspace` — `commonpath` not `startswith`); in-workspace symlink-out refuse | host |
+| `tests/test_pathguard.py` | in-bounds pass; `../` traversal refuse; absolute-path refuse; **sibling escape** (`/workspace-evil` vs `/workspace` — `commonpath` not `startswith`); in-workspace symlink-out refuse; `relative_to` never raises (cross-drive / no-common-prefix degrade to the abs target, so a denial can't be replaced by a `ValueError`) | host |
 | `tests/test_doctor.py` | floor-negation misconfig → non-zero; dangling `default_model` → non-zero; `rate_table` missing pricing → non-zero; clean shipped registry → zero; keyless (no keys/network) | host |
 | `tests/test_cli.py` (add) | `dispatch("mask-scan")` / `dispatch("doctor")` route correctly; git-pr exclusion wiring reads the snapshot | host |
 | `tests/test_workflows.py` (add) | git-pr staging **excludes** the mask set — a masked `.env` is not staged (§15.1) | host (`sh`-gated) |
-| `tests/test_agent.py` (add) | `_WorkspaceShellBackend._resolve_path` refuses an escape; `on_path_denied=None` → `PathGuardDenied` as tool error; the guard passes a legit in-workspace path; the backend calls `on_path_denied(resolved, base)` on a denial and honors its return value (generic seam contract, independent of D's own always-deny policy) | image-only (`importorskip`) |
-| `tests/test_hitl.py` (add) | `make_path_denied_handler` always returns non-`True`; audits via `audit.record_interrupt` (`resolved_by="system"`, `meta` carries path/op/reason); an audit-write failure never raises | host |
-| `tests/test_audit.py` (add) | `record_interrupt` persists `meta` (regression — it silently dropped `meta` for every interrupt kind before D); string `meta` values are scrubbed, non-string values pass through | host |
+| `tests/test_agent.py` (add) | `_WorkspaceShellBackend._resolve_path` refuses an escape; `on_path_denied=None` → `PathGuardDenied` as tool error (**invariant 18's actual assertion**, not just the wiring predicate); the guard passes a legit in-workspace path; the backend calls `on_path_denied(resolved, base)` on a denial and honors its return value (generic seam contract, independent of D's own always-deny policy); a refusal always prints `path-guard DENIED` to **stderr** with stdout clean, handler or not, and stays quiet when a handler approves | image-only (`importorskip`) |
+| `tests/test_hitl.py` (add) | `make_path_denied_handler` always returns non-`True`; audits via `audit.record_interrupt` (`resolved_by="system"`, `meta` carries path/op/reason/`audit_only`); the record lands in the **state dir**, with the in-workspace `interrupts.jsonl` untouched; a `relpath` failure still audits (degraded to the abs path) rather than escaping the handler; an audit-write failure never raises **but does report to stderr** | host |
+| `tests/test_audit.py` (add) | `record_interrupt` persists `meta` (regression — it silently dropped `meta` for every interrupt kind before D); string `meta` values are scrubbed, non-string values pass through, and the scrub **recurses** into nested dicts/lists; `denials_path` resolves under the state dir; `sink=` overrides the destination and leaves the default in-workspace log untouched | host |
 | `tests/test_cli.py` (add) | `_should_audit_path_denials`: off when `hitl_conf is None`; off when `permission_denied` disabled; on when enabled | image-only |
 | smoke (`scripts/smoke.{ps1,sh}`) | keyless turn: a seeded `.env` in the workspace reads empty to the agent | image (smoke) |
 

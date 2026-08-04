@@ -7,6 +7,8 @@ round-trip.
 
 from __future__ import annotations
 
+import json
+
 from _bootstrap import _load
 
 # audit imports harness.interrupt; load that first so the bare-harness package is
@@ -107,3 +109,37 @@ def test_meta_string_values_are_scrubbed(tmp_path):
     rec = audit.record_interrupt(tmp_path, r, False, env=env)
     assert "abcdef123456xyz" not in rec["meta"]["path"]
     assert rec["meta"]["count"] == 3  # non-string values pass through untouched
+
+
+def test_meta_scrub_reaches_nested_values(tmp_path):
+    # meta is a free-form dict, so a producer can nest. A top-level-only scrub
+    # would make nesting a silent way around the §10 backstop -- exactly what
+    # dropping `context` exists to prevent.
+    env = {"MY_TOKEN": "abcdef123456xyz"}
+    r = it.new_request(
+        it.KIND_APPROVE, "denied", source=it.SOURCE_SYSTEM,
+        meta={"outer": {"inner": "abcdef123456xyz"}, "items": ["abcdef123456xyz", 7]},
+    )
+    rec = audit.record_interrupt(tmp_path, r, False, env=env)
+    assert "abcdef123456xyz" not in json.dumps(rec["meta"])
+    assert rec["meta"]["items"][1] == 7
+
+
+# --- two sinks: in-workspace log vs. agent-unreachable denial log (M4 slice D) --
+
+
+def test_denials_path_is_under_the_state_dir(tmp_path):
+    p = audit.denials_path(tmp_path / "state")
+    assert p.name == "denials.jsonl"
+    assert p.parent == tmp_path / "state"
+
+
+def test_sink_overrides_the_default_destination(tmp_path):
+    sink = tmp_path / "state" / "denials.jsonl"
+    rec = audit.record_interrupt(tmp_path, _req(), False, env={}, sink=sink)
+
+    assert sink.is_file()
+    assert audit.read_records(tmp_path, sink=sink) == [rec]
+    # the default in-workspace log is untouched
+    assert not audit.interrupts_path(tmp_path).exists()
+    assert audit.read_records(tmp_path) == []

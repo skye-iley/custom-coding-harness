@@ -235,6 +235,58 @@ def test_backend_honors_true_return_from_on_path_denied(workspace_sandbox, monke
     backend._resolve_path("whatever")  # should not raise
 
 
+def test_backend_denies_escape_without_a_handler(workspace_sandbox, monkeypatch):
+    # M4 invariant 18 (off-HITL = plain refusal). HITL off means on_path_denied is
+    # None -- the guard must still refuse. Previously only asserted indirectly via
+    # cli._should_audit_path_denials returning False, which says nothing about
+    # what the backend actually does.
+    outside = str(workspace_sandbox.parent / "evil" / "x")
+    monkeypatch.setattr(agent.LocalShellBackend, "_resolve_path", lambda self, key: outside)
+
+    backend = agent._WorkspaceShellBackend(
+        root_dir=str(workspace_sandbox), virtual_mode=True, inherit_env=False, env={},
+        on_path_denied=None,
+    )
+    with pytest.raises(agent.PathGuardDenied):
+        backend._resolve_path("whatever")
+
+
+@pytest.mark.parametrize("handler", [None, lambda resolved, base: False])
+def test_backend_reports_denial_on_stderr(workspace_sandbox, monkeypatch, capsys, handler):
+    # A workspace escape is never silent to the operator, HITL or not. Without
+    # this the only trace off-HITL is the tool-error string the MODEL reads back,
+    # which it can quietly route around. Must be stderr -- stdout is the headless
+    # JSON result contract.
+    outside = str(workspace_sandbox.parent / "evil" / "x")
+    monkeypatch.setattr(agent.LocalShellBackend, "_resolve_path", lambda self, key: outside)
+
+    backend = agent._WorkspaceShellBackend(
+        root_dir=str(workspace_sandbox), virtual_mode=True, inherit_env=False, env={},
+        on_path_denied=handler,
+    )
+    with pytest.raises(agent.PathGuardDenied):
+        backend._resolve_path("whatever")
+
+    captured = capsys.readouterr()
+    assert "path-guard DENIED" in captured.err
+    assert captured.out == ""
+
+
+def test_backend_stays_quiet_when_a_handler_approves(workspace_sandbox, monkeypatch, capsys):
+    # The denial line reports a REFUSAL. An approved access (unreachable in v1,
+    # see hitl.make_path_denied_handler) is not one, so it must not print.
+    outside = str(workspace_sandbox.parent / "evil" / "x")
+    monkeypatch.setattr(agent.LocalShellBackend, "_resolve_path", lambda self, key: outside)
+
+    backend = agent._WorkspaceShellBackend(
+        root_dir=str(workspace_sandbox), virtual_mode=True, inherit_env=False, env={},
+        on_path_denied=lambda resolved, base: True,
+    )
+    backend._resolve_path("whatever")
+
+    assert "DENIED" not in capsys.readouterr().err
+
+
 # --- build_agent prompt assembly (AGENTS.md append) ------------------------
 
 def test_build_agent_appends_agents_md(workspace_sandbox, monkeypatch):
