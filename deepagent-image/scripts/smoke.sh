@@ -179,4 +179,14 @@ docker run --rm ${NET_ARGS[@]+"${NET_ARGS[@]}"} ${PROXY_ENV[@]+"${PROXY_ENV[@]}"
   ${ARTIFACT_ARGS[@]+"${ARTIFACT_ARGS[@]}"} \
   deepagent-harness-test python3 -m pytest tests/ -v -ra
 
-[[ -n "$ARTIFACT_HOST_DIR" ]] && echo "Test artifacts saved under $ARTIFACT_HOST_DIR"
+# NOT `[[ -n "$X" ]] && echo …`: as the *last* statement that idiom makes the
+# script's exit status the status of the test, so a clean run with
+# KEEP_ARTIFACTS unset exited 1 and reported the whole smoke as failed. `set -e`
+# doesn't catch it (errexit skips the left side of a `&&` list) and it only bites
+# on the success path, so it stayed invisible until CI ran the script directly.
+if [[ -n "$ARTIFACT_HOST_DIR" ]]; then
+  echo "Test artifacts saved under $ARTIFACT_HOST_DIR"
+fi
+
+# Explicit: the script succeeded iff it reached here (set -e aborts otherwise).
+exit 0
