@@ -8,7 +8,12 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install pytest
-      - run: python -m pytest tests/test_mask.py tests/test_pathguard.py tests/test_doctor.py tests/test_cost.py tests/test_providers.py tests/test_archive.py tests/test_resilience.py tests/test_interrupt.py tests/test_audit.py tests/test_ratelimit.py tests/test_hostmap.py
+      - run: python -m pytest tests/test_mask.py tests/test_pathguard.py tests/test_doctor.py tests/test_cost.py tests/test_providers.py tests/test_archive.py tests/test_resilience.py tests/test_interrupt.py tests/test_audit.py tests/test_ratelimit.py tests/test_hostmap.py tests/test_jail.py tests/test_seccomp.py
+        working-directory: deepagent-image/project
+      # M4 slice H invariant 31: the vendored seccomp profile must stay Docker's
+      # default plus exactly five relaxed syscalls. Catches a swap to
+      # `seccomp=unconfined` or a quietly widened relaxation. Keyless, no network.
+      - run: python -m harness seccomp-sync --check
         working-directory: deepagent-image/project
   image-tests:
     runs-on: ubuntu-latest

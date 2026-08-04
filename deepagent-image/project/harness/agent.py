@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -11,6 +12,7 @@ from deepagents import create_deep_agent
 from deepagents.backends import LocalShellBackend
 from langchain.agents.middleware.types import AgentMiddleware
 
+from harness import jail
 from harness.loaders import _read_optional_text
 from harness.mask import append_deny
 from harness.pathguard import PathGuardDenied, validate_path
@@ -193,6 +195,33 @@ class _WorkspaceShellBackend(LocalShellBackend):
             )
         self._on_path_denied = on_path_denied
         super().__init__(*args, **kwargs)
+
+    def execute(self, command: str, **kwargs):
+        """Run the shell tool inside a *nested* bwrap jail when the fs jail is on.
+
+        The harness process is already inside its own namespace (jail.maybe_reexec),
+        which is what gives the in-process file tools their boundary. But that
+        namespace still binds the state dir -- the harness needs
+        checkpoints.sqlite -- and the shell tool is not covered by the path guard
+        (invariant 14). So the shell gets a second, tighter namespace via
+        sandbox-exec, which binds only the workspace. That closes invariant 17a's
+        one standing limit: the shell can no longer reach <state-dir>/denials.jsonl
+        by absolute path and truncate the record of its own escape attempt.
+
+        Nested userns is verified working in the built image under the narrow
+        seccomp profile (milestone4.md §11.4). Off-jail this is a plain
+        passthrough, so the M3 shell behaviour is untouched.
+        """
+        if not jail.already_jailed():
+            return super().execute(command, **kwargs)
+        wrapped = f"sandbox-exec exec -- /bin/sh -c {shlex.quote(command)}"
+        return super().execute(wrapped, **kwargs)
+
+    async def aexecute(self, command: str, **kwargs):
+        if not jail.already_jailed():
+            return await super().aexecute(command, **kwargs)
+        wrapped = f"sandbox-exec exec -- /bin/sh -c {shlex.quote(command)}"
+        return await super().aexecute(wrapped, **kwargs)
 
     def _resolve_path(self, key: str) -> Path:
         if self.virtual_mode:

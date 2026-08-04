@@ -349,9 +349,33 @@ if ($MaskMode -eq "" -or $MaskMode -eq "1") {
     }
 }
 
+# M4 slice H: the bwrap fs jail needs the narrow seccomp profile, because Docker's
+# default profile blocks unprivileged user-namespace creation (see seccomp/README.md).
+# Off by default (§13) - enabling it trades a little outer-boundary attack surface
+# for a real inner boundary, so it is the operator's explicit call. Fail closed: if
+# the jail is asked for and the profile is missing, refuse to launch rather than run
+# unjailed while the operator believes otherwise.
+$JailArgs = @()
+$JailMode = $env:DEEPAGENTS_JAIL
+if (-not $JailMode) {
+    $jailLine = Select-String -Path $EnvFile -Pattern '^\s*DEEPAGENTS_JAIL\s*=' -ErrorAction SilentlyContinue | Select-Object -Last 1
+    if ($jailLine) {
+        $JailMode = ($jailLine.Line -replace '^\s*DEEPAGENTS_JAIL\s*=', '').Trim().Trim('"').Trim("'")
+    }
+}
+if ($JailMode -and $JailMode -notin @("0", "false", "no", "off")) {
+    $SeccompProfile = Join-Path $PSScriptRoot "..\seccomp\userns.json"
+    if (-not (Test-Path $SeccompProfile)) {
+        Write-Error "[jail] FATAL: DEEPAGENTS_JAIL is on but $SeccompProfile is missing - refusing to launch unjailed. Run 'python3 -m harness seccomp-sync' or set DEEPAGENTS_JAIL=0."
+        exit 1
+    }
+    $JailArgs = @("--security-opt", "seccomp=$((Resolve-Path $SeccompProfile).Path)")
+    Write-Host "Jail: bwrap fs jail ON (narrow seccomp profile)"
+}
+
 $dockerArgs = @(
     "run", "--rm"
-) + $TtyFlags + @(
+) + $TtyFlags + $JailArgs + @(
     "--cpus", $Cpus,
     "--memory", $Memory,
     "--pids-limit", $PidsLimit

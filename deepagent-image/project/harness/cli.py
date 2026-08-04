@@ -22,7 +22,16 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 import json
 
-from harness import archive, audit, config as hitl_config, hitl, interrupt, refresh, resilience
+from harness import (
+    archive,
+    audit,
+    config as hitl_config,
+    hitl,
+    interrupt,
+    jail,
+    refresh,
+    resilience,
+)
 from harness.agent import (
     DEFAULT_TASK,
     build_agent,
@@ -1087,6 +1096,10 @@ def dispatch(argv: list[str]) -> int:
         from harness.doctor import doctor_main
 
         return doctor_main(argv[1:])
+    if argv and argv[0] == "seccomp-sync":
+        from harness.seccomp import seccomp_sync_main
+
+        return seccomp_sync_main(argv[1:])
     return main()
 
 
@@ -1097,6 +1110,26 @@ def main() -> int:
 
     _stage("container loading")
     workspace = resolve_workspace(args.workspace)
+
+    # M4 slice H: re-exec into the bwrap fs jail before anything heavy loads, so
+    # every tool in this process -- file tools, shell, any future MCP fs tool --
+    # inherits the namespace. No-op unless DEEPAGENTS_JAIL=1 (off by default,
+    # §13); does not return when it does fire. Fatal if the jail was asked for
+    # and cannot be built: continuing unjailed would leave the operator believing
+    # in a boundary that is not there.
+    if jail.jail_enabled() and not jail.already_jailed():
+        _jail_state = archive.state_dir(workspace)
+        try:
+            jail.maybe_reexec(
+                workspace,
+                _jail_state,
+                jail.masked_from_snapshot(_jail_state, workspace),
+                empty_file=jail.ensure_empty_file(_jail_state),
+            )
+        except jail.JailUnavailable as exc:
+            print(f"[harness] fs jail unavailable: {exc}", file=sys.stderr)
+            return 2
+
     model = choose_model(args.model)
     validate_credentials(model)
 

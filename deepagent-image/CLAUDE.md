@@ -555,8 +555,8 @@ is image-only (smoke).
 
 ## Workspace visibility / secret masking (Milestone 4)
 
-> **Status: in-progress** — code on `feat/milestone_4`, slices A–G landed.
-> Full spec in `docs/milestones/in-progress/milestone4.md`.
+> **Status: in-progress** — code on `feat/milestone_4`, slices A–H landed
+> (H opt-in). Full spec in `docs/milestones/in-progress/milestone4.md`.
 
 The harness can enforce a trust boundary on the workspace filesystem:
 
@@ -567,6 +567,37 @@ The harness can enforce a trust boundary on the workspace filesystem:
   - "deny": Agent sees everything except masked paths (present-but-empty).
   - "allow": Agent sees only allow-listed paths (requires `.agentignore` to opt paths in).
 - `DEEPAGENTS_AGENTIGNORE` (default ".agentignore"): Override the in-workspace config filename.
+- `DEEPAGENTS_JAIL` (default **0, off**): Route all fs tools + the shell through a bubblewrap jail
+  (slice H). See "bwrap fs jail" below — enabling it also requires the narrow seccomp profile.
+
+### bwrap fs jail (slice H, opt-in)
+
+`DEEPAGENTS_JAIL=1` makes the harness **re-exec itself into a bwrap mount namespace** at startup
+(`harness/jail.py`). Every tool in the process then inherits it — the in-process deepagents file
+tools included, with upstream code running untouched. The shell tool goes one further into a
+**nested** jail (`scripts/sandbox-exec.sh`) that binds only the workspace.
+
+What it buys over the docker mask alone:
+- **The floor gets an independent second enforcer.** Masked/floor paths are overmounted empty
+  *inside* the jail, so they stay unreadable even if the docker overlay were disabled or
+  misconfigured (milestone4 invariant 5 leg 4).
+- **The shell can no longer reach the state dir.** Previously `cat /project/state/denials.jsonl`
+  worked from the shell tool — and so did truncating it, i.e. the agent could destroy the record of
+  its own escape attempt. Under the jail the shell sees only `workspace` (invariant 17a).
+- `/project` is bound **read-only**, so the agent cannot write to harness code.
+
+**Why it is off by default.** Docker's default seccomp profile blocks unprivileged user-namespace
+creation, so the jail needs `--security-opt seccomp=deepagent-image/seccomp/userns.json` — Docker's
+default with exactly five syscalls relaxed (`clone`, `unshare`, `mount`, `umount2`, `pivot_root`).
+That relaxation grants no privilege (the kernel still enforces capabilities) but does expose kernel
+userns attack surface, so turning it on is a deliberate trade. See `seccomp/README.md`.
+
+`run-docker.{ps1,sh}` pass the profile automatically when `DEEPAGENTS_JAIL` is on, and **fail closed**
+if it is missing rather than launching unjailed. `harness doctor` verifies the profile is still
+narrow and probes whether bwrap can actually unshare here.
+
+Regenerate the profile with `python3 -m harness seccomp-sync` (dev-time, needs network);
+`seccomp-sync --check` is the CI regression guard against a widened or unconfined profile.
 
 ### Quick-Start: In-Workspace `.agentignore` File
 
