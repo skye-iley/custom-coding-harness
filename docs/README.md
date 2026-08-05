@@ -42,9 +42,11 @@ A milestone moves through three folders. What each stage carries is deliberate:
 - **`milestone4.md`** — **Real Trust Boundary**: workspace visibility (`.agentignore` +
   designated-secret floor + docker mount-mask) + path-guard middleware + `permission_denied`
   interrupt wiring, backed by the §10 security suite and the §12.1 CI / §12.2 `harness doctor`
-  support tier. Buildable-now v1 (no host-userns dep); bwrap fs-tool jail is the stretch layer.
+  support tier. Slices A–G buildable-now, no host-userns dep; **the bwrap fs-tool jail (slice H) is
+  core v1 scope, not a stretch layer** — it's the piece that makes the boundary an allow-list rather
+  than a curated deny-list, and the milestone isn't done without it.
   Pulls together `docs/features/workspace_visibility.md` + `design_doc.md` §2/§10/§12. Code is on
-  `feat/milestone_4` (slices A–G landed; not yet merged).
+  `feat/milestone_4` (slices A–G landed; H remains; not yet merged).
 - **`milestone4_invariants.md`** — the 30 checkable invariants the M4 boundary must satisfy
   (floor / mask / path-guard / interrupt / git-pr / state-isolation / regression / structural),
   the test-facing companion to `milestone4.md`. Folds into `milestone4.md` on completion.

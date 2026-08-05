@@ -555,8 +555,12 @@ is image-only (smoke).
 
 ## Workspace visibility / secret masking (Milestone 4)
 
-> **Status: in-progress** — code on `feat/milestone_4`, slices A–G landed.
-> Full spec in `docs/milestones/in-progress/milestone4.md`.
+> **Status: in-progress** — code on `feat/milestone_4`, slices A–G landed. **Slice H (bwrap fs-tool
+> jail) is core v1 scope, not stretch, and is not yet built — the milestone is not done until it
+> ships.** What's below (deny-list mask + path guard) is real hardening already, but it is not yet the
+> allow-list boundary the milestone's own name promises; that claim is earned by H, which routes every
+> fs-touching tool — shell included — through a bind-whitelist. Full spec in
+> `docs/milestones/in-progress/milestone4.md` (§3 scope, §14 threat model).
 
 The harness can enforce a trust boundary on the workspace filesystem:
 
@@ -599,11 +603,13 @@ id_rsa
 
 #!mode:allow
 
-# Paths the agent CAN see (gitignore negation):
-!src/
-!tests/
-!README.md
-!package.json
+# Paths the agent CAN see — PLAIN patterns, not negation. In allow mode a
+# plain pattern match IS the allow-list entry (the resolver flips it visible);
+# `!`-negation has no special meaning here and does NOT allow-list a path.
+src/
+tests/
+README.md
+package.json
 
 # Everything else is hidden (including defaults like .env)
 ```

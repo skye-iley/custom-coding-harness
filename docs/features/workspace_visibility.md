@@ -4,7 +4,8 @@
 > (Real Trust Boundary), code on `feat/milestone_4`, slices A–G landed, not yet merged. The policy
 > (`.agentignore` gitignore-parity, 3-tier policy, designated-secret floor), docker mount-mask,
 > path-guard middleware, `permission_denied` interrupt wiring, `harness doctor`, CI pipeline, and
-> security test suite are built. Stretch H (bwrap fs-tool jail) is not yet built.
+> security test suite are built. **Slice H (bwrap fs-tool jail) is core v1 scope, not stretch, and is
+> not yet built** — the milestone does not close without it (see `milestone4.md` §3/§14).
 > Named
 > feature-plan doc (not a numbered milestone). Referenced from `design_doc.md` §2 (Sandbox &
 > Isolation). Wins over `design_doc.md` for the mechanics of *which workspace paths an agent can see*.

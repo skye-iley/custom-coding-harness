@@ -20,17 +20,21 @@ secret-safe containers.
       deferred, and the "Human-in-the-loop" section in `deepagent-image/CLAUDE.md`.
   - `docs/milestones/in-progress/` — **being built** milestones (doc + separate invariants doc + code
     on a feature branch). *(`milestone4.md` — **Real Trust Boundary**, code on `feat/milestone_4`,
-    slices A–G landed, not yet merged: workspace visibility (`.agentignore`, 3-tier policy,
-    designated-secret floor), docker mount-mask, path-guard middleware, `harness doctor`, CI pipeline,
-    security test suite. Slice D (`permission_denied` interrupt) is **built, audit-only** — a path-guard
-    denial (always a true workspace escape in v1; pathguard has no floor/mask awareness) never offers
-    an interactive approve — a real escape must never be a thing an operator's mis-click can wave
-    through, and every denial pathguard can currently produce is exactly that never-approvable case.
-    It surfaces as an always-on stderr `path-guard DENIED` line (HITL or not) plus, when HITL is on, a
-    structured record in `<state-dir>/denials.jsonl` — outside the workspace, so the agent can't
-    truncate the evidence of its own escape attempt. The *refusal* is unchanged off-HITL. Stretch H
-    (bwrap fs-tool jail) not yet built. `milestone4_invariants.md` — the 30 checkable boundary invariants that drive its tests;
-    folds into `milestone4.md` on completion.)*
+    slices A–G landed, not yet merged (workspace visibility — `.agentignore`, 3-tier policy,
+    designated-secret floor —, docker mount-mask, path-guard middleware, `harness doctor`, CI pipeline,
+    security test suite), **slice H (bwrap fs-tool jail) is core v1 scope, not stretch, and remains
+    unbuilt — M4 is not done until it ships.** A–G harden the container's deny-list; H is the slice
+    that makes the milestone's name ("Real Trust Boundary") true rather than aspirational — it routes
+    every fs-touching tool, shell included, through an allow-list bind-whitelist, closing the gap A–G
+    structurally cannot (see `milestone4.md` §3/§14). Slice D (`permission_denied` interrupt) is
+    **built, audit-only** — a path-guard denial (always a true workspace escape in v1; pathguard has
+    no floor/mask awareness) never offers an interactive approve — a real escape must never be a thing
+    an operator's mis-click can wave through, and every denial pathguard can currently produce is
+    exactly that never-approvable case. It surfaces as an always-on stderr `path-guard DENIED` line
+    (HITL or not) plus, when HITL is on, a structured record in `<state-dir>/denials.jsonl` — outside
+    the workspace, so the agent can't truncate the evidence of its own escape attempt. The *refusal* is
+    unchanged off-HITL. `milestone4_invariants.md` — the 30 checkable boundary invariants that drive
+    its tests (3 of them — 5, 14, 16 — are blocked on H); folds into `milestone4.md` on completion.)*
   - `docs/milestones/planned/` — **not-yet-built** milestones (docs only). Wins over `design_doc.md`
     for "what we build next." *(Currently empty.)*
   - `docs/features/workspace_visibility.md` — **named feature plan** (not a numbered milestone): restrict

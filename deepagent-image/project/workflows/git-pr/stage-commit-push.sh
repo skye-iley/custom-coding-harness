@@ -11,15 +11,23 @@ git add -A
 # still guards the default in-workspace `.deepagents` layout.
 git reset -q -- .deepagents .agent_telemetry 2>/dev/null || true
 
-# M4: exclude resolved mask set from staging so masked secrets are never pushed.
-# Runs mask-scan inside the agent container (state dir is writable here).
+# M4 (§15.1): exclude the resolved mask set from staging so masked secrets are
+# never pushed. Reads the FROZEN <state>/mask-snapshot.txt written by the
+# host-side pre-flight scan at launch — never re-runs mask-scan here. A live
+# rescan would reflect whatever .agentignore currently says, and the workspace
+# .agentignore is agent-writable; an agent (or prompt injection) could delete a
+# mask entry mid-session and a rescan would then fail to exclude a path whose
+# content is still frozen-empty in the real mounted fs, letting the empty
+# version get committed over the real secret. The snapshot is the one thing
+# that can't be tampered with post-launch (state dir is agent-unreachable).
 if [ "${DEEPAGENTS_MASK:-1}" != "0" ]; then
-  mask_scan_output=$(python3 -m harness mask-scan "$PWD" "${DEEPAGENTS_STATE_DIR:-$PWD/.deepagents}" 2>/dev/null) || true
-  if [ -n "$mask_scan_output" ]; then
-    echo "$mask_scan_output" | while IFS=' ' read -r mode type tier relpath rest; do
-      relpath="$(printf '%s' "$relpath" | sed 's/%20/ /g')"
+  mask_snapshot="${DEEPAGENTS_STATE_DIR:-$PWD/.deepagents}/mask-snapshot.txt"
+  if [ -f "$mask_snapshot" ]; then
+    while IFS=' ' read -r tier relpath; do
+      relpath="${relpath%$(printf '\r')}"  # defensive: strip a stray CR (CRLF-written snapshot)
+      [ -n "$relpath" ] || continue
       git reset -q -- "$relpath" 2>/dev/null || true
-    done
+    done < "$mask_snapshot"
   fi
 fi
 

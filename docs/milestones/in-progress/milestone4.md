@@ -1,8 +1,10 @@
 # Milestone 4 — Real Trust Boundary (Workspace Visibility + Path Guard)
 
 > **Status:** 🚧 In-progress (v1 — slices A–G built, on `feat/milestone_4`, not yet merged).
-> Stretch H (bwrap fs-tool jail) not yet built; deferred v2 (overlayfs view) not yet built. See
-> PR1–PR5 for the commits. The checkable boundary invariants live separately in
+> **Slice H (bwrap fs-tool jail) is core v1 scope, not a stretch — and it is not yet built.** M4 is
+> not done until H ships and its nested-userns precondition verifies in the built image (§3). Deferred
+> v2 (overlayfs view) stays out of scope regardless. See PR1–PR5 for the slices shipped so far; PR6
+> (H) is the remaining v1 blocker. The checkable boundary invariants live separately in
 > `milestone4_invariants.md` (folds in here on completion — see the lifecycle in `docs/README.md`).
 > Promotes the
 > `design_doc.md` **§2 Workspace Visibility & Secret Masking** + **Path Guard** designs, backed by the
@@ -36,7 +38,7 @@ later layers slot in without reworking policy (feature plan §7).
 | **E** `harness doctor` | pre-flight config validation (registry + `.agentignore` + floor coherence) | §12.2 | v1 (support) | PR4 |
 | **F** CI pipeline | run host + image + **security** suites on push/PR; script-parity lint | §12.1 | v1 (support) | PR5 |
 | **G** §10 security verification suite | tests that *prove* the boundary holds (floor never leaks, no traversal escape) | §10 | v1 (support) | ships in PR1–3 |
-| **H** bwrap fs-tool jail | allow-list boundary; route **all** fs tools through `sandbox-exec`; verify nested userns | feature plan §4.2 | **stretch** | PR6 |
+| **H** bwrap fs-tool jail | allow-list boundary; route **all** fs tools through `sandbox-exec`; verify nested userns | feature plan §4.2 | **v1 — core, not yet built** | PR6 |
 | **I** overlayfs view | tool-agnostic true allow-list + upper-diff write-back | feature plan §4.3 | deferred v2 | — |
 
 ---
@@ -72,6 +74,14 @@ in **CI** that proves the boundary can't silently regress.
   CI**.
 - The mask/guard is **frozen at launch** — agent runtime edits to any in-workspace `.agentignore`
   cannot unmask the current session; a protection-*reduction* between runs warns loudly.
+- **Every fs-touching tool — shell included — is routed through the bwrap allow-list jail (slice H)**,
+  binds sourced from the resolved policy, designated secrets never bound, and `agent.py` enforces that
+  a new tool can't silently reopen the bypass. This is the difference between "M4 hides some paths"
+  and "M4 is the real trust boundary": deny-list masking (B) hides what it's told to hide, but an
+  allow-list is the only mechanism that fails safe against a path nobody thought to list. Without H,
+  the milestone's own name — *Real* Trust Boundary — isn't earned yet; the boundary is still the
+  Docker container (`mvp.md` §5), same as before M4. **M4 is not done until this bullet holds and
+  `bwrap --unshare-all true` is verified to actually run in the built image** (§3).
 
 ## 2. Why this milestone now
 
@@ -89,22 +99,32 @@ the boundary). Two forces make this the natural successor to M3 specifically:
 
 ## 3. Scope — v1 vs. deferred
 
-**In v1 (slices A–G):** the always-on, buildable-today floor — policy + resolver + scanner, docker
-mount-mask (deny-list), path-guard middleware, `permission_denied` interrupt wiring, plus the support
-tier (`doctor`, CI, security suite) that makes the floor validated and regression-proof. This slice
-needs **no host-userns dependency** and works on Docker Desktop (Windows primary) today.
+**In v1 (slices A–H):** the full trust boundary — policy + resolver + scanner, docker mount-mask
+(deny-list floor), path-guard middleware, `permission_denied` interrupt wiring, the support tier
+(`doctor`, CI, security suite), **and the bwrap fs-tool jail (H)** that turns the deny-list floor into
+a real allow-list boundary covering every fs-touching tool, shell included. **H is core scope, not a
+stretch goal** — it is the slice that makes "Real Trust Boundary" (this milestone's own name) an
+accurate description rather than aspirational marketing. A–G alone ship a *better-hidden* container;
+only H ships a container the agent genuinely cannot see outside of.
 
-**Stretch (slice H — bwrap):** the *real* allow-list boundary (feature plan §4.2). Gated behind a
-**nested-userns-in-docker verification** (design_doc §2 ~L87–91) that may need `--security-opt`
-tweaks and is unverified — so it is a stretch layer, not a v1 blocker. Its hard requirement: route
-**all** fs-touching tools (shell **and** the in-process deepagents file tools) through the jail, and
-enforce that invariant in `agent.py` so a new tool can't silently reopen the bypass.
+**H's precondition — nested-userns-in-docker verification** (design_doc §2 ~L87–91, may need
+`--security-opt` tweaks) — is a **hard gate on completion, not an escape hatch out of it.** If
+`bwrap --unshare-all true` does not run cleanly in the built image, M4 is **blocked, not done**: it
+does not ship as A–G-only and get called finished. The fallback in that case is to solve the userns
+problem (alternate base image, different isolation primitive, escalated `--security-opt` on the
+`docker run` side) — not to redefine H out of scope. Its hard requirement once built: route **all**
+fs-touching tools (shell **and** the in-process deepagents file tools) through the jail, and enforce
+that invariant in `agent.py` so a new tool can't silently reopen the bypass.
 
 **Deferred v2 (slice I — overlayfs, and `hide` mode):** tool-agnostic true-absence view with
-upper-diff write-back — changes today's live-write model (feature plan §4.3/§6). Out of M4.
+upper-diff write-back — changes today's live-write model (feature plan §4.3/§6). Still out of M4; this
+is the one layer that stays legitimately deferred, because true absence (vs. present-but-empty) is a
+separate capability H doesn't need in order to be the real boundary.
 
-**Sequencing hedge:** ship A→B→C→D (the floor) first — it delivers real secret-hiding across all
-tools immediately. E/F/G harden it. H is attempted only after B–G are green and userns verifies.
+**Sequencing:** ship A→B→C→D (the floor) first — it delivers real secret-hiding across all tools
+immediately and is independently useful/reviewable. E/F/G harden it. **H ships last but is required**
+— A–G merging first is a sequencing choice for reviewability, not a signal that the milestone can
+close without H.
 
 ## 4. Slices (intent)
 
@@ -174,14 +194,17 @@ real. Ships **inside** the slice PRs it verifies (§17), not as a separate PR. H
 the suite conventions (`deepagent-image/CLAUDE.md` → Test suite layout). Every floor/guard behaviour
 ships with a regression test ("every bug fix ships with a regression test").
 
-### H — bwrap fs-tool jail *(stretch; feature plan §4.2)*
-Wire `scripts/sandbox-exec.sh`; **route all fs-touching tools** (shell + deepagents read/write/edit/
-ls/glob) through the agent's bwrap namespace so the same allow-list bind-whitelist gates both; binds
-sourced from the resolved policy; designated secrets never bound; enforce the "all fs tools route
-through the jail" invariant in `agent.py`. **Verify nested userns first** (`bwrap --unshare-all true`
-must actually run in the built image, design_doc §2 ~L87–91); do not claim sandboxing until wired +
-verified. NetJail already established the "grant it or it silently breaks" discipline for egress; the
-bind-whitelist is its filesystem analogue.
+### H — bwrap fs-tool jail *(core v1 scope, not stretch; feature plan §4.2)*
+The slice that makes the boundary real rather than curated. Wire `scripts/sandbox-exec.sh`; **route
+all fs-touching tools** (shell + deepagents read/write/edit/ls/glob) through the agent's bwrap
+namespace so the same allow-list bind-whitelist gates both; binds sourced from the resolved policy;
+designated secrets never bound; enforce the "all fs tools route through the jail" invariant in
+`agent.py`. **Verify nested userns first** (`bwrap --unshare-all true` must actually run in the built
+image, design_doc §2 ~L87–91); do not claim sandboxing until wired + verified — but a verification
+failure is a blocker to resolve, not a reason to drop H to stretch and ship without it. NetJail already
+established the "grant it or it silently breaks" discipline for egress; the bind-whitelist is its
+filesystem analogue, and — unlike NetJail, which is opt-in — H is load-bearing for the milestone's own
+done-when (§1).
 
 ## 5. What we pull in — and leave out
 
@@ -194,8 +217,8 @@ Pulled in because the security work structurally needs them (mirrors M3 pulling 
 
 Deliberately **left out** (adjacent, not this milestone): §12.6 skills/memories, §12.7 `usage.jsonl`
 sink + §8 telemetry-to-PR, §13 file-read middleware, §7 compression, §5 multi-agent funnel, §11
-benchmarking, and the bwrap **stretch** if userns doesn't verify in the M4 window. The overlayfs view
-and `hide` mode are explicitly deferred v2 (feature plan §4.3/§6).
+benchmarking. The overlayfs view and `hide` mode are explicitly deferred v2 (feature plan §4.3/§6). The
+bwrap jail (H) is **not** on this left-out list — see §3: it is required v1 scope.
 
 ## 6. Open forks — see §16
 
@@ -632,14 +655,16 @@ boundary violation is not a contract worth preserving.
 
 ## 14. Threat model — what holds, what doesn't
 
-**Holds (v1):**
+**Holds today (A–G, pre-H):**
 - A **designated-secret floor path** reads empty to *every* process in the container (the docker mask
   changes the real mounted fs), and no `.agentignore` negation, allow-list entry, or `mask_add` can
-  expose it. Enforced redundantly — **v1 has legs (1)+(2)**: (1) docker mask always emits it; (2) the
-  resolver drops any negation of it. **Legs (3)+(4) are aspirational, not built in v1:** (3) a file
-  backend that explicitly refuses a floor path (belt-and-suspenders) — the current backend only checks
-  for workspace escape, so a floor file is protected solely by the docker overlay reading empty; (4)
-  bwrap never binds it (slice H). The "≥3 independent legs" redundancy becomes real with H.
+  expose it. Enforced redundantly — **currently has legs (1)+(2)**: (1) docker mask always emits it;
+  (2) the resolver drops any negation of it. **Legs (3)+(4) are required-but-not-yet-built, not
+  optional extras:** (3) a file backend that explicitly refuses a floor path (belt-and-suspenders) —
+  the current backend only checks for workspace escape, so a floor file is protected solely by the
+  docker overlay reading empty; (4) bwrap never binds it (slice H). The "≥3 independent legs"
+  redundancy this milestone is supposed to deliver is **not real until H ships** — see §3, H is core
+  v1 scope, not a nice-to-have hardening pass.
 - A **pattern-default / general masked path** reads empty to every process (same mechanism), whole-tree
   deny-list, "present-but-empty".
 - A **path-guard traversal** (`../`, absolute, in-workspace symlink whose target escapes) is refused for
@@ -647,17 +672,25 @@ boundary violation is not a contract worth preserving.
   interrupt.
 - git-pr cannot silently **blank a masked secret** into a commit (§15.1).
 
-**Does NOT hold (be honest — do not describe as sandboxing):**
-- The docker mask is **not a sandbox**; the trust boundary is still the container (`mvp.md` §5). Masked
-  files are **present-but-empty**, not absent (`mask` mode; true absence is `hide`, deferred v2).
+**Does NOT hold yet — and M4 is not done while this is true (be honest — do not describe as sandboxing
+until H ships and is verified):**
+- The docker mask is **not a sandbox**; the trust boundary is still the container (`mvp.md` §5), same
+  as pre-M4. Masked files are **present-but-empty**, not absent (`mask` mode; true absence is `hide`,
+  deferred v2). **This is the gap H exists to close** — until H lands, calling M4 "the real trust
+  boundary" describes the milestone's intent, not its current, shippable state.
 - The **path guard is racy** (TOCTOU: a symlink swapped between `realpath` and the open). It is
-  defense-in-depth, not the boundary. The bwrap bind-whitelist (H) is the real allow-list boundary.
+  defense-in-depth, not the boundary. The bwrap bind-whitelist (H) is **the** actual allow-list
+  boundary — not an optional upgrade to it.
 - The path guard covers the **file tools only**. The **shell** tool runs arbitrary commands; a masked
-  file it `cat`s reads empty (mask covers it), but shell path traversal is bounded by the container
-  root, not the guard, until bwrap (H) routes the shell through the jail.
-- An **allow-list** ("see only these dirs") is a bwrap/overlayfs capability; the v1 docker layer can
-  only deny-list. `allow` mode in v1 is enforced by masking everything not listed — correct, but
-  whole-tree present-but-empty, not true absence.
+  file it `cat`s reads empty (mask covers it), but shell path traversal is bounded only by the
+  container root, not the guard, until H routes the shell through the jail too.
+- An **allow-list** ("see only these dirs") is a bwrap/overlayfs capability; the pre-H docker layer can
+  only deny-list. `allow` mode pre-H is enforced by masking everything not listed — correct, but
+  whole-tree present-but-empty, not true absence, and not the fail-safe-against-an-unlisted-path
+  property an allow-list is supposed to buy.
+
+**Bottom line:** A–G is a materially better-defended container than pre-M4. It is not yet the "Real
+Trust Boundary" this milestone is named for — that claim is earned by H.
 
 ## 15. Integration points & gotchas
 
@@ -735,9 +768,11 @@ Ship the floor first; harden after. Each PR is independently reviewable and leav
 - **PR4 — slice E (`harness doctor`):** `doctor.py` + dispatch + `tests/test_doctor.py`; `verify` hook.
 - **PR5 — slice F (CI):** `.github/workflows/ci.yml` + `check-parity.{sh,ps1}`. Turns G's tests into a
   gate.
-- **PR6 — slice H (bwrap, stretch):** only after PR1–5 are green **and** `bwrap --unshare-all true`
-  verifies in the built image. If userns doesn't verify in the M4 window, H slips to a follow-up and M4
-  ships A–G.
+- **PR6 — slice H (bwrap, core scope):** ships last for reviewability (needs A–G's resolved policy as
+  its bind-list source), **not because it's optional.** Sequenced after PR1–5 are green **and**
+  `bwrap --unshare-all true` verifies in the built image. If userns fails to verify, that is a **blocker
+  to resolve** (alternate base image / isolation primitive / `--security-opt`), not a signal to slip H
+  to a follow-up and call M4 done on A–G alone — the milestone does not close until PR6 merges.
 
 ## 18. Test matrix (host-runnable/stdlib unless noted)
 

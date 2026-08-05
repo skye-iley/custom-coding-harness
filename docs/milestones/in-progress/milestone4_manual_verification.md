@@ -37,7 +37,8 @@ The boundary is the **Docker container + the docker mount-mask**, *not* a sandbo
 **present-but-empty**, not absent. Keep that in mind: the correct result of a successful mask is a
 file that exists, `ls` shows it, but `cat` yields nothing and its size is 0.
 
-**Known v1 gaps (do not treat these as bugs):**
+**Known gaps, pending slice H (do not treat these as bugs — they're the reason H is core v1 scope, not
+optional hardening; see `milestone4.md` §3):**
 - The `permission_denied` HITL interrupt is **audit-only** — a path-guard denial is always a plain
   refused tool result (never an approval prompt). Do not test for an approval flow; there is nothing
   to approve — every v1 denial is a true workspace escape, which is never approvable by design.
@@ -372,20 +373,44 @@ This is the hazard the earlier design draft missed: a masked `.env` reads empty 
 container**, so a naive `git add -A` would stage the emptied file and the PR would **blank the user's
 real secret** on the branch.
 
-The staging step (`workflows/git-pr/stage-commit-push.sh`) re-runs `mask-scan` and `git reset`s every
-masked path out of the index. To verify by hand, simulate the staging inside a container against a
-git workspace:
+The staging step (`workflows/git-pr/stage-commit-push.sh`) reads the **frozen**
+`<state>/mask-snapshot.txt` written by the pre-flight scan at launch and `git reset`s every masked
+path out of the index — it does **not** re-run `mask-scan` at commit time. That distinction matters:
+a live rescan would reflect whatever `.agentignore` currently says, and the workspace `.agentignore`
+is agent-writable, so an agent (or prompt injection) deleting a mask entry mid-session would fool a
+live rescan into no longer excluding a path whose content is still frozen-empty in the real mounted
+fs — letting the empty version get committed over the real secret. The snapshot is the one thing that
+can't be tampered with post-launch (state dir is agent-unreachable). To verify by hand, simulate the
+staging inside a container against a git workspace, using the snapshot the same way the script does:
 
 ```powershell
-# make the test workspace a git repo with a committed .env
+# make the test workspace a git repo with a committed .env, write the frozen
+# snapshot the way the launch-time scan would, then run the actual staging
+# logic (reads the snapshot, does not rescan)
 # NOTE: avoid PS here-string (@'...'@) — use a temp script to avoid CRLF in the bash -c arg
 docker run --rm -v "${WS}:/project/workspace" -v "${STATE}:/project/state" `
-  -e DEEPAGENTS_STATE_DIR=/project/state deepagent-harness bash -c "cd /project/workspace; git init -q; git add -A; git -c user.email=t@t -c user.name=t commit -qm init; printf '' > .env; git add -A; if [ \"\${DEEPAGENTS_MASK:-1}\" != \"0\" ]; then python3 -m harness mask-scan \"\$PWD\" \"\$DEEPAGENTS_STATE_DIR\" 2>/dev/null | while IFS=' ' read -r mode type tier rel rest; do rel=\"\$(printf '%s' \"\$rel\" | sed 's/%20/ /g')\"; git reset -q -- \"\$rel\" 2>/dev/null || true; done; fi; echo '== staged files =='; git diff --cached --name-only"
+  -e DEEPAGENTS_STATE_DIR=/project/state deepagent-harness bash -c "cd /project/workspace; git init -q; git add -A; git -c user.email=t@t -c user.name=t commit -qm init; printf '' > .env; git add -A; if [ \"\${DEEPAGENTS_MASK:-1}\" != \"0\" ] && [ -f \"\$DEEPAGENTS_STATE_DIR/mask-snapshot.txt\" ]; then while IFS=' ' read -r tier rel; do [ -n \"\$rel\" ] || continue; git reset -q -- \"\$rel\" 2>/dev/null || true; done < \"\$DEEPAGENTS_STATE_DIR/mask-snapshot.txt\"; fi; echo '== staged files =='; git diff --cached --name-only"
 ```
 
 **Pass:** `.env` (and every other masked path) is **absent** from the staged file list. `src/app.py`
 would be present if changed. (Invariant 19.) If `.env` appears staged, the emptied secret would be
 committed — a commit leak.
+
+### 6.1 Tamper resistance — the snapshot survives `.agentignore` deletion
+
+The check above proves the happy path; it doesn't prove the snapshot resists tampering. Confirm the
+frozen snapshot — not a live rescan — is what the script actually reads, by deleting the
+`.agentignore` entry *after* the snapshot is written and confirming the exclusion still holds:
+
+```powershell
+docker run --rm -v "${WS}:/project/workspace" -v "${STATE}:/project/state" `
+  -e DEEPAGENTS_STATE_DIR=/project/state deepagent-harness bash -c "cd /project/workspace; git init -q; git add -A; git -c user.email=t@t -c user.name=t commit -qm init; echo 'user .env' > \"\$DEEPAGENTS_STATE_DIR/mask-snapshot.txt\"; rm -f .agentignore; printf '' > .env; git add -A; while IFS=' ' read -r tier rel; do [ -n \"\$rel\" ] || continue; git reset -q -- \"\$rel\" 2>/dev/null || true; done < \"\$DEEPAGENTS_STATE_DIR/mask-snapshot.txt\"; echo '== staged files =='; git diff --cached --name-only"
+```
+
+**Pass:** `.env` is still absent from the staged list even though `.agentignore` no longer mentions it
+— the exclusion came from the frozen snapshot, not a rescan of the (now-edited) workspace config. This
+is exactly what `tests/test_workflows.py::test_git_pr_exclusion_survives_agentignore_tampering` asserts
+automatically (§2.1 covers it in the fast pass).
 
 ---
 
