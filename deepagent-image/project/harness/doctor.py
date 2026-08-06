@@ -194,6 +194,51 @@ def doctor_main(argv: list[str]) -> int:
     else:
         records.append(("info", f"state dir {state_dir} is outside the workspace"))
 
+    # --- Jail / seccomp (M4 slice H) -------------------------------------------
+    # Only checked when the operator opted in: the jail is off by default (§13),
+    # and doctor must not fail every run for a feature nobody enabled.
+    from harness import jail as jail_mod
+    from harness import seccomp as seccomp_mod
+
+    if not jail_mod.jail_enabled():
+        records.append(("info", "fs jail off (DEEPAGENTS_JAIL unset) — slice H checks skipped"))
+    else:
+        profile_path = seccomp_mod.profile_path()
+        if not profile_path.is_file():
+            records.append((
+                "error",
+                f"fs jail is on but the seccomp profile is missing at {profile_path} — "
+                "run 'python3 -m harness seccomp-sync'"
+            ))
+        else:
+            try:
+                problems = seccomp_mod.verify_profile(seccomp_mod.load_profile(profile_path))
+            except (OSError, ValueError) as exc:
+                records.append(("error", f"seccomp profile unreadable: {exc}"))
+            else:
+                for problem in problems:
+                    records.append(("error", f"seccomp profile: {problem}"))
+                if not problems:
+                    records.append((
+                        "info",
+                        "seccomp profile is Docker's default plus exactly "
+                        f"{list(seccomp_mod.RELAXED_SYSCALLS)}",
+                    ))
+
+        # The real gate: bwrap being installed says nothing about whether seccomp
+        # will actually let it unshare. Only meaningful in-container.
+        if os.environ.get("DEEPAGENTS_IN_CONTAINER") == "1":
+            jail_problems = jail_mod.preflight()
+            for problem in jail_problems:
+                records.append(("error", f"fs jail: {problem}"))
+            if not jail_problems:
+                records.append(("info", "fs jail: bwrap can create a user namespace here"))
+        else:
+            records.append((
+                "info",
+                "fs jail: userns probe skipped off-container (run it in the image)",
+            ))
+
     # --- Summary ---------------------------------------------------------------
     errors = [r for r in records if r[0] == "error"]
     warnings = [r for r in records if r[0] == "warning"]

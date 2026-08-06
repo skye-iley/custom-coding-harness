@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,9 @@ import pytest
 from _bootstrap import _load
 
 doctor = _load("harness.doctor")
+# doctor imports seccomp lazily inside doctor_main; grab the same module object so
+# monkeypatching profile_path() reaches the one doctor will actually call.
+from harness import seccomp as doctor_seccomp  # noqa: E402
 
 
 def test_doctor_clean_workspace_no_errors(tmp_path):
@@ -153,3 +157,57 @@ def test_bare_host_state_dir_inside_workspace_is_not_an_error(tmp_path, monkeypa
     ws = tmp_path / "workspace"
     ws.mkdir()
     assert doctor.doctor_main([str(ws), str(ws / ".deepagents")]) == 0
+
+
+# --- M4 slice H: jail / seccomp checks --------------------------------------
+
+
+def test_jail_checks_are_skipped_when_the_jail_is_off(tmp_path, monkeypatch, capsys):
+    """Off by default (invariant 35) -- doctor must not fail runs that never opted in."""
+    monkeypatch.delenv("DEEPAGENTS_JAIL", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    rc = doctor.doctor_main([str(tmp_path / "ws"), str(tmp_path / "state")])
+
+    assert "slice H checks skipped" in capsys.readouterr().err
+    assert rc == 0
+
+
+def test_jail_on_with_missing_seccomp_profile_is_an_error(tmp_path, monkeypatch, capsys):
+    """Fail closed: the jail cannot be built without the profile, so say so loudly."""
+    monkeypatch.setenv("DEEPAGENTS_JAIL", "1")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(doctor_seccomp, "profile_path", lambda: tmp_path / "nope.json")
+
+    rc = doctor.doctor_main([str(tmp_path / "ws"), str(tmp_path / "state")])
+
+    assert "seccomp profile is missing" in capsys.readouterr().err
+    assert rc == 1
+
+
+def test_jail_on_with_widened_seccomp_profile_is_an_error(tmp_path, monkeypatch, capsys):
+    """Invariant 31: a profile that drifted wider must fail doctor, hence CI."""
+    monkeypatch.setenv("DEEPAGENTS_JAIL", "1")
+    monkeypatch.chdir(tmp_path)
+    bad = tmp_path / "bad.json"
+    bad.write_text(
+        json.dumps({"defaultAction": "SCMP_ACT_ALLOW", "syscalls": []}), encoding="utf-8"
+    )
+    monkeypatch.setattr(doctor_seccomp, "profile_path", lambda: bad)
+
+    rc = doctor.doctor_main([str(tmp_path / "ws"), str(tmp_path / "state")])
+
+    assert "seccomp profile:" in capsys.readouterr().err
+    assert rc == 1
+
+
+def test_jail_on_with_the_committed_profile_passes(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("DEEPAGENTS_JAIL", "1")
+    monkeypatch.delenv("DEEPAGENTS_IN_CONTAINER", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    rc = doctor.doctor_main([str(tmp_path / "ws"), str(tmp_path / "state")])
+
+    err = capsys.readouterr().err
+    assert "Docker's default plus exactly" in err
+    assert rc == 0

@@ -78,6 +78,9 @@ COPY project/providers/ ./providers/
 COPY project/skills/ ./skills/
 COPY project/workflows/ ./workflows/
 COPY project/workspace/ ./workspace/
+# Host-side artifact (the launchers pass it to `docker run --security-opt`), but
+# copied in so `harness doctor` can verify the profile from inside the image too.
+COPY seccomp/ ./seccomp/
 COPY scripts/conda-init-workspace.sh /usr/local/bin/conda-init-workspace
 COPY scripts/sandbox-exec.sh /usr/local/bin/sandbox-exec
 COPY project/workspace/ /project/workspace-seed/
