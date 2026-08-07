@@ -202,8 +202,21 @@ def test_jail_on_with_widened_seccomp_profile_is_an_error(tmp_path, monkeypatch,
 
 
 def test_jail_on_with_the_committed_profile_passes(tmp_path, monkeypatch, capsys):
+    """The SECCOMP profile is clean, so doctor passes -- pinned against the host LSM.
+
+    This asserts a property of the vendored seccomp profile, so it must not inherit
+    whether the machine running the tests happens to be AppArmor-confined. Without
+    the pin it passes on Docker Desktop and fails on any Ubuntu/Debian runner, where
+    the (correct) AppArmor finding makes doctor non-zero -- which is the exact
+    host-dependence that let slice H ship believing the jail was universally
+    verified (milestone4.md §11.6). The AppArmor path has its own tests below.
+    """
+    from harness import jail as doctor_jail
+
     monkeypatch.setenv("DEEPAGENTS_JAIL", "1")
     monkeypatch.delenv("DEEPAGENTS_IN_CONTAINER", raising=False)
+    monkeypatch.delenv("DEEPAGENTS_JAIL_APPARMOR", raising=False)
+    monkeypatch.setattr(doctor_jail, "apparmor_confinement", lambda: None)
     monkeypatch.chdir(tmp_path)
 
     rc = doctor.doctor_main([str(tmp_path / "ws"), str(tmp_path / "state")])
