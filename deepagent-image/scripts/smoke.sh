@@ -14,8 +14,14 @@
 #                               # (default: they go to the container's tmp and vanish).
 #   JAIL_CHECK=1 ./smoke.sh     # REQUIRE the M4 slice H jail gate to pass. By default
 #                               # the gate runs but self-skips on a host that cannot
-#                               # nest user namespaces; =1 turns that skip into a
-#                               # failure (use in CI to pin the boundary).
+#                               # build the jail — either the kernel/runtime refuses
+#                               # nested userns, or the host LSM denies bwrap's mounts;
+#                               # =1 turns that skip into a failure (pin the boundary).
+#   DEEPAGENTS_JAIL_APPARMOR=unconfined ./smoke.sh
+#                               # run the jail gate with AppArmor off for that container.
+#                               # Needed on Ubuntu/Debian Docker, where `docker-default`
+#                               # denies `mount` regardless of seccomp (milestone4.md
+#                               # §11.6). Drops the WHOLE profile, not just that rule.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NETJAIL_DIR="$ROOT/netjail"
@@ -196,20 +202,37 @@ set +e
 # blanket fix works: MSYS_NO_PATHCONV=1 also un-converts the *host*-side seccomp
 # path the daemon needs, and a `//` escape gets mangled inside the `-v src:dst`
 # triple. stdin has no path to convert, so it is portable by construction.
+# M4 slice J (§11.6): on an AppArmor-confined host, seccomp is only half the gate —
+# Docker's `docker-default` profile denies `mount` outright, so bwrap fails after
+# `unshare` succeeds. Unset (the default) means we pass nothing and the check skips
+# on such a host. `unconfined` makes it run everywhere at the cost of dropping the
+# WHOLE profile, not just its `deny mount,` — a wider trade than the five relaxed
+# syscalls, so it is opt-in and announced, never a silent default.
+APPARMOR_ARGS=()
+if [[ -n "${DEEPAGENTS_JAIL_APPARMOR:-}" ]]; then
+  APPARMOR_ARGS=(--security-opt "apparmor=$DEEPAGENTS_JAIL_APPARMOR")
+  if [[ "$DEEPAGENTS_JAIL_APPARMOR" == "unconfined" ]]; then
+    echo "M4 jail: AppArmor DISABLED for this container (apparmor=unconfined) — drops docker-default entirely, not just its deny-mount rule." >&2
+  else
+    echo "M4 jail: using AppArmor profile '$DEEPAGENTS_JAIL_APPARMOR' (must already be loaded on the host)." >&2
+  fi
+fi
 docker run --rm -i ${NET_ARGS[@]+"${NET_ARGS[@]}"} ${PROXY_ENV[@]+"${PROXY_ENV[@]}"} \
   --security-opt "seccomp=$SECCOMP_PROFILE" \
+  ${APPARMOR_ARGS[@]+"${APPARMOR_ARGS[@]}"} \
   -e DEEPAGENTS_JAIL=1 \
   deepagent-harness python3 - < "$ROOT/scripts/jail-check.py"
 jail_rc=$?
 set -e
 if [[ $jail_rc -eq 77 ]]; then
-  # Environmental, not a regression: some kernels/runtimes refuse nested userns
-  # outright. Only a hard failure when the caller pinned it (CI).
+  # Environmental, not a regression, for either reason the gate can report: the
+  # kernel/runtime refuses nested userns, or the host LSM denies bwrap's mounts.
+  # Only a hard failure when the caller pinned it (CI).
   if [[ -n "$JAIL_CHECK" ]]; then
-    echo "M4 jail: JAIL_CHECK=1 was set but this host cannot nest user namespaces — failing." >&2
+    echo "M4 jail: JAIL_CHECK=1 was set but this host cannot build the jail (see the SKIPPED reason above) — failing." >&2
     exit 1
   fi
-  echo "M4 jail: SKIPPED (host cannot nest user namespaces). Set JAIL_CHECK=1 to require it."
+  echo "M4 jail: SKIPPED (host cannot build the jail — see reason above). Set JAIL_CHECK=1 to require it."
 elif [[ $jail_rc -ne 0 ]]; then
   echo "M4 jail: boundary check FAILED (rc=$jail_rc)" >&2
   exit 1

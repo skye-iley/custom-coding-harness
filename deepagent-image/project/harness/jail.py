@@ -52,8 +52,118 @@ JAIL_ENV = "DEEPAGENTS_JAIL"
 _SYSTEM_ROBINDS = ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt")
 
 
+# Where the kernel exposes this process's AppArmor confinement. The first path is
+# the modern per-LSM location and is AUTHORITATIVE when it exists -- it is empty
+# exactly when AppArmor is compiled in but this task carries no profile. The second
+# is the legacy location shared with other LSMs, consulted only as a fallback.
+_APPARMOR_ATTR_PATH = "/proc/self/attr/apparmor/current"
+_LEGACY_ATTR_PATH = "/proc/self/attr/current"
+
+# Values that mean "nothing is confining this process". `kernel` is what the shared
+# legacy attr reports on a host with no AppArmor policy loaded (measured on Docker
+# Desktop/WSL2, where the jail works fine) -- treating it as a profile name would
+# make doctor hard-error on exactly the host class slice H was verified on.
+_UNCONFINED_VALUES = frozenset({"unconfined", "kernel"})
+
+
+def _read_attr(path: str) -> str | None:
+    """Contents of an LSM attr file, or None when it does not exist / is unreadable.
+
+    An existing-but-empty file returns "" (not None): for the AppArmor-specific
+    path that is a meaningful answer -- no profile -- and must not fall through to
+    the legacy one.
+    """
+    try:
+        with open(path) as fh:
+            # These are NUL-terminated, and `str.strip()` does not remove NULs.
+            return fh.read().replace("\0", "").strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _profile_from(raw: str) -> str | None:
+    if not raw:
+        return None
+    # Format is "<profile> (<mode>)", e.g. "docker-default (enforce)".
+    profile = raw.split(" (")[0].strip()
+    if not profile or profile in _UNCONFINED_VALUES:
+        return None
+    return profile
+
+
 class JailUnavailable(RuntimeError):
     """The jail was requested but cannot be built. Always fatal -- never degrade."""
+
+
+def apparmor_confinement() -> str | None:
+    """This process's AppArmor profile, or None when AppArmor is not in force.
+
+    "unconfined" is reported as None: an unconfined process is not constrained by
+    AppArmor, so for diagnostic purposes it is the same as AppArmor being absent.
+    """
+    specific = _read_attr(_APPARMOR_ATTR_PATH)
+    if specific is not None:
+        # Authoritative, including when empty: AppArmor is present and this task
+        # has no profile. Do NOT fall through -- the legacy shared attr reports
+        # `kernel` here, which would read as a confinement that does not exist.
+        return _profile_from(specific)
+
+    legacy = _read_attr(_LEGACY_ATTR_PATH)
+    if legacy is not None:
+        return _profile_from(legacy)
+    return None
+
+
+def classify_bwrap_failure(stderr: str) -> str:
+    """Why bwrap could not build the namespace: 'userns' | 'lsm' | 'unknown'.
+
+    The distinction is not cosmetic (milestone4.md §11.6, invariant 37). seccomp
+    and AppArmor are independent gates and both must allow, so the two failures
+    need opposite remedies -- and they are distinguishable by *how far bwrap got*:
+
+      userns  the `unshare` itself was refused. Docker's default seccomp profile
+              blocks unprivileged userns creation. Fix: pass seccomp/userns.json.
+      lsm     `unshare` SUCCEEDED and the first mount was denied. Docker's
+              generated `docker-default` AppArmor profile carries a literal
+              `deny mount,`, which no seccomp change affects and which entering a
+              user namespace does not shed. Fix: slice J's profile, or
+              DEEPAGENTS_JAIL_APPARMOR=unconfined.
+
+    Reporting an `lsm` failure as a seccomp problem sends the operator to re-check
+    a profile that is already correct -- the dead end this milestone's own CI hit.
+    """
+    text = (stderr or "").lower()
+    if "no permissions to create new namespace" in text or "unshare" in text:
+        return "userns"
+    # bwrap's mount-phase failures. "Failed to make / slave" is the first one it
+    # can hit, and the one docker-default produces; the others cover the same
+    # denial surfacing at a later bind/pivot.
+    mount_phase = (
+        "failed to make / slave",
+        "failed to make / rslave",
+        "can't mount",
+        "unable to mount",
+        "failed to mount",
+        "pivot_root",
+    )
+    if any(marker in text for marker in mount_phase) and "permission denied" in text:
+        return "lsm"
+    if "namespace" in text:
+        return "userns"
+    return "unknown"
+
+
+def apparmor_hint() -> str:
+    """Operator-facing remedy for an LSM mount denial, naming the live profile."""
+    profile = apparmor_confinement()
+    named = f"AppArmor profile '{profile}'" if profile else "an AppArmor profile"
+    return (
+        f"the user namespace was created, then the first mount was denied by {named} "
+        "-- Docker's default profile carries `deny mount,`, which the seccomp profile "
+        "has no bearing on. Either load the narrowed profile (milestone4.md §11.6, "
+        "slice J) or relaunch with DEEPAGENTS_JAIL_APPARMOR=unconfined, which works "
+        "everywhere but drops the whole profile rather than one rule."
+    )
 
 
 def jail_enabled(env: dict[str, str] | None = None) -> bool:
@@ -244,12 +354,26 @@ def preflight() -> list[str]:
     if probe.returncode != 0:
         detail = (probe.stderr or "").strip().splitlines()
         hint = detail[0] if detail else f"exit {probe.returncode}"
-        problems.append(
-            f"bwrap cannot create a user namespace here ({hint}). The container most "
-            "likely lacks the narrow seccomp profile -- run it with "
-            "--security-opt seccomp=deepagent-image/seccomp/userns.json "
-            "(see seccomp/README.md)."
-        )
+        kind = classify_bwrap_failure(probe.stderr or "")
+        if kind == "lsm":
+            # Do NOT blame seccomp here: the profile is almost certainly correct
+            # and the operator would go re-check it for nothing (invariant 37).
+            problems.append(f"bwrap cannot build the jail here ({hint}). {apparmor_hint()}")
+        elif kind == "userns":
+            problems.append(
+                f"bwrap cannot create a user namespace here ({hint}). The container most "
+                "likely lacks the narrow seccomp profile -- run it with "
+                "--security-opt seccomp=deepagent-image/seccomp/userns.json "
+                "(see seccomp/README.md)."
+            )
+        else:
+            confined = apparmor_confinement()
+            extra = f" This process is confined by AppArmor profile '{confined}'." if confined else ""
+            problems.append(
+                f"bwrap cannot build the jail here ({hint}).{extra} Check both gates: the "
+                "narrow seccomp profile (--security-opt seccomp=deepagent-image/seccomp/"
+                "userns.json) and the host LSM (milestone4.md §11.6)."
+            )
 
     return problems
 

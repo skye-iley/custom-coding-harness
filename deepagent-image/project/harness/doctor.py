@@ -225,6 +225,35 @@ def doctor_main(argv: list[str]) -> int:
                         f"{list(seccomp_mod.RELAXED_SYSCALLS)}",
                     ))
 
+        # LSM gate (M4 slice J, §11.6). seccomp and AppArmor are independent, and a
+        # correct seccomp profile says nothing about the second one: docker-default
+        # denies `mount` outright, which is not something the jail can work around
+        # from inside the namespace. Surfaced here so it is a pre-flight finding
+        # naming the real cause, not a bwrap error the operator has to decode.
+        confinement = jail_mod.apparmor_confinement()
+        apparmor_opt = (os.environ.get("DEEPAGENTS_JAIL_APPARMOR") or "").strip()
+        if confinement:
+            records.append((
+                "error",
+                f"fs jail is on but this container is confined by AppArmor profile "
+                f"'{confinement}', which denies the mounts bwrap needs (seccomp is not "
+                "the problem). Relaunch with DEEPAGENTS_JAIL_APPARMOR=unconfined — which "
+                "drops the whole profile, not just its deny-mount rule — or load the "
+                "narrowed profile (milestone4.md §11.6, slice J).",
+            ))
+        elif apparmor_opt == "unconfined":
+            # Not an error (the operator asked for it) but never silent: this is a
+            # wider trade than the five relaxed syscalls DEEPAGENTS_JAIL alone costs.
+            records.append((
+                "warning",
+                "fs jail: AppArmor is disabled for this container "
+                "(DEEPAGENTS_JAIL_APPARMOR=unconfined). That drops all of docker-default "
+                "— the /proc and /sys write denials and the ptrace peer restriction — "
+                "not only its deny-mount rule.",
+            ))
+        else:
+            records.append(("info", "fs jail: no AppArmor confinement in force"))
+
         # The real gate: bwrap being installed says nothing about whether seccomp
         # will actually let it unshare. Only meaningful in-container.
         if os.environ.get("DEEPAGENTS_IN_CONTAINER") == "1":

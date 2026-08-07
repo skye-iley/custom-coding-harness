@@ -217,8 +217,23 @@ try {
     # Script piped in on stdin (`python3 -`) rather than bind-mounted, to stay in
     # lockstep with smoke.sh — there a bind target is rewritten by MSYS under Git
     # Bash, so stdin is the only form that is portable across both launchers.
+    # M4 slice J (§11.6): on an AppArmor-confined host, seccomp is only half the gate -
+    # Docker's `docker-default` profile denies `mount` outright, so bwrap fails after
+    # `unshare` succeeds. Unset (the default) means we pass nothing and the check skips
+    # on such a host. `unconfined` makes it run everywhere at the cost of dropping the
+    # WHOLE profile, not just its `deny mount,` - a wider trade than the five relaxed
+    # syscalls, so it is opt-in and announced, never a silent default.
+    $ApparmorArgs = @()
+    if ($env:DEEPAGENTS_JAIL_APPARMOR) {
+        $ApparmorArgs = @("--security-opt", "apparmor=$($env:DEEPAGENTS_JAIL_APPARMOR)")
+        if ($env:DEEPAGENTS_JAIL_APPARMOR -eq "unconfined") {
+            Write-Host "M4 jail: AppArmor DISABLED for this container (apparmor=unconfined) - drops docker-default entirely, not just its deny-mount rule."
+        } else {
+            Write-Host "M4 jail: using AppArmor profile '$($env:DEEPAGENTS_JAIL_APPARMOR)' (must already be loaded on the host)."
+        }
+    }
     $jailArgs = @("run", "--rm", "-i") + $NetArgs + $ProxyEnv + @(
-        "--security-opt", "seccomp=$SeccompProfile",
+        "--security-opt", "seccomp=$SeccompProfile") + $ApparmorArgs + @(
         "-e", "DEEPAGENTS_JAIL=1",
         "deepagent-harness", "python3", "-")
     $prevEAP = $ErrorActionPreference
@@ -227,12 +242,13 @@ try {
     $jailRc = $LASTEXITCODE
     $ErrorActionPreference = $prevEAP
     if ($jailRc -eq 77) {
-        # Environmental, not a regression: some kernels/runtimes refuse nested
-        # userns outright. Only a hard failure when the caller pinned it (CI).
+        # Environmental, not a regression, for either reason the gate can report: the
+        # kernel/runtime refuses nested userns, or the host LSM denies bwrap's mounts.
+        # Only a hard failure when the caller pinned it (CI).
         if ($JailCheck) {
-            throw "M4 jail: -JailCheck was set but this host cannot nest user namespaces - failing."
+            throw "M4 jail: -JailCheck was set but this host cannot build the jail (see the SKIPPED reason above) - failing."
         }
-        Write-Host "M4 jail: SKIPPED (host cannot nest user namespaces). Use -JailCheck to require it."
+        Write-Host "M4 jail: SKIPPED (host cannot build the jail - see reason above). Use -JailCheck to require it."
     } elseif ($jailRc -ne 0) {
         throw "M4 jail: boundary check FAILED (rc=$jailRc)"
     } else {

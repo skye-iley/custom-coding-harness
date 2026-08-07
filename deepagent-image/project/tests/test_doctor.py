@@ -211,3 +211,94 @@ def test_jail_on_with_the_committed_profile_passes(tmp_path, monkeypatch, capsys
     err = capsys.readouterr().err
     assert "Docker's default plus exactly" in err
     assert rc == 0
+
+
+# --- AppArmor / LSM pre-flight (M4 slice J, invariants 37/38) -----------------
+
+
+def _jail_on(monkeypatch):
+    monkeypatch.setenv("DEEPAGENTS_JAIL", "1")
+    monkeypatch.delenv("DEEPAGENTS_IN_CONTAINER", raising=False)
+
+
+def _records(capsys):
+    return capsys.readouterr().err
+
+
+def test_doctor_errors_when_jail_is_on_under_apparmor(tmp_path, monkeypatch, capsys):
+    """The failure CI hit: jail on, seccomp fine, AppArmor silently blocking mount."""
+    from harness import jail as doctor_jail
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    _jail_on(monkeypatch)
+    monkeypatch.delenv("DEEPAGENTS_JAIL_APPARMOR", raising=False)
+    monkeypatch.setattr(doctor_jail, "apparmor_confinement", lambda: "docker-default")
+
+    rc = doctor.doctor_main([str(ws), str(state)])
+    err = _records(capsys)
+    assert rc != 0
+    assert "docker-default" in err
+    assert "DEEPAGENTS_JAIL_APPARMOR=unconfined" in err
+    # Must name AppArmor as the cause rather than implying the seccomp profile is wrong.
+    assert "seccomp is not the problem" in err.lower()
+
+
+def test_doctor_warns_but_passes_when_apparmor_deliberately_unconfined(
+    tmp_path, monkeypatch, capsys
+):
+    from harness import jail as doctor_jail
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    _jail_on(monkeypatch)
+    monkeypatch.setenv("DEEPAGENTS_JAIL_APPARMOR", "unconfined")
+    monkeypatch.setattr(doctor_jail, "apparmor_confinement", lambda: None)
+
+    rc = doctor.doctor_main([str(ws), str(state)])
+    err = _records(capsys)
+    # The operator asked for it, so it must not fail -- but it must never be silent:
+    # this is a wider trade than the five relaxed syscalls the jail alone costs.
+    assert rc == 0
+    assert "AppArmor is disabled" in err
+    assert "docker-default" in err
+
+
+def test_doctor_quiet_when_no_lsm_in_force(tmp_path, monkeypatch, capsys):
+    from harness import jail as doctor_jail
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    _jail_on(monkeypatch)
+    monkeypatch.delenv("DEEPAGENTS_JAIL_APPARMOR", raising=False)
+    monkeypatch.setattr(doctor_jail, "apparmor_confinement", lambda: None)
+
+    rc = doctor.doctor_main([str(ws), str(state)])
+    err = _records(capsys)
+    assert rc == 0
+    assert "no AppArmor confinement in force" in err
+
+
+def test_doctor_skips_the_apparmor_check_entirely_when_jail_is_off(
+    tmp_path, monkeypatch, capsys
+):
+    """Invariant 35: jail off must stay byte-for-byte A-G. No LSM finding at all."""
+    from harness import jail as doctor_jail
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    monkeypatch.delenv("DEEPAGENTS_JAIL", raising=False)
+    monkeypatch.setattr(doctor_jail, "apparmor_confinement", lambda: "docker-default")
+
+    rc = doctor.doctor_main([str(ws), str(state)])
+    err = _records(capsys)
+    assert rc == 0
+    assert "AppArmor" not in err

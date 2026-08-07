@@ -22,6 +22,31 @@ bwrap: No permissions to create new namespace, likely because the kernel does
 which is the hard gate `docs/milestones/in-progress/milestone4.md` §17/PR6 puts
 in front of slice H (the bwrap fs jail).
 
+## ⚠️ This profile is only ONE of the two gates
+
+**seccomp and the host's LSM are independent, and an operation must pass both.**
+Fixing the syscall filter does nothing about AppArmor. On Ubuntu/Debian — most
+Linux Docker hosts — Docker also applies a generated `docker-default` AppArmor
+profile carrying a literal `deny mount,`, so with this profile correctly applied
+bwrap still fails:
+
+```
+bwrap: Failed to make / slave: Permission denied
+```
+
+Note where that lands: **past** `unshare`, at the first mount. That is the
+fingerprint distinguishing the two failures, and `jail.classify_bwrap_failure`
+uses it so nothing misreports an AppArmor denial as a seccomp problem. AppArmor
+denies by profile rather than by uid or capability, and confinement is **not**
+shed by entering a user namespace — so no userns work, and not even a setuid
+`bwrap`, escapes it from inside.
+
+Until slice J vendors a narrowed AppArmor profile (`milestone4.md` §11.6), the
+interim knob is `DEEPAGENTS_JAIL_APPARMOR=unconfined`, which works everywhere at
+the cost of dropping the **whole** profile rather than one rule. Docker
+Desktop/WSL2 needs nothing (no LSM policy is loaded) — which is exactly why this
+gap survived to CI: every slice-H measurement was taken there.
+
 ## Why not just `seccomp=unconfined`
 
 Because the container is still the real trust boundary
@@ -98,10 +123,17 @@ python3 -m harness seccomp-sync            # refresh from the pinned moby tag (n
 python3 -m harness seccomp-sync --check    # verify the committed file; writes nothing, fetches nothing
 ```
 
-`--check` is the regression guard and runs in CI: it asserts `defaultAction` is
-still `SCMP_ACT_ERRNO` and that the relaxation entry names *exactly*
-`RELAXED_SYSCALLS`. Swapping in an unconfined profile, or quietly widening the
-relaxation, fails there instead of sailing through because the jail still works.
+`--check` is the regression guard: it asserts `defaultAction` is still
+`SCMP_ACT_ERRNO` and that the relaxation entry names *exactly* `RELAXED_SYSCALLS`.
+Swapping in an unconfined profile, or quietly widening the relaxation, fails there
+instead of sailing through because the jail still works.
+
+In CI that guard runs as `tests/test_seccomp.py` (`test_committed_profile_is_narrow`
+and `test_committed_profile_still_gates_the_dangerous_syscalls`), which assert the
+same properties against the committed artifact from the stdlib-only host tier.
+`seccomp-sync --check` stays the equivalent one-shot for local use, in an
+environment that has the harness runtime deps installed — importing the `harness`
+package pulls in `cli` and therefore `dotenv`/`langgraph`.
 
 ## Maintenance
 

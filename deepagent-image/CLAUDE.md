@@ -93,6 +93,7 @@ See [ENV_VARS.md](./ENV_VARS.md#not-in-env--launcher-environment-host-side) for 
 | `EPHEMERAL` | `-Ephemeral` | off | Mount a throwaway copy of the workspace; revert on close. |
 | `SAVE_WORKSPACE` | `-SaveWorkspace` | off | Snapshot the ephemeral copy before discard; implies ephemeral. |
 | `NET_JAIL` | `-NetJail` | off | Deny-all-egress network jail (see `netjail/`). |
+| `DEEPAGENTS_JAIL_APPARMOR` | — | unset | AppArmor stance for the bwrap jail. Read from the host env **or `.env`**, same as `DEEPAGENTS_JAIL`, but it only affects `docker run` flags — nothing reads it inside the container. Unset → pass nothing, so `docker-default` applies and the jail fails closed on Ubuntu/Debian. `unconfined` → `--security-opt apparmor=unconfined` (works everywhere; drops the whole profile). Any other value is passed through as a host-loaded profile name. See "bwrap fs jail" below. |
 
 (`MAP_HOST_USER`/`HOST_UID`/`HOST_GID` are Linux-only mount-ownership knobs and have no `.ps1`
 param — Windows is always Docker Desktop, where mounts are already squashed.)
@@ -628,7 +629,32 @@ if it is missing rather than launching unjailed. `harness doctor` verifies the p
 narrow and probes whether bwrap can actually unshare here.
 
 Regenerate the profile with `python3 -m harness seccomp-sync` (dev-time, needs network);
-`seccomp-sync --check` is the CI regression guard against a widened or unconfined profile.
+`tests/test_seccomp.py` is the CI regression guard against a widened or unconfined profile (it
+asserts the committed artifact, so the guard runs in the ordinary host tier).
+
+**⚠️ The jail does not work on an AppArmor host yet — `DEEPAGENTS_JAIL_APPARMOR` is the interim
+knob.** seccomp is only **one of two** gates, and both must allow. On Ubuntu/Debian Docker — which is
+most Linux container hosts — Docker also applies a generated `docker-default` AppArmor profile whose
+literal `deny mount,` blocks bwrap at its first mount, *after* `unshare` has already succeeded. No
+seccomp change affects this, and entering a user namespace does not shed AppArmor confinement, so the
+jail cannot work around it from inside. The fingerprint is
+`bwrap: Failed to make / slave: Permission denied` (contrast a seccomp/userns refusal, which fails
+earlier with `No permissions to create new namespace`); `jail.classify_bwrap_failure` tells them
+apart so preflight, `doctor`, and the smoke gate all name the right cause.
+
+Options today:
+- **`DEEPAGENTS_JAIL_APPARMOR=unconfined`** — works on any host, but drops the **whole**
+  `docker-default` profile, not just its deny-mount rule. Wider than the five relaxed syscalls
+  `DEEPAGENTS_JAIL` alone costs, so it is opt-in, never a launcher default, and both `run-docker` and
+  `doctor` say what was given up.
+- **Leave it unset** — the harness fails **closed** at startup with a diagnostic naming AppArmor,
+  rather than running unjailed while you believe otherwise.
+- Docker Desktop/WSL2 loads no AppArmor policy, so nothing is needed there. That is also why this was
+  missed pre-merge: every slice-H measurement was taken on that host class.
+
+The real fix is **slice J** — a vendored `docker-default` with only the `mount` rule narrowed, same
+shape as `seccomp-sync`. Planned, not built: see `docs/milestones/in-progress/milestone4.md` §11.6.
+**SELinux hosts (RHEL/Fedora) are a third environment and are untested.**
 
 ### Quick-Start: In-Workspace `.agentignore` File
 

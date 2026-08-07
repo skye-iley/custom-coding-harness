@@ -371,6 +371,34 @@ if ($JailMode -and $JailMode -notin @("0", "false", "no", "off")) {
     }
     $JailArgs = @("--security-opt", "seccomp=$((Resolve-Path $SeccompProfile).Path)")
     Write-Host "Jail: bwrap fs jail ON (narrow seccomp profile)"
+
+    # M4 slice J (§11.6): seccomp is only ONE of the two gates. On an AppArmor host
+    # (Ubuntu/Debian Docker) the generated `docker-default` profile carries a literal
+    # `deny mount,`, so bwrap gets past `unshare` and then fails at its first mount -
+    # and entering a user namespace does not shed AppArmor confinement, so nothing the
+    # jail does from inside can work around it. Until slice J vendors a narrowed
+    # profile, the operator's options are this knob or an unconfined host.
+    #
+    # Unset (default): pass nothing. The harness then fails CLOSED at startup with a
+    # diagnostic naming AppArmor (jail.preflight) rather than running unjailed.
+    $Apparmor = $env:DEEPAGENTS_JAIL_APPARMOR
+    if (-not $Apparmor) {
+        $aaLine = Select-String -Path $EnvFile -Pattern '^\s*DEEPAGENTS_JAIL_APPARMOR\s*=' -ErrorAction SilentlyContinue | Select-Object -Last 1
+        if ($aaLine) {
+            $Apparmor = ($aaLine.Line -replace '^\s*DEEPAGENTS_JAIL_APPARMOR\s*=', '').Trim().Trim('"').Trim("'")
+        }
+    }
+    if ($Apparmor) {
+        $JailArgs += @("--security-opt", "apparmor=$Apparmor")
+        if ($Apparmor -eq "unconfined") {
+            Write-Host "Jail: AppArmor DISABLED for this container (apparmor=unconfined)."
+            Write-Host "      This drops ALL of docker-default - the /proc and /sys write denials and the"
+            Write-Host "      ptrace peer restriction - not just its deny-mount rule. Wider than the five"
+            Write-Host "      relaxed syscalls DEEPAGENTS_JAIL alone costs. See milestone4.md 11.6."
+        } else {
+            Write-Host "Jail: AppArmor profile '$Apparmor' (must already be loaded on the host via apparmor_parser)."
+        }
+    }
 }
 
 $dockerArgs = @(

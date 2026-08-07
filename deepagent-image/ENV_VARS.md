@@ -67,7 +67,7 @@ are in [Launcher Environment](./CLAUDE.md#launcher-environment-host-side-not-env
 | `DEEPAGENTS_MASK` | Enable workspace masking scan + empty-overlay mounts | 0/1 | 1 | — |
 | `DEEPAGENTS_MASK_MODE` | Visibility mode: "deny" (default) or "allow" | string | deny | — |
 | `DEEPAGENTS_AGENTIGNORE` | Override in-workspace config filename | string | `.agentignore` | `.maskignore` |
-| `DEEPAGENTS_JAIL` | Route all fs tools + the shell through the bubblewrap jail (slice H). Requires the narrow seccomp profile; `run-docker` passes it and fails closed if absent | 0/1 | 0 (off) | `1` |
+| `DEEPAGENTS_JAIL` | Route all fs tools + the shell through the bubblewrap jail (slice H). Requires the narrow seccomp profile; `run-docker` passes it and fails closed if absent. **Also needs `DEEPAGENTS_JAIL_APPARMOR` on an AppArmor host** — seccomp is only one of the two gates | 0/1 | 0 (off) | `1` |
 | `DEEPAGENTS_NS_GUARD` | Shell-tool denylist for the namespace syscalls the jail's seccomp profile re-permits container-wide. A tripwire, not containment | `0`/`1`/`warn` | tracks `DEEPAGENTS_JAIL` | `warn` |
 
 ## Human-in-the-Loop (Milestone 3)
@@ -126,3 +126,4 @@ See [Launcher Environment](./CLAUDE.md#launcher-environment-host-side-not-env) i
 | `EPHEMERAL` | `-Ephemeral` | Mount throwaway workspace copy; revert on close | off |
 | `SAVE_WORKSPACE` | `-SaveWorkspace` | Ephemeral + snapshot to workspace-logs/<ts>/ | off |
 | `NET_JAIL` | `-NetJail` | Deny-all-egress network jail (see netjail/README.md) | off |
+| `DEEPAGENTS_JAIL_APPARMOR` | — | AppArmor stance for the bwrap jail. `unconfined` makes the jail work on Ubuntu/Debian Docker, where `docker-default` denies `mount` regardless of seccomp — at the cost of dropping the **whole** profile. Any other value = a host-loaded profile name. Unset → jail fails closed on such hosts with a diagnostic | unset |

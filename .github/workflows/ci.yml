@@ -10,11 +10,20 @@ jobs:
       - run: pip install pytest
       - run: python -m pytest tests/test_mask.py tests/test_pathguard.py tests/test_doctor.py tests/test_cost.py tests/test_providers.py tests/test_archive.py tests/test_resilience.py tests/test_interrupt.py tests/test_audit.py tests/test_ratelimit.py tests/test_hostmap.py tests/test_jail.py tests/test_seccomp.py tests/test_nsguard.py
         working-directory: deepagent-image/project
-      # M4 slice H invariant 31: the vendored seccomp profile must stay Docker's
-      # default plus exactly five relaxed syscalls. Catches a swap to
-      # `seccomp=unconfined` or a quietly widened relaxation. Keyless, no network.
-      - run: python -m harness seccomp-sync --check
-        working-directory: deepagent-image/project
+      # M4 slice H invariant 31 (the vendored seccomp profile must stay Docker's
+      # default plus exactly five relaxed syscalls, so a swap to `seccomp=unconfined`
+      # or a quietly widened relaxation fails the build) is asserted by
+      # tests/test_seccomp.py::test_committed_profile_is_narrow and
+      # ::test_committed_profile_still_gates_the_dangerous_syscalls, which run in the
+      # pytest step above against the committed artifact.
+      #
+      # There was a separate `python -m harness seccomp-sync --check` step here. It
+      # never passed: importing the `harness` package runs harness/__init__.py, which
+      # eagerly imports harness.cli -> dotenv, langgraph, ... none of which this job
+      # installs (deliberately — the host tier is stdlib-only, see the suite
+      # conventions in deepagent-image/CLAUDE.md). Installing the runtime dependency
+      # tree just to reach a check the test suite already makes is the wrong trade, so
+      # the step is gone rather than papered over. The tests are the gate.
   image-tests:
     runs-on: ubuntu-latest
     steps:
@@ -26,17 +35,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build --target runtime -t deepagent-harness deepagent-image
-      # smoke.sh now also runs the M4 slice H jail gate (bwrap must really unshare
-      # under seccomp/userns.json, and a masked path must read empty inside the
-      # jail with no docker mask in play). It SELF-SKIPS (rc 77) on a host that
-      # cannot nest user namespaces, so it cannot redden CI environmentally.
+      # smoke.sh also runs the M4 slice H jail gate (bwrap must really unshare under
+      # seccomp/userns.json, and a masked path must read empty inside the jail with no
+      # docker mask in play). It SELF-SKIPS (rc 77) when the host cannot build the jail
+      # for either environmental reason — nested userns refused, or the host LSM denying
+      # bwrap's mounts.
       #
-      # Deliberately NOT pinned with JAIL_CHECK=1 yet: whether a GitHub-hosted
-      # runner permits nested userns here is unverified, and pinning it before
-      # one green run would make CI fail for a reason unrelated to the boundary.
-      # Once a run shows "M4 jail: ... ok" rather than "SKIPPED", set
-      # JAIL_CHECK=1 here so a regression that silently disables the jail fails
-      # the build instead of quietly downgrading to a skip.
+      # MEASURED on this runner: it skips, with reason `lsm`. ubuntu-latest applies
+      # Docker's `docker-default` AppArmor profile, whose literal `deny mount,` blocks
+      # bwrap at its first mount — *after* `unshare` succeeded, so seccomp is not the
+      # constraint and no seccomp change fixes it. That is slice J (milestone4.md
+      # §11.6). An earlier revision of this comment claimed the gate "cannot redden CI
+      # environmentally"; it could and did, because the rc-77 path only recognized
+      # userns refusals. It now recognizes both.
+      #
+      # Deliberately NOT pinned with JAIL_CHECK=1: on this runner that would pin a
+      # failure, not the boundary. Pin it once slice J lands and a run shows
+      # "M4 jail: ... ok" rather than "SKIPPED", so a regression that silently disables
+      # the jail fails the build instead of quietly downgrading to a skip.
       - run: deepagent-image/scripts/smoke.sh
   parity:
     runs-on: ubuntu-latest

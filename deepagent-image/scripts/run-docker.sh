@@ -361,6 +361,28 @@ jail_setup() {
   fi
   JAIL_ARGS=(--security-opt "seccomp=$profile")
   echo "Jail: bwrap fs jail ON (narrow seccomp profile)" >&2
+
+  # M4 slice J (§11.6): seccomp is only ONE of the two gates. On an AppArmor host
+  # (Ubuntu/Debian Docker) the generated `docker-default` profile carries a literal
+  # `deny mount,`, so bwrap gets past `unshare` and then fails at its first mount —
+  # and entering a user namespace does not shed AppArmor confinement, so nothing the
+  # jail does from inside can work around it. Until slice J vendors a narrowed
+  # profile, the operator's options are this knob or an unconfined host.
+  #
+  # Unset (default): pass nothing. The harness then fails CLOSED at startup with a
+  # diagnostic naming AppArmor (jail.preflight) rather than running unjailed.
+  local apparmor="${DEEPAGENTS_JAIL_APPARMOR:-$(_env_file_get DEEPAGENTS_JAIL_APPARMOR)}"
+  if [[ -n "$apparmor" ]]; then
+    JAIL_ARGS+=(--security-opt "apparmor=$apparmor")
+    if [[ "$apparmor" == "unconfined" ]]; then
+      echo "Jail: AppArmor DISABLED for this container (apparmor=unconfined)." >&2
+      echo "      This drops ALL of docker-default — the /proc and /sys write denials and the" >&2
+      echo "      ptrace peer restriction — not just its deny-mount rule. Wider than the five" >&2
+      echo "      relaxed syscalls DEEPAGENTS_JAIL alone costs. See milestone4.md §11.6." >&2
+    else
+      echo "Jail: AppArmor profile '$apparmor' (must already be loaded on the host via apparmor_parser)." >&2
+    fi
+  fi
 }
 jail_setup
 

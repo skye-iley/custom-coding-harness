@@ -41,6 +41,7 @@ later layers slot in without reworking policy (feature plan §7).
 | **G** §10 security verification suite | tests that *prove* the boundary holds (floor never leaks, no traversal escape) | §10 | v1 (support) | ships in PR1–3 |
 | **H** bwrap fs-tool jail | allow-list boundary; route **all** fs tools through the jail; narrow seccomp profile; **carries slice D's deferred approve branch** | feature plan §4.2 · detail §11.4 | **v1 — core, built** (opt-in, `DEEPAGENTS_JAIL=1`) | PR6 |
 | **I** overlayfs view | tool-agnostic true allow-list + upper-diff write-back | feature plan §4.3 | deferred v2 | — |
+| **J** AppArmor profile | vendored `docker-default` + narrowed `mount` rules, so the jail runs on AppArmor-confined hosts without dropping the whole LSM | detail §11.6 · §16 fork 10 | **planned** (follow-up; H is unusable on stock Linux Docker without it) | PR7 |
 
 ---
 
@@ -89,8 +90,14 @@ in **CI** that proves the boundary can't silently regress.
   posture therefore stays the default, and the operator opts into H knowingly. So the done-when is
   **"H is built, verified, and available"** — not "H is on by default." With the jail off, the boundary
   is the Docker container plus the deny-list mask (`mvp.md` §5), and the docs must keep saying so.
-- **The `bwrap --unshare-all` gate is verified in the built image** (§3, §11.4) — measured, not
-  assumed, and re-checked by `scripts/smoke.{sh,ps1}` (`JAIL_CHECK=1` / `-JailCheck`).
+- **The `bwrap --unshare-all` gate is verified in the built image on a host with no LSM policy
+  loaded** (§3, §11.4) — measured, not assumed, and re-checked by `scripts/smoke.{sh,ps1}`
+  (`JAIL_CHECK=1` / `-JailCheck`). **Scope of that claim, stated precisely because the earlier
+  wording overreached:** it was measured on Docker Desktop/WSL2, where no AppArmor policy is in
+  force. On an AppArmor-confined host — Ubuntu/Debian Docker, and GitHub-hosted runners — the same
+  gate **fails**, because `docker-default` denies `mount` independently of seccomp (§11.6). Closing
+  that is slice J; until it lands, the jail's reach is "no-LSM hosts, plus operators who opt into
+  `DEEPAGENTS_JAIL_APPARMOR=unconfined`", and no doc may state it more broadly.
 
 ## 2. Why this milestone now
 
@@ -214,6 +221,19 @@ failure is a blocker to resolve, not a reason to drop H to stretch and ship with
 established the "grant it or it silently breaks" discipline for egress; the bind-whitelist is its
 filesystem analogue, and — unlike NetJail, which is opt-in — H is load-bearing for the milestone's own
 done-when (§1).
+
+### J — AppArmor profile *(follow-up to H; detail §11.6 · fork 10)*
+H's seccomp work made the **kernel's syscall filter** permit the namespace calls bwrap needs. On a host
+running AppArmor — Ubuntu/Debian, which is most Linux Docker — that is only half the gate: Docker also
+applies its generated `docker-default` profile, whose literal `deny mount,` rule blocks bwrap at the
+`mount(MS_SLAVE)` immediately after `unshare` succeeds. seccomp and AppArmor are **independent LSM
+gates and both must allow**, and AppArmor confinement is **not** shed by entering a user namespace, so
+no amount of userns work escapes it from inside. J vendors `docker-default` and narrows exactly the
+`mount` rule — the same shape as `seccomp-sync` does for the syscall filter — so the jail runs on
+AppArmor hosts while keeping every other denial in the profile. Ships separately from H because,
+unlike a seccomp JSON, an AppArmor profile **cannot be handed to `docker run` as a file**: it must be
+pre-loaded into the *host* kernel by root, which is a distribution problem with its own design
+(§11.6), not a flag.
 
 ## 5. What we pull in — and leave out
 
@@ -591,6 +611,16 @@ The seam:
 > | workspace write inside | permitted (live edits still land) |
 > | `/project` write inside | refused — `Read-only file system` |
 >
+> **What LSM was in force when this was measured: none.** Docker Desktop/WSL2 runs containers in a
+> LinuxKit VM with no AppArmor policy loaded, so seccomp was the only gate and the table above is a
+> complete account *for that host class only*. On an AppArmor-confined host the first row **fails** —
+> `bwrap: Failed to make / slave: Permission denied`, past `unshare`, blocked at the mount — because
+> `docker-default` carries a literal `deny mount,` that seccomp has no bearing on. Rows 2–6 are
+> therefore unmeasured on such a host: they are downstream of a jail that never started. Slice J
+> (§11.6) is the fix; `DEEPAGENTS_JAIL_APPARMOR=unconfined` is the interim escape hatch. **Any future
+> boundary measurement must name the LSM it ran under** — that omission is what let this ship as
+> "verified" when it was verified on one host class.
+>
 > Now automated: `scripts/smoke.{sh,ps1}` `JAIL_CHECK=1` / `-JailCheck`. **Caveat for anyone
 > re-running this by hand:** stage the fixture workspace/state **outside `/tmp`** — `bwrap_args`
 > emits `--tmpfs /tmp` *after* the binds, so a fixture under `/tmp` is overmounted and every result
@@ -719,6 +749,116 @@ denylist entry ever collides with real work), `1`/`block` forces it on with the 
 > scripted attempts — which is what an opportunistic prompt-injected agent actually emits — are
 > refused **and recorded**, so an escape attempt leaves evidence instead of silence.
 
+### 11.6 AppArmor profile (slice J — planned) — `deepagent-image/apparmor/` + `harness/apparmor.py`
+
+> **Status: planned, not built.** Slice H ships without this, which means **`DEEPAGENTS_JAIL=1` does
+> not work on an AppArmor-confined host** unless the operator opts into the blunt
+> `apparmor=unconfined` escape hatch (§13, `DEEPAGENTS_JAIL_APPARMOR`). That covers Ubuntu/Debian
+> Docker — the majority of Linux container hosts. It is a real limitation of the shipped jail, not a
+> theoretical one, and §1's done-when has been corrected accordingly.
+
+**The problem, precisely.** seccomp and AppArmor are **independent gates; an operation must pass
+both.** H's vendored `seccomp/userns.json` fixes the syscall filter. It has no effect on the LSM. On
+any host with AppArmor enabled, Docker applies a generated profile named `docker-default` to every
+container unless told otherwise; from moby `v28.0.1/profiles/apparmor/template.go` — the same tag
+`harness/seccomp.py` already pins for the syscall profile — the relevant rules are:
+
+```
+  network,
+  capability,
+  file,
+  umount,
+  deny mount,                            # <-- this is the one
+  deny @{PROC}/sysrq-trigger rwklx,
+  deny @{PROC}/kcore rwklx,
+  deny /sys/firmware/** rwklx,
+  ptrace (trace,read,tracedby,readby) peer=<profile>,
+```
+
+`umount` is permitted, `mount` is denied outright. bwrap's second operation after `unshare` is
+`mount(NULL, "/", NULL, MS_SLAVE|MS_REC, NULL)`, so the observed failure is
+`bwrap: Failed to make / slave: Permission denied` — *after* the user namespace was created
+successfully. That distinction is the diagnostic fingerprint: a seccomp/userns refusal fails at
+`unshare` and says `No permissions to create new namespace`; an LSM refusal gets past `unshare` and
+fails at the first mount.
+
+**Why no userns trick escapes it.** AppArmor denies by **profile, not by uid or capability**. A
+process that enters a user namespace holds `CAP_SYS_ADMIN` over that namespace — which is exactly what
+makes unprivileged bwrap work at all — but it remains confined by `docker-default`, so `deny mount`
+still fires. Root cannot override an LSM denial either, which also rules out the obvious alternative:
+**installing `bwrap` setuid-root does not help here.** Setuid would let bwrap build the sandbox with
+real privilege instead of an unprivileged userns (and would, tantalisingly, let H drop the seccomp
+relaxation entirely) — but AppArmor's `deny mount` applies regardless, so it fixes the half that is
+not failing. It is worth naming only so that nobody re-derives it as a shortcut.
+
+**Why this was not caught before merge.** Every manual verification and the §11.4 measurement table
+were run on Docker Desktop/WSL2, whose LinuxKit VM has **no AppArmor policy loaded**. With zero LSM
+confinement, seccomp is the only gate, so the seccomp fix was sufficient *there*. The dev host is the
+unusual environment; the CI runner and a typical Ubuntu server are the normal one. Any future
+boundary claim must state which LSM was in force when it was measured — see the §11.4 caveat.
+
+**Design.** Mirror `seccomp.py`'s shape exactly, because the property to preserve is the same one:
+the relaxation stays *narrow and diffable against upstream*.
+
+- `harness/apparmor.py` — `apparmor-sync` / `apparmor-sync --check`, pinned to the same `MOBY_TAG`.
+  Renders moby's `template.go` base into `deepagent-image/apparmor/deepagent-userns`, replacing the
+  single `deny mount,` line with the narrowest rule set bwrap actually needs:
+
+  ```
+  mount options=(rw, rslave) -> /,        # the MS_SLAVE remount that fails today
+  mount fstype=tmpfs,                     # --tmpfs /tmp, and dir-type mask overmounts
+  mount options=(rw, bind),               # --ro-bind / --bind
+  mount options=(rw, rbind),
+  mount options=(ro, remount, bind),      # the ro half of --ro-bind
+  mount fstype=proc -> /proc/,            # --proc /proc
+  pivot_root,
+  ```
+
+  Every other rule in the template is carried through byte-for-byte, and `verify_profile` asserts
+  that: the profile must be upstream's template plus **exactly** this mount set, so a swap to a
+  permissive `mount,` catch-all or a quiet widening fails `apparmor-sync --check` → CI, precisely as
+  invariant 31 does for seccomp. This is the whole reason J is a slice and not a one-line
+  `apparmor=unconfined` in the launcher.
+- `deepagent-image/apparmor/deepagent-userns` — the vendored artifact, committed and diffable.
+- `deepagent-image/apparmor/README.md` — the counterpart to `seccomp/README.md`: what is relaxed, the
+  does-not-grant-privilege argument for each mount rule, and the residual risk.
+
+**The hard part is distribution, not the profile.** A seccomp profile is a JSON file whose *path* is
+handed to the daemon at `docker run`; it needs no host state. An AppArmor profile is not: it must be
+compiled into the host kernel with `apparmor_parser -r -W <profile>` **as root, before the container
+starts**, and `--security-opt apparmor=deepagent-userns` merely *references* an already-loaded
+profile by name. Consequences to design for, and the reason this is a slice with an open fork rather
+than a patch:
+
+- The launchers cannot silently make it work. `run-docker.{sh,ps1}` must detect "profile not loaded"
+  and say so with the exact `apparmor_parser` command, rather than failing with a bwrap error.
+- It needs an install step (`scripts/install-apparmor-profile.sh`, host-side, root, Linux-only) and
+  therefore a documented uninstall.
+- **CI may not be able to run it at all** — a GitHub-hosted runner permits `sudo`, so loading the
+  profile is likely possible, but that is unverified and must be measured before the gate is pinned.
+  Until it is, the jail gate stays skip-on-LSM-denial (§12.2) rather than red.
+- It is **Linux-only and AppArmor-only**. Docker Desktop needs nothing (no LSM). **SELinux hosts
+  (RHEL/Fedora) are a third environment that is untested** and out of J's scope — do not let J's
+  merge imply they work.
+
+**Fallback that ships today.** Because J is a follow-up, H needs an escape hatch now, and it is
+deliberately explicit rather than baked into the launcher: `DEEPAGENTS_JAIL_APPARMOR` (§13). Setting
+it to `unconfined` adds `--security-opt apparmor=unconfined`, which makes the jail work on any host
+**at the cost of dropping the entire profile above, not just `deny mount`**. The honest accounting of
+that trade:
+
+- Largely, but not wholly, redundant. Docker independently applies OCI `maskedPaths`/`readonlyPaths`
+  covering most of the same `/proc` targets, and the kernel checks a write to `/proc/sysrq-trigger`
+  against `CAP_SYS_ADMIN` **in the initial user namespace** — which a nested-userns process does not
+  hold. So the deny rules overlap heavily with protections that survive the profile being dropped.
+- Not zero, for one specific reason: bwrap mounts a **fresh** procfs (`--proc /proc`) inside the jail,
+  which does **not** inherit Docker's masks. Inside the jail those init-userns capability checks are
+  the only thing left. That is a thinner backstop than the layered one, and it is the argument for J.
+- Categorically wider than what §16 fork 7 pinned. That fork framed the operator's trade as *five
+  relaxed syscalls*. `apparmor=unconfined` makes it **"five syscalls and an entire LSM off"**, which is
+  a different decision and must be presented as one — hence a separate knob, defaulting to unset, with
+  the launcher printing what it gave up.
+
 ## 12. Support tier
 
 ### 12.1 `harness doctor` (slice E) — `harness/doctor.py`
@@ -803,6 +943,7 @@ provider keys** — every tier is keyless by construction.
 | `DEEPAGENTS_MASK_MODE` | container env | `deny` | `deny` (see all but masked) \| `allow` (see only allow-listed + writable). Overridable per-workspace by the `#!mode:` header directive; env wins if set. |
 | `DEEPAGENTS_AGENTIGNORE` | container env | unset | Override the in-workspace config filename (default `.agentignore`); state-dir authoritative config is unaffected. |
 | `DEEPAGENTS_JAIL` | container env + launcher | `0` (**off**) | `1` routes all fs tools + the shell through the bwrap jail (slice H, §11.4). Off by default because enabling it requires the narrow seccomp relaxation, which trades a little outer-boundary attack surface for the inner one — an operator's call, not a silent default. |
+| `DEEPAGENTS_JAIL_APPARMOR` | launcher (host-side) | unset | AppArmor stance for the jail on an LSM-confined host (§11.6). Unset → pass nothing, so `docker-default` applies and the jail **will fail to start** on Ubuntu/Debian (fails closed, with a diagnostic). `unconfined` → `--security-opt apparmor=unconfined`: works everywhere, but drops the **whole** profile, not just its `deny mount` — a wider trade than fork 7 pinned, so it is opt-in and the launcher prints what it gave up. Any other value is passed through as a profile name, which is how slice J's `deepagent-userns` will be selected once it exists. |
 | `DEEPAGENTS_NS_GUARD` | container env | unset → tracks `DEEPAGENTS_JAIL` | Namespace-guard denylist on the shell tool (§11.5), the backstop for the container-wide seccomp relaxation the jail requires. Default **on with the jail, off without it** (nothing to compensate for). `warn` records without refusing; `0` disables; `1` forces it on with the jail off. |
 
 **Removable contract (mirrors M1 §2.5 / M2 / M3).** The single intentional default-behaviour change is
@@ -940,6 +1081,18 @@ authoritative config (raise-only, no `mask_remove`) and takes effect **next run*
    `approve` interrupt under HITL, or stays a loud non-blocking stderr warning in all modes. Recommend
    **non-blocking warning** for v1 (a legitimate policy relaxation shouldn't wedge a session); revisit if
    tampering is observed. Confirm before coding slice A.
+10. **LSM parity → vendor a narrowed AppArmor profile (slice J), don't drop the LSM. Decided** (§11.6).
+   Fork 7 pinned "narrow seccomp relaxation, not `seccomp=unconfined`" and the same reasoning applies
+   one layer up: `apparmor=unconfined` drops every rule in `docker-default` to buy one inner boundary,
+   which is the trade fork 7 already rejected in its seccomp form. So the target state is a vendored
+   `docker-default` + narrowed `mount` rules, regression-checked by `apparmor-sync --check` exactly as
+   the syscall profile is. **What is genuinely open** is distribution: an AppArmor profile must be
+   `apparmor_parser`-loaded into the *host* kernel as root before `docker run`, so unlike the seccomp
+   JSON it cannot ride along in the repo and be passed by path. Until J lands, `apparmor=unconfined`
+   ships as an explicit, separately-named operator opt-in (§13) rather than a launcher default — the
+   trade is real and the operator has to make it knowingly. **Corollary the earlier gate missed:** a
+   boundary measurement is only valid for the LSM it was taken under, and every H measurement to date
+   was taken on Docker Desktop/WSL2, which loads no AppArmor policy at all.
 
 ## 17. PR plan / sequencing
 
@@ -963,6 +1116,14 @@ Ship the floor first; harden after. Each PR is independently reviewable and leav
   `bwrap --unshare-all true` verifies in the built image. If userns fails to verify, that is a **blocker
   to resolve** (alternate base image / isolation primitive / `--security-opt`), not a signal to slip H
   to a follow-up and call M4 done on A–G alone — the milestone does not close until PR6 merges.
+- **PR7 — slice J (AppArmor profile):** `harness/apparmor.py` + vendored
+  `deepagent-image/apparmor/deepagent-userns` + `apparmor/README.md` +
+  `scripts/install-apparmor-profile.sh` + `tests/test_apparmor.py`; launcher wiring to select the
+  profile by name and to diagnose "profile not loaded". Ships **after** PR6 because it is only
+  discoverable once H runs on an LSM-confined host, which no pre-merge measurement covered (§11.6).
+  Sequencing note: PR7 is what makes `DEEPAGENTS_JAIL=1` usable on stock Ubuntu/Debian Docker without
+  the `apparmor=unconfined` escape hatch — until it lands, H's reach is Docker Desktop plus operators
+  willing to make the wider trade, and the docs say so rather than implying universal coverage.
 
 ## 18. Test matrix (host-runnable/stdlib unless noted)
 
@@ -984,6 +1145,9 @@ Ship the floor first; harden after. Each PR is independently reviewable and leav
 | `tests/test_doctor.py` (add, H) | jail on + missing/invalid `seccomp/userns.json` → error; jail on + `bwrap` absent → error; jail off → the whole check is skipped, not failed | host |
 | smoke (`scripts/smoke.{ps1,sh}`) | keyless turn: a seeded `.env` in the workspace reads empty to the agent | image (smoke) |
 | smoke (H) | keyless turn under `DEEPAGENTS_JAIL=1`: `bwrap --unshare-all true` succeeds under the vendored profile; the shell tool cannot read the state dir by absolute path (closes invariant 14's standing gap) | image (smoke) |
+| `tests/test_jail.py` (add, H) | `classify_bwrap_failure` maps an LSM mount denial (`Failed to make / slave: Permission denied`) to `lsm`, a userns refusal (`No permissions to create new namespace`) to `userns`, and anything else to `unknown` — the fingerprint §11.6 relies on, so an AppArmor host is never misreported as a seccomp problem; `apparmor_confinement()` reads `/proc/self/attr/apparmor/current`, falls back to `/proc/self/attr/current`, and returns `None` when neither exists (Docker Desktop, non-Linux) | host |
+| `tests/test_doctor.py` (add, J-adjacent) | jail on + AppArmor-confined + no `DEEPAGENTS_JAIL_APPARMOR` → **error** naming the profile and the two remedies; jail on + `unconfined` → warning that names what was dropped, not silence; jail on + unconfined LSM → no finding; jail off → check skipped entirely | host |
+| `tests/test_apparmor.py` (J) | `relax_mount` replaces exactly the `deny mount,` line and leaves every other template rule byte-identical; `verify_profile` rejects a permissive `mount,` catch-all, a widened rule set, and a missing rule; the **committed** `apparmor/deepagent-userns` passes `verify_profile` (the CI regression guard, invariant 31's LSM twin) | host |
 
 Conventions per `deepagent-image/CLAUDE.md` → "Test suite layout": no keys/network/real model calls;
 all writes to `tmp_path`; every floor/guard behaviour ships with a regression test.

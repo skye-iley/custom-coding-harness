@@ -20,7 +20,7 @@ secret-safe containers.
       deferred, and the "Human-in-the-loop" section in `deepagent-image/CLAUDE.md`.
   - `docs/milestones/in-progress/` — **being built** milestones (doc + separate invariants doc + code
     on a feature branch). *(`milestone4.md` — **Real Trust Boundary**, code on `feat/milestone_4`,
-    slices **A–H all landed**, not yet merged (workspace visibility — `.agentignore`, 3-tier policy,
+    slices **A–H all landed, J planned**, not yet merged (workspace visibility — `.agentignore`, 3-tier policy,
     designated-secret floor —, docker mount-mask, path-guard middleware, `harness doctor`, CI pipeline,
     security test suite). **Slice H (bwrap fs-tool jail) is built and opt-in** (`DEEPAGENTS_JAIL=1`),
     shipped as a **re-exec of the harness into a bwrap namespace** rather than the per-call jailed
@@ -32,8 +32,16 @@ secret-safe containers.
     **off by default deliberately** (§16 fork 7): enabling it needs a narrow seccomp relaxation on the
     *outer* container to permit unprivileged user namespaces, which is an operator's trade to make, not
     a silent default — so with the jail off the boundary is still the container + deny-list mask, and
-    the docs must keep saying so. The `bwrap --unshare-all` gate is **verified in the built image**
-    under the profile that ships, re-checkable via `scripts/smoke.{sh,ps1}` `JAIL_CHECK=1`/`-JailCheck`.
+    the docs must keep saying so. The `bwrap --unshare-all` gate is **verified in the built image on a
+    host with no LSM policy loaded** (Docker Desktop/WSL2) under the profile that ships, re-checkable
+    via `scripts/smoke.{sh,ps1}` `JAIL_CHECK=1`/`-JailCheck`. **On an AppArmor host the jail does not
+    start**: seccomp is only one of two independent gates, and Docker's `docker-default` profile
+    denies `mount` outright, so bwrap fails *after* `unshare` succeeds. That covers Ubuntu/Debian
+    Docker and GitHub runners. It fails **closed** (a diagnostic naming AppArmor, never an unjailed
+    run); the interim knob is `DEEPAGENTS_JAIL_APPARMOR=unconfined`, which works everywhere but drops
+    the whole profile rather than one rule. The real fix is **slice J** — vendor `docker-default` with
+    only its `mount` rule narrowed, same shape as `seccomp-sync` — **planned, not built**
+    (`milestone4.md` §11.6, §16 fork 10, invariants 37–38). SELinux hosts are untested.
     Slice D (`permission_denied` interrupt) is
     **built, audit-only** — a path-guard denial (always a true workspace escape in v1; pathguard has
     no floor/mask awareness) never offers an interactive approve — a real escape must never be a thing
@@ -98,7 +106,11 @@ cd deepagent-image
 .\scripts\smoke.ps1 -NetJail              # smoke test run inside the NetJail (NET_JAIL=1 ./scripts/smoke.sh)
 .\scripts\smoke.ps1 -JailCheck            # require the M4 slice H bwrap gate to pass (JAIL_CHECK=1 ./scripts/smoke.sh)
                                           #   the gate runs either way; the flag turns a
-                                          #   "host can't nest userns" skip into a failure
+                                          #   "host can't build the jail" skip into a failure.
+                                          #   It skips for two distinct reasons — no nested userns,
+                                          #   or the host LSM denying bwrap's mounts (AppArmor).
+                                          #   On an AppArmor host, set DEEPAGENTS_JAIL_APPARMOR=unconfined
+                                          #   to make it run (drops the whole profile — see §11.6).
 .\scripts\run-docker.ps1                  # opens a persistent interactive session (you> prompt)
 .\scripts\run-docker.ps1 "your task"      # runs that task first, then drops to the prompt
 ```

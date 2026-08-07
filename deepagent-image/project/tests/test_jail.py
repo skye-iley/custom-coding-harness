@@ -224,3 +224,119 @@ def test_vanished_snapshot_path_defaults_to_file(ws, state):
     entries = jail.masked_from_snapshot(state, ws)
 
     assert entries[0]["type"] == "file"
+
+
+# --- LSM / AppArmor diagnosis (M4 slice J, invariant 37) ----------------------
+#
+# The point of these: an AppArmor mount denial and a seccomp/userns refusal need
+# OPPOSITE remedies, and are distinguishable only by how far bwrap got. Reporting
+# the first as the second sends an operator to re-check a profile that is already
+# correct -- the dead end this milestone's own CI hit (milestone4.md §11.6).
+
+
+def test_lsm_mount_denial_is_not_classified_as_a_userns_problem():
+    # Verbatim stderr from ubuntu-latest under docker-default, with the vendored
+    # seccomp profile applied. `unshare` succeeded; the first mount was denied.
+    err = "bwrap: Failed to make / slave: Permission denied"
+    assert jail.classify_bwrap_failure(err) == "lsm"
+
+
+def test_userns_refusal_still_classified_as_userns():
+    err = "bwrap: No permissions to create new namespace, likely because the kernel does not allow it"
+    assert jail.classify_bwrap_failure(err) == "userns"
+
+
+@pytest.mark.parametrize(
+    "err",
+    [
+        "bwrap: Can't mount proc on /newroot/proc: Permission denied",
+        "bwrap: Unable to mount source on /newroot/usr: Permission denied",
+        "bwrap: Failed to mount tmpfs: Permission denied",
+    ],
+)
+def test_other_mount_phase_denials_are_lsm(err):
+    assert jail.classify_bwrap_failure(err) == "lsm"
+
+
+def test_mount_failure_without_permission_denied_is_not_lsm():
+    # ENOENT-shaped mount failures are a bad bind path, not a policy denial --
+    # classifying them as `lsm` would make the gate skip a real regression.
+    err = "bwrap: Can't mount proc on /newroot/proc: No such file or directory"
+    assert jail.classify_bwrap_failure(err) != "lsm"
+
+
+def test_unrecognized_failure_is_unknown_not_silently_skipped():
+    assert jail.classify_bwrap_failure("bwrap: something nobody predicted") == "unknown"
+    assert jail.classify_bwrap_failure("") == "unknown"
+
+
+def test_apparmor_confinement_reads_the_profile_name(tmp_path, monkeypatch):
+    attr = tmp_path / "apparmor_current"
+    attr.write_text("docker-default (enforce)")
+    monkeypatch.setattr(jail, "_APPARMOR_ATTR_PATH", str(attr))
+    assert jail.apparmor_confinement() == "docker-default"
+
+
+def test_apparmor_confinement_treats_unconfined_as_absent(tmp_path, monkeypatch):
+    attr = tmp_path / "apparmor_current"
+    attr.write_text("unconfined")
+    monkeypatch.setattr(jail, "_APPARMOR_ATTR_PATH", str(attr))
+    assert jail.apparmor_confinement() is None
+
+
+def test_apparmor_confinement_is_none_when_no_lsm_present(tmp_path, monkeypatch):
+    # Non-Linux and hosts where neither attr file exists. Not an error.
+    monkeypatch.setattr(jail, "_APPARMOR_ATTR_PATH", str(tmp_path / "nope"))
+    monkeypatch.setattr(jail, "_LEGACY_ATTR_PATH", str(tmp_path / "also-nope"))
+    assert jail.apparmor_confinement() is None
+
+
+def test_empty_apparmor_attr_does_not_fall_through_to_the_legacy_one(tmp_path, monkeypatch):
+    """Regression: measured on Docker Desktop/WSL2, where the jail actually works.
+
+    /proc/self/attr/apparmor/current exists but is EMPTY (AppArmor compiled in, no
+    profile on this task) while the legacy shared /proc/self/attr/current reports
+    NUL-terminated `kernel`. Falling through reported 'confined by AppArmor profile
+    "kernel"', which would make doctor hard-error on the one host class slice H was
+    verified on.
+    """
+    specific = tmp_path / "apparmor_current"
+    specific.write_text("")
+    legacy = tmp_path / "current"
+    legacy.write_bytes(b"kernel" + bytes(1))  # NUL-terminated, as the real attr file is
+    monkeypatch.setattr(jail, "_APPARMOR_ATTR_PATH", str(specific))
+    monkeypatch.setattr(jail, "_LEGACY_ATTR_PATH", str(legacy))
+    assert jail.apparmor_confinement() is None
+
+
+def test_legacy_kernel_sentinel_is_not_a_profile(tmp_path, monkeypatch):
+    legacy = tmp_path / "current"
+    legacy.write_bytes(b"kernel" + bytes(1))  # NUL-terminated, as the real attr file is
+    monkeypatch.setattr(jail, "_APPARMOR_ATTR_PATH", str(tmp_path / "nope"))
+    monkeypatch.setattr(jail, "_LEGACY_ATTR_PATH", str(legacy))
+    assert jail.apparmor_confinement() is None
+
+
+def test_nul_terminated_profile_name_is_cleaned(tmp_path, monkeypatch):
+    """str.strip() does not remove NULs -- the raw attr files are NUL-terminated."""
+    attr = tmp_path / "apparmor_current"
+    attr.write_bytes(b"docker-default (enforce)" + bytes(1))
+    monkeypatch.setattr(jail, "_APPARMOR_ATTR_PATH", str(attr))
+    assert jail.apparmor_confinement() == "docker-default"
+
+
+def test_apparmor_confinement_falls_back_to_the_legacy_attr_path(tmp_path, monkeypatch):
+    legacy = tmp_path / "current"
+    legacy.write_text("docker-default (enforce)")
+    monkeypatch.setattr(jail, "_APPARMOR_ATTR_PATH", str(tmp_path / "nope"))
+    monkeypatch.setattr(jail, "_LEGACY_ATTR_PATH", str(legacy))
+    assert jail.apparmor_confinement() == "docker-default"
+
+
+def test_apparmor_hint_names_both_remedies():
+    hint = jail.apparmor_hint()
+    assert "DEEPAGENTS_JAIL_APPARMOR=unconfined" in hint
+    assert "§11.6" in hint
+    # Must not send the operator back to the seccomp profile: it is already correct
+    # in this failure mode, and that misdirection is the whole point of invariant 37.
+    assert "seccomp=" not in hint
