@@ -81,6 +81,10 @@ COPY project/workspace/ ./workspace/
 # Host-side artifact (the launchers pass it to `docker run --security-opt`), but
 # copied in so `harness doctor` can verify the profile from inside the image too.
 COPY seccomp/ ./seccomp/
+# M4 slice J: the AppArmor profile is never applied from inside the container (it
+# is loaded into the HOST kernel by root), but `harness doctor` verifies the
+# vendored artifact is still narrow, so the file has to be present in-image.
+COPY apparmor/ ./apparmor/
 COPY scripts/conda-init-workspace.sh /usr/local/bin/conda-init-workspace
 COPY scripts/sandbox-exec.sh /usr/local/bin/sandbox-exec
 COPY project/workspace/ /project/workspace-seed/

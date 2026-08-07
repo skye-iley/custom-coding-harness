@@ -82,13 +82,26 @@ def _read_attr(path: str) -> str | None:
 
 
 def _profile_from(raw: str) -> str | None:
-    if not raw:
-        return None
-    # Format is "<profile> (<mode>)", e.g. "docker-default (enforce)".
-    profile = raw.split(" (")[0].strip()
-    if not profile or profile in _UNCONFINED_VALUES:
-        return None
+    profile, _ = _profile_and_mode_from(raw)
     return profile
+
+
+def _profile_and_mode_from(raw: str) -> tuple[str | None, str | None]:
+    """Split an attr value into (profile, mode).
+
+    Format is "<profile> (<mode>)", e.g. "docker-default (enforce)". The mode
+    matters for slice J: a profile loaded in *complain* mode logs violations and
+    allows them, so bwrap would run and the LSM would be enforcing nothing --
+    a pass that reports a boundary which is not there (invariant 40).
+    """
+    if not raw:
+        return None, None
+    head, _, tail = raw.partition(" (")
+    profile = head.strip()
+    mode = tail.rstrip(")").strip().lower() or None
+    if not profile or profile in _UNCONFINED_VALUES:
+        return None, None
+    return profile, mode
 
 
 class JailUnavailable(RuntimeError):
@@ -112,6 +125,24 @@ def apparmor_confinement() -> str | None:
     if legacy is not None:
         return _profile_from(legacy)
     return None
+
+
+def apparmor_confinement_detail() -> tuple[str | None, str | None]:
+    """(profile, mode) for this process, or (None, None) when unconfined.
+
+    Same resolution order as `apparmor_confinement`, which is the name-only
+    view kept for callers that do not care about enforcement mode. Two shapes
+    the kernel really emits and this must survive: a mode suffix
+    ("deepagent-userns (enforce)") and a child profile ("parent//child"), which
+    is reported as-is -- slice J's doctor check matches on the parent segment.
+    """
+    specific = _read_attr(_APPARMOR_ATTR_PATH)
+    if specific is not None:
+        return _profile_and_mode_from(specific)
+    legacy = _read_attr(_LEGACY_ATTR_PATH)
+    if legacy is not None:
+        return _profile_and_mode_from(legacy)
+    return None, None
 
 
 def classify_bwrap_failure(stderr: str) -> str:

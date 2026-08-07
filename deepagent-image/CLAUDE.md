@@ -93,7 +93,7 @@ See [ENV_VARS.md](./ENV_VARS.md#not-in-env--launcher-environment-host-side) for 
 | `EPHEMERAL` | `-Ephemeral` | off | Mount a throwaway copy of the workspace; revert on close. |
 | `SAVE_WORKSPACE` | `-SaveWorkspace` | off | Snapshot the ephemeral copy before discard; implies ephemeral. |
 | `NET_JAIL` | `-NetJail` | off | Deny-all-egress network jail (see `netjail/`). |
-| `DEEPAGENTS_JAIL_APPARMOR` | — | unset | AppArmor stance for the bwrap jail. Read from the host env **or `.env`**, same as `DEEPAGENTS_JAIL`, but it only affects `docker run` flags — nothing reads it inside the container. Unset → pass nothing, so `docker-default` applies and the jail fails closed on Ubuntu/Debian. `unconfined` → `--security-opt apparmor=unconfined` (works everywhere; drops the whole profile). Any other value is passed through as a host-loaded profile name. See "bwrap fs jail" below. |
+| `DEEPAGENTS_JAIL_APPARMOR` | — | unset → auto | AppArmor stance for the bwrap jail. Read from the host env **or `.env`**, same as `DEEPAGENTS_JAIL`, but it only affects `docker run` flags — nothing reads it inside the container. Unset → **auto**: pass nothing where no LSM is in force, select slice J's `deepagent-userns` where it is loaded, and **abort pre-flight** where an LSM is in force but the profile is not loaded. `unconfined` → `--security-opt apparmor=unconfined` (works everywhere; drops the whole profile). Any other value is passed through as a host-loaded profile name. See "AppArmor: the second gate" below. |
 
 (`MAP_HOST_USER`/`HOST_UID`/`HOST_GID` are Linux-only mount-ownership knobs and have no `.ps1`
 param — Windows is always Docker Desktop, where mounts are already squashed.)
@@ -632,29 +632,55 @@ Regenerate the profile with `python3 -m harness seccomp-sync` (dev-time, needs n
 `tests/test_seccomp.py` is the CI regression guard against a widened or unconfined profile (it
 asserts the committed artifact, so the guard runs in the ordinary host tier).
 
-**⚠️ The jail does not work on an AppArmor host yet — `DEEPAGENTS_JAIL_APPARMOR` is the interim
-knob.** seccomp is only **one of two** gates, and both must allow. On Ubuntu/Debian Docker — which is
-most Linux container hosts — Docker also applies a generated `docker-default` AppArmor profile whose
-literal `deny mount,` blocks bwrap at its first mount, *after* `unshare` has already succeeded. No
-seccomp change affects this, and entering a user namespace does not shed AppArmor confinement, so the
-jail cannot work around it from inside. The fingerprint is
+### AppArmor: the second gate (slice J)
+
+seccomp is only **one of two** gates, and both must allow. On Ubuntu/Debian Docker — most Linux
+container hosts — Docker also applies a generated `docker-default` AppArmor profile whose literal
+`deny mount,` blocks bwrap at its first mount, *after* `unshare` has already succeeded. No seccomp
+change affects this, and entering a user namespace does not shed AppArmor confinement, so the jail
+cannot work around it from inside. The fingerprint is
 `bwrap: Failed to make / slave: Permission denied` (contrast a seccomp/userns refusal, which fails
 earlier with `No permissions to create new namespace`); `jail.classify_bwrap_failure` tells them
 apart so preflight, `doctor`, and the smoke gate all name the right cause.
 
-Options today:
+**Slice J is the fix, and it is built** (`harness/apparmor.py` + `apparmor/deepagent-userns`): moby's
+`docker-default` with **only** its `deny mount,` narrowed to the seven mount rules bwrap performs.
+Everything else in the profile survives byte-for-byte, asserted by `apparmor.verify_profile` →
+`tests/test_apparmor.py` → CI. See `apparmor/README.md`.
+
+It needs a one-time host step, because unlike a seccomp profile an AppArmor profile is not a file you
+hand to `docker run` — it must be compiled into the **host kernel** first, on whichever machine runs
+`dockerd`:
+
+```bash
+sudo deepagent-image/scripts/install-apparmor-profile.sh          # load (enforce)
+     deepagent-image/scripts/install-apparmor-profile.sh --status # loaded? which sha?
+```
+
+`run-docker` then selects it automatically: it asks the daemon what confines a container, and only
+if an LSM is in force asks whether `deepagent-userns` is loaded. Not loaded ⇒ it **aborts before
+`docker run`** with the install command. It never falls back to `unconfined` on its own.
+
+**⚠️ Built, but not yet measured on an AppArmor host.** Every machine this was developed on is
+Docker Desktop/WSL2, which loads no AppArmor policy — the same blind spot that let slice H ship
+claiming more reach than it had. So the mount rule set is *derived from bwrap's syscall sequence,
+not confirmed against a live denial log*. Treat `DEEPAGENTS_JAIL=1` on Ubuntu/Debian as untested
+until a run on such a host is recorded (CI's non-gating `apparmor-load-probe` job exists to produce
+exactly that record). If it denies something, read `dmesg | grep 'apparmor="DENIED"'` and add **only**
+the rule the denial demands, with a justification in `apparmor/README.md` — a broad `mount,` catch-all
+is `unconfined` in disguise and `verify_profile` rejects it.
+
+Other options:
 - **`DEEPAGENTS_JAIL_APPARMOR=unconfined`** — works on any host, but drops the **whole**
   `docker-default` profile, not just its deny-mount rule. Wider than the five relaxed syscalls
   `DEEPAGENTS_JAIL` alone costs, so it is opt-in, never a launcher default, and both `run-docker` and
   `doctor` say what was given up.
-- **Leave it unset** — the harness fails **closed** at startup with a diagnostic naming AppArmor,
-  rather than running unjailed while you believe otherwise.
-- Docker Desktop/WSL2 loads no AppArmor policy, so nothing is needed there. That is also why this was
-  missed pre-merge: every slice-H measurement was taken on that host class.
+- **Any other value** — passed through as a host-loaded profile name.
+- Docker Desktop/WSL2 loads no AppArmor policy, so nothing is needed there.
 
-The real fix is **slice J** — a vendored `docker-default` with only the `mount` rule narrowed, same
-shape as `seccomp-sync`. Planned, not built: see `docs/milestones/in-progress/milestone4.md` §11.6.
-**SELinux hosts (RHEL/Fedora) are a third environment and are untested.**
+Regenerate with `python3 -m harness apparmor-sync` (dev-time, needs network); `--check` verifies the
+committed artifacts offline. **SELinux hosts (RHEL/Fedora) are a third environment and are untested**;
+rootless Docker and Podman likewise.
 
 ### Quick-Start: In-Workspace `.agentignore` File
 

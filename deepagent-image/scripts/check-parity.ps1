@@ -31,7 +31,12 @@ foreach ($pair in $pairs) {
 # Semantic parity (M4 trust boundary): markers that MUST appear in BOTH
 # run-docker.{ps1,sh}. Line-count diff can't catch a fail-closed guard or a
 # mask pre-flight dropped from one script only - this does. Mirror of check-parity.sh.
-$markers = @("mask-scan", "refusing to launch unmasked", "DEEPAGENTS_MASK", "DEEPAGENTS_MASK_MODE")
+# M4 slice J adds the AppArmor preflight markers: a one-sided edit means one
+# platform silently launches a jail that will die inside the container, or skips
+# the fail-closed abort. install-apparmor-profile.sh is Linux-only and so has no
+# .ps1 twin - deliberately absent from the pairs list above.
+$markers = @("mask-scan", "refusing to launch unmasked", "DEEPAGENTS_MASK", "DEEPAGENTS_MASK_MODE",
+             "deepagent-userns", "install-apparmor-profile", "DEEPAGENTS_JAIL_APPARMOR")
 $rdPs1 = Join-Path (Join-Path $Root "scripts") "run-docker.ps1"
 $rdSh  = Join-Path (Join-Path $Root "scripts") "run-docker.sh"
 foreach ($m in $markers) {

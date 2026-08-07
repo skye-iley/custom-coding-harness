@@ -41,7 +41,7 @@ later layers slot in without reworking policy (feature plan §7).
 | **G** §10 security verification suite | tests that *prove* the boundary holds (floor never leaks, no traversal escape) | §10 | v1 (support) | ships in PR1–3 |
 | **H** bwrap fs-tool jail | allow-list boundary; route **all** fs tools through the jail; narrow seccomp profile; **carries slice D's deferred approve branch** | feature plan §4.2 · detail §11.4 | **v1 — core, built** (opt-in, `DEEPAGENTS_JAIL=1`) | PR6 |
 | **I** overlayfs view | tool-agnostic true allow-list + upper-diff write-back | feature plan §4.3 | deferred v2 | — |
-| **J** AppArmor profile | vendored `docker-default` + narrowed `mount` rules, so the jail runs on AppArmor-confined hosts without dropping the whole LSM | detail §11.6 · §16 fork 10 | **planned** (follow-up; H is unusable on stock Linux Docker without it) | PR7 |
+| **J** AppArmor profile | vendored `docker-default` + narrowed `mount` rules, so the jail runs on AppArmor-confined hosts without dropping the whole LSM | detail §11.6 · §16 fork 10 · **full spec `milestone4.1.md`** | **built, pending live-host measurement** (see `milestone4.1.md` §13.1) | PR7 |
 
 ---
 
@@ -96,8 +96,12 @@ in **CI** that proves the boundary can't silently regress.
   wording overreached:** it was measured on Docker Desktop/WSL2, where no AppArmor policy is in
   force. On an AppArmor-confined host — Ubuntu/Debian Docker, and GitHub-hosted runners — the same
   gate **fails**, because `docker-default` denies `mount` independently of seccomp (§11.6). Closing
-  that is slice J; until it lands, the jail's reach is "no-LSM hosts, plus operators who opt into
-  `DEEPAGENTS_JAIL_APPARMOR=unconfined`", and no doc may state it more broadly.
+  that is slice J, which is now **built** (`milestone4.1.md`): a vendored `docker-default` with only
+  its `mount` rule narrowed, selected by `run-docker` automatically on an AppArmor host. **But J's
+  own live-host measurement has not been taken** — the dev machine loads no LSM — so today the
+  honest statement of reach is: *verified* on no-LSM hosts; *built but unmeasured* on AppArmor
+  hosts; plus operators who opt into `DEEPAGENTS_JAIL_APPARMOR=unconfined`. No doc may state it more
+  broadly until an AppArmor-host run is recorded, with the LSM named.
 
 ## 2. Why this milestone now
 
@@ -751,11 +755,23 @@ denylist entry ever collides with real work), `1`/`block` forces it on with the 
 
 ### 11.6 AppArmor profile (slice J — planned) — `deepagent-image/apparmor/` + `harness/apparmor.py`
 
-> **Status: planned, not built.** Slice H ships without this, which means **`DEEPAGENTS_JAIL=1` does
-> not work on an AppArmor-confined host** unless the operator opts into the blunt
-> `apparmor=unconfined` escape hatch (§13, `DEEPAGENTS_JAIL_APPARMOR`). That covers Ubuntu/Debian
-> Docker — the majority of Linux container hosts. It is a real limitation of the shipped jail, not a
-> theoretical one, and §1's done-when has been corrected accordingly.
+> **Implementation-ready spec: `milestone4.1.md` (same folder).** This section states the
+> problem, the design shape, and the trade; **4.1 is the buildable version** — generator algorithm
+> (moby ships AppArmor as a Go template, not finished JSON, so sync must render it), the offline
+> structural verifier, launcher preflight probe, doctor branch, install-script contract, CI staging,
+> the live-host measurement that gates the whole thing, and invariants 39–41. Build from 4.1; this
+> section stays as the rationale.
+
+> **Status: BUILT (`milestone4.1.md`), pending one live-host measurement.** The profile
+> (`apparmor/deepagent-userns`), its generator (`harness/apparmor.py`, `apparmor-sync`), the host
+> install script, the launcher preflight, and the `doctor` branch have all landed on
+> `feat/milestone_4`. What has **not** happened is running it on an actual AppArmor-confined host:
+> the dev machine is Docker Desktop/WSL2, which loads no LSM policy and so structurally cannot
+> verify this slice — the same blind spot that produced the gap in the first place. So the mount
+> rule set below is **derived from bwrap's syscall sequence, not confirmed against a denial log**,
+> and `DEEPAGENTS_JAIL=1` on Ubuntu/Debian should be treated as untested until that run happens
+> (`milestone4.1.md` §13.1, CI's `apparmor-load-probe` job). The `apparmor=unconfined` escape hatch
+> (§13, `DEEPAGENTS_JAIL_APPARMOR`) remains available and remains the wider trade.
 
 **The problem, precisely.** seccomp and AppArmor are **independent gates; an operation must pass
 both.** H's vendored `seccomp/userns.json` fixes the syscall filter. It has no effect on the LSM. On
@@ -943,7 +959,7 @@ provider keys** — every tier is keyless by construction.
 | `DEEPAGENTS_MASK_MODE` | container env | `deny` | `deny` (see all but masked) \| `allow` (see only allow-listed + writable). Overridable per-workspace by the `#!mode:` header directive; env wins if set. |
 | `DEEPAGENTS_AGENTIGNORE` | container env | unset | Override the in-workspace config filename (default `.agentignore`); state-dir authoritative config is unaffected. |
 | `DEEPAGENTS_JAIL` | container env + launcher | `0` (**off**) | `1` routes all fs tools + the shell through the bwrap jail (slice H, §11.4). Off by default because enabling it requires the narrow seccomp relaxation, which trades a little outer-boundary attack surface for the inner one — an operator's call, not a silent default. |
-| `DEEPAGENTS_JAIL_APPARMOR` | launcher (host-side) | unset | AppArmor stance for the jail on an LSM-confined host (§11.6). Unset → pass nothing, so `docker-default` applies and the jail **will fail to start** on Ubuntu/Debian (fails closed, with a diagnostic). `unconfined` → `--security-opt apparmor=unconfined`: works everywhere, but drops the **whole** profile, not just its `deny mount` — a wider trade than fork 7 pinned, so it is opt-in and the launcher prints what it gave up. Any other value is passed through as a profile name, which is how slice J's `deepagent-userns` will be selected once it exists. |
+| `DEEPAGENTS_JAIL_APPARMOR` | launcher (host-side) | unset → **auto** | AppArmor stance for the jail on an LSM-confined host (§11.6, `milestone4.1.md` §8.1). **Unset now auto-selects slice J's narrowed `deepagent-userns`** when the daemon reports an LSM in force and has the profile loaded; when an LSM is in force and it is *not* loaded, the launcher **aborts before `docker run`** with the install command (fails closed — it never silently falls back to `unconfined`); when no LSM is in force it passes nothing. `unconfined` → `--security-opt apparmor=unconfined`: works everywhere, but drops the **whole** profile, not just its `deny mount` — a wider trade than fork 7 pinned, so it stays opt-in and the launcher prints what it gave up. Any other value is passed through as a host-loaded profile name. |
 | `DEEPAGENTS_NS_GUARD` | container env | unset → tracks `DEEPAGENTS_JAIL` | Namespace-guard denylist on the shell tool (§11.5), the backstop for the container-wide seccomp relaxation the jail requires. Default **on with the jail, off without it** (nothing to compensate for). `warn` records without refusing; `0` disables; `1` forces it on with the jail off. |
 
 **Removable contract (mirrors M1 §2.5 / M2 / M3).** The single intentional default-behaviour change is

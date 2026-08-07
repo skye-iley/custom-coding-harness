@@ -223,13 +223,30 @@ try {
     # on such a host. `unconfined` makes it run everywhere at the cost of dropping the
     # WHOLE profile, not just its `deny mount,` - a wider trade than the five relaxed
     # syscalls, so it is opt-in and announced, never a silent default.
+    #
+    # Slice J adds the narrowed profile: when the operator sets nothing, prefer
+    # `deepagent-userns` **if the daemon already has it loaded**. Unlike run-docker this
+    # does NOT abort when it is missing - smoke's job is to report, and jail-check.py
+    # already self-skips (rc 77) on an LSM denial rather than reddening the run.
     $ApparmorArgs = @()
-    if ($env:DEEPAGENTS_JAIL_APPARMOR) {
-        $ApparmorArgs = @("--security-opt", "apparmor=$($env:DEEPAGENTS_JAIL_APPARMOR)")
-        if ($env:DEEPAGENTS_JAIL_APPARMOR -eq "unconfined") {
+    $ApparmorChoice = $env:DEEPAGENTS_JAIL_APPARMOR
+    if (-not $ApparmorChoice) {
+        # LSM-in-force first, then the profile probe - a daemon with no AppArmor support
+        # accepts `--security-opt apparmor=<anything>` and ignores it, so probing first
+        # would claim a profile that is loaded nowhere. Mirror of run-docker.
+        $aaInForce = (docker run --rm deepagent-harness sh -c 'cat /proc/self/attr/apparmor/current 2>/dev/null || cat /proc/self/attr/current 2>/dev/null || true' 2>$null)
+        if ($aaInForce) { $aaInForce = ($aaInForce -replace ' \(.*', '').Trim() }
+        if ($aaInForce -and $aaInForce -notin @("unconfined", "kernel")) {
+            docker run --rm --security-opt "apparmor=deepagent-userns" deepagent-harness true 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { $ApparmorChoice = "deepagent-userns" }
+        }
+    }
+    if ($ApparmorChoice) {
+        $ApparmorArgs = @("--security-opt", "apparmor=$ApparmorChoice")
+        if ($ApparmorChoice -eq "unconfined") {
             Write-Host "M4 jail: AppArmor DISABLED for this container (apparmor=unconfined) - drops docker-default entirely, not just its deny-mount rule."
         } else {
-            Write-Host "M4 jail: using AppArmor profile '$($env:DEEPAGENTS_JAIL_APPARMOR)' (must already be loaded on the host)."
+            Write-Host "M4 jail: using AppArmor profile '$ApparmorChoice' (loaded on the Docker daemon's host)."
         }
     }
     $jailArgs = @("run", "--rm", "-i") + $NetArgs + $ProxyEnv + @(

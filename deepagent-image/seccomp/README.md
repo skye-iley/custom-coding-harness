@@ -41,11 +41,15 @@ denies by profile rather than by uid or capability, and confinement is **not**
 shed by entering a user namespace — so no userns work, and not even a setuid
 `bwrap`, escapes it from inside.
 
-Until slice J vendors a narrowed AppArmor profile (`milestone4.md` §11.6), the
-interim knob is `DEEPAGENTS_JAIL_APPARMOR=unconfined`, which works everywhere at
-the cost of dropping the **whole** profile rather than one rule. Docker
-Desktop/WSL2 needs nothing (no LSM policy is loaded) — which is exactly why this
-gap survived to CI: every slice-H measurement was taken there.
+**That second gate is slice J, and it is built:** `../apparmor/deepagent-userns`
+is `docker-default` with only its `deny mount,` narrowed, loaded into the host
+kernel by `../scripts/install-apparmor-profile.sh` and selected automatically by
+`run-docker`. See `../apparmor/README.md` — including its caveat that the rule
+set has not yet been exercised on a real AppArmor host. The blunt fallback,
+`DEEPAGENTS_JAIL_APPARMOR=unconfined`, still works everywhere at the cost of
+dropping the **whole** profile rather than one rule. Docker Desktop/WSL2 needs
+nothing (no LSM policy is loaded) — which is exactly why this gap survived to CI:
+every slice-H measurement was taken there.
 
 ## Why not just `seccomp=unconfined`
 

@@ -35,7 +35,7 @@ A milestone moves through three folders. What each stage carries is deliberate:
 
 ## Planned milestones — `milestones/planned/`
 
-*(Empty — no milestone is currently queued. New forward plans land here as docs only.)*
+*(Empty — nothing is currently queued. New forward plans land here as docs only.)*
 
 ## In-progress milestones — `milestones/in-progress/`
 
@@ -49,7 +49,17 @@ A milestone moves through three folders. What each stage carries is deliberate:
   relaxation on the outer container, a deliberate operator trade (`milestone4.md` §16 fork 7).
   Pulls together `docs/features/workspace_visibility.md` + `design_doc.md` §2/§10/§12. Code is on
   `feat/milestone_4` (slices A–H landed; not yet merged).
-- **`milestone4_invariants.md`** — the 35 checkable invariants the M4 boundary must satisfy
+- **`milestone4.1.md`** — **LSM parity (M4 slice J)**: vendors moby's `docker-default` AppArmor
+  profile with **only** its `deny mount,` rule narrowed, so the bwrap jail runs on an
+  AppArmor-confined host without dropping the whole LSM. seccomp and AppArmor are independent gates
+  and both must allow — M4's narrow seccomp profile fixed one of them, which is why
+  `DEEPAGENTS_JAIL=1` failed on stock Ubuntu/Debian Docker (the majority of Linux container hosts)
+  unless the operator opted into the blunt `DEEPAGENTS_JAIL_APPARMOR=unconfined`. **Built on
+  `feat/milestone_4` except its live-host measurement**: the dev machine is Docker Desktop/WSL2,
+  which loads no LSM policy and structurally cannot verify this slice — the same blind spot that let
+  slice H ship believing the jail was universally verified. Ships as M4 PR7. Its invariants (39–41)
+  live in `milestone4_invariants.md` with the rest.
+- **`milestone4_invariants.md`** — the checkable invariants the M4 boundary must satisfy
   (floor / mask / path-guard / interrupt / git-pr / state-isolation / regression / structural),
   the test-facing companion to `milestone4.md`. Folds into `milestone4.md` on completion.
 

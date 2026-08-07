@@ -372,20 +372,46 @@ if ($JailMode -and $JailMode -notin @("0", "false", "no", "off")) {
     $JailArgs = @("--security-opt", "seccomp=$((Resolve-Path $SeccompProfile).Path)")
     Write-Host "Jail: bwrap fs jail ON (narrow seccomp profile)"
 
-    # M4 slice J (§11.6): seccomp is only ONE of the two gates. On an AppArmor host
+    # M4 slice J (11.6): seccomp is only ONE of the two gates. On an AppArmor host
     # (Ubuntu/Debian Docker) the generated `docker-default` profile carries a literal
     # `deny mount,`, so bwrap gets past `unshare` and then fails at its first mount -
     # and entering a user namespace does not shed AppArmor confinement, so nothing the
-    # jail does from inside can work around it. Until slice J vendors a narrowed
-    # profile, the operator's options are this knob or an unconfined host.
+    # jail does from inside can work around it. Slice J vendors a narrowed profile
+    # (apparmor/deepagent-userns) that keeps every other docker-default rule.
     #
-    # Unset (default): pass nothing. The harness then fails CLOSED at startup with a
-    # diagnostic naming AppArmor (jail.preflight) rather than running unjailed.
+    # Unset (default): select the narrowed profile and PROBE that the daemon will
+    # accept it, before launching anything real. Mirror of run-docker.sh.
     $Apparmor = $env:DEEPAGENTS_JAIL_APPARMOR
     if (-not $Apparmor) {
         $aaLine = Select-String -Path $EnvFile -Pattern '^\s*DEEPAGENTS_JAIL_APPARMOR\s*=' -ErrorAction SilentlyContinue | Select-Object -Last 1
         if ($aaLine) {
             $Apparmor = ($aaLine.Line -replace '^\s*DEEPAGENTS_JAIL_APPARMOR\s*=', '').Trim().Trim('"').Trim("'")
+        }
+    }
+    if (-not $Apparmor) {
+        # Ask the DAEMON, not this machine: the profile must be loaded on the host
+        # running dockerd, which for a remote daemon / Colima-Lima VM / WSL distro is
+        # not this one. A local /sys read would need root AND would lie there.
+        #
+        # Order matters, and not for performance. A daemon with no AppArmor support
+        # ACCEPTS `--security-opt apparmor=<anything>` and ignores it (measured on
+        # Docker Desktop/WSL2), so probing first would "succeed" against a profile that
+        # is not loaded anywhere and make the launcher announce a boundary that does not
+        # exist. Ask what actually confines a container here before asking for a profile.
+        $probe = "deepagent-userns"
+        $inForce = (docker run --rm deepagent-harness sh -c 'cat /proc/self/attr/apparmor/current 2>/dev/null || cat /proc/self/attr/current 2>/dev/null || true' 2>$null)
+        if ($inForce) { $inForce = ($inForce -replace ' \(.*', '').Trim() }
+        if ($inForce -and $inForce -notin @("unconfined", "kernel")) {
+            docker run --rm --security-opt "apparmor=$probe" deepagent-harness true 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                $Apparmor = $probe
+            } else {
+                # Fail CLOSED. Never silently fall back to apparmor=unconfined: that is
+                # a categorically wider trade (a whole LSM off, vs. five relaxed
+                # syscalls) and only an operator may make it.
+                Write-Error "[jail] FATAL: DEEPAGENTS_JAIL is on and this daemon confines containers with AppArmor profile '$inForce', whose 'deny mount,' blocks bwrap at its first mount (seccomp is NOT the problem - see apparmor/README.md). The narrowed profile '$probe' is not loaded on the Docker daemon's host. Load it: sudo deepagent-image/scripts/install-apparmor-profile.sh  |  Wider trade: DEEPAGENTS_JAIL_APPARMOR=unconfined (drops ALL of $inForce)  |  Or: DEEPAGENTS_JAIL=0"
+                exit 1
+            }
         }
     }
     if ($Apparmor) {
@@ -394,9 +420,9 @@ if ($JailMode -and $JailMode -notin @("0", "false", "no", "off")) {
             Write-Host "Jail: AppArmor DISABLED for this container (apparmor=unconfined)."
             Write-Host "      This drops ALL of docker-default - the /proc and /sys write denials and the"
             Write-Host "      ptrace peer restriction - not just its deny-mount rule. Wider than the five"
-            Write-Host "      relaxed syscalls DEEPAGENTS_JAIL alone costs. See milestone4.md 11.6."
+            Write-Host "      relaxed syscalls DEEPAGENTS_JAIL alone costs. See apparmor/README.md."
         } else {
-            Write-Host "Jail: AppArmor profile '$Apparmor' (must already be loaded on the host via apparmor_parser)."
+            Write-Host "Jail: AppArmor profile '$Apparmor' (loaded on the Docker daemon's host)."
         }
     }
 }

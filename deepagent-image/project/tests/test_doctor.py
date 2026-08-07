@@ -216,7 +216,7 @@ def test_jail_on_with_the_committed_profile_passes(tmp_path, monkeypatch, capsys
     monkeypatch.setenv("DEEPAGENTS_JAIL", "1")
     monkeypatch.delenv("DEEPAGENTS_IN_CONTAINER", raising=False)
     monkeypatch.delenv("DEEPAGENTS_JAIL_APPARMOR", raising=False)
-    monkeypatch.setattr(doctor_jail, "apparmor_confinement", lambda: None)
+    monkeypatch.setattr(doctor_jail, "apparmor_confinement_detail", lambda: (None, None))
     monkeypatch.chdir(tmp_path)
 
     rc = doctor.doctor_main([str(tmp_path / "ws"), str(tmp_path / "state")])
@@ -248,7 +248,9 @@ def test_doctor_errors_when_jail_is_on_under_apparmor(tmp_path, monkeypatch, cap
     state.mkdir()
     _jail_on(monkeypatch)
     monkeypatch.delenv("DEEPAGENTS_JAIL_APPARMOR", raising=False)
-    monkeypatch.setattr(doctor_jail, "apparmor_confinement", lambda: "docker-default")
+    monkeypatch.setattr(
+        doctor_jail, "apparmor_confinement_detail", lambda: ("docker-default", "enforce")
+    )
 
     rc = doctor.doctor_main([str(ws), str(state)])
     err = _records(capsys)
@@ -270,7 +272,7 @@ def test_doctor_warns_but_passes_when_apparmor_deliberately_unconfined(
     state.mkdir()
     _jail_on(monkeypatch)
     monkeypatch.setenv("DEEPAGENTS_JAIL_APPARMOR", "unconfined")
-    monkeypatch.setattr(doctor_jail, "apparmor_confinement", lambda: None)
+    monkeypatch.setattr(doctor_jail, "apparmor_confinement_detail", lambda: (None, None))
 
     rc = doctor.doctor_main([str(ws), str(state)])
     err = _records(capsys)
@@ -290,12 +292,123 @@ def test_doctor_quiet_when_no_lsm_in_force(tmp_path, monkeypatch, capsys):
     state.mkdir()
     _jail_on(monkeypatch)
     monkeypatch.delenv("DEEPAGENTS_JAIL_APPARMOR", raising=False)
-    monkeypatch.setattr(doctor_jail, "apparmor_confinement", lambda: None)
+    monkeypatch.setattr(doctor_jail, "apparmor_confinement_detail", lambda: (None, None))
 
     rc = doctor.doctor_main([str(ws), str(state)])
     err = _records(capsys)
     assert rc == 0
     assert "no AppArmor confinement in force" in err
+
+
+def test_doctor_passes_when_the_narrowed_profile_is_in_force(tmp_path, monkeypatch, capsys):
+    """Slice J's whole point: the LSM gate satisfied WITHOUT dropping the LSM.
+
+    Before J the only non-error states were "no AppArmor at all" and "AppArmor
+    switched off" — being confined by our own narrowed profile has to be the
+    normal, passing case on a Linux host.
+    """
+    from harness import apparmor as doctor_apparmor
+    from harness import jail as doctor_jail
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    _jail_on(monkeypatch)
+    monkeypatch.delenv("DEEPAGENTS_JAIL_APPARMOR", raising=False)
+    monkeypatch.setattr(
+        doctor_jail,
+        "apparmor_confinement_detail",
+        lambda: (doctor_apparmor.PROFILE_NAME, "enforce"),
+    )
+
+    rc = doctor.doctor_main([str(ws), str(state)])
+    err = _records(capsys)
+    assert rc == 0
+    assert "the LSM gate is satisfied by the narrowed profile" in err
+    # Must NOT reuse the docker-default error path.
+    assert "seccomp is not the problem" not in err.lower()
+
+
+def test_doctor_accepts_a_child_of_the_narrowed_profile(tmp_path, monkeypatch, capsys):
+    """AppArmor reports sub-profiles as `parent//child`; the parent is what was selected."""
+    from harness import apparmor as doctor_apparmor
+    from harness import jail as doctor_jail
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    _jail_on(monkeypatch)
+    monkeypatch.delenv("DEEPAGENTS_JAIL_APPARMOR", raising=False)
+    monkeypatch.setattr(
+        doctor_jail,
+        "apparmor_confinement_detail",
+        lambda: (f"{doctor_apparmor.PROFILE_NAME}//child", "enforce"),
+    )
+
+    rc = doctor.doctor_main([str(ws), str(state)])
+    assert rc == 0
+    assert "the LSM gate is satisfied" in _records(capsys)
+
+
+def test_doctor_errors_when_the_narrowed_profile_is_in_complain_mode(
+    tmp_path, monkeypatch, capsys
+):
+    """Invariant 40: complain mode logs violations and ALLOWS them.
+
+    bwrap would run and the LSM would be enforcing nothing — the failure that
+    looks most like success, which is exactly why it must be an error and not a
+    warning.
+    """
+    from harness import apparmor as doctor_apparmor
+    from harness import jail as doctor_jail
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    _jail_on(monkeypatch)
+    monkeypatch.delenv("DEEPAGENTS_JAIL_APPARMOR", raising=False)
+    monkeypatch.setattr(
+        doctor_jail,
+        "apparmor_confinement_detail",
+        lambda: (doctor_apparmor.PROFILE_NAME, "complain"),
+    )
+
+    rc = doctor.doctor_main([str(ws), str(state)])
+    err = _records(capsys)
+    assert rc != 0
+    assert "COMPLAIN mode" in err
+
+
+def test_doctor_errors_when_the_vendored_apparmor_profile_is_widened(
+    tmp_path, monkeypatch, capsys
+):
+    """Invariant 38 reaching doctor: a `mount,` catch-all must not pass pre-flight."""
+    from harness import apparmor as doctor_apparmor
+    from harness import jail as doctor_jail
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    widened = tmp_path / "deepagent-userns"
+    body = doctor_apparmor.split_header(
+        doctor_apparmor.load_text(doctor_apparmor.profile_path())
+    )[1].replace("  mount fstype=tmpfs,", "  mount,")
+    widened.write_text(doctor_apparmor._with_header(body, "widened"), encoding="utf-8")
+
+    _jail_on(monkeypatch)
+    monkeypatch.delenv("DEEPAGENTS_JAIL_APPARMOR", raising=False)
+    monkeypatch.setattr(doctor_jail, "apparmor_confinement_detail", lambda: (None, None))
+    monkeypatch.setattr(doctor_apparmor, "profile_path", lambda: widened)
+
+    rc = doctor.doctor_main([str(ws), str(state)])
+    err = _records(capsys)
+    assert rc != 0
+    assert "AppArmor profile:" in err
+    assert "catch-all" in err
 
 
 def test_doctor_skips_the_apparmor_check_entirely_when_jail_is_off(
@@ -309,7 +422,9 @@ def test_doctor_skips_the_apparmor_check_entirely_when_jail_is_off(
     state = tmp_path / "state"
     state.mkdir()
     monkeypatch.delenv("DEEPAGENTS_JAIL", raising=False)
-    monkeypatch.setattr(doctor_jail, "apparmor_confinement", lambda: "docker-default")
+    monkeypatch.setattr(
+        doctor_jail, "apparmor_confinement_detail", lambda: ("docker-default", "enforce")
+    )
 
     rc = doctor.doctor_main([str(ws), str(state)])
     err = _records(capsys)
