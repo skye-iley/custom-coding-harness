@@ -13,6 +13,8 @@ auto-removed, so nothing lands in the repo or the mounted workspace.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 pytest.importorskip("deepagents")  # image-only; skipped on a bare host
@@ -29,12 +31,14 @@ def test_resolve_workspace_outside_container_allows_any_path(tmp_path, monkeypat
     assert agent.resolve_workspace(str(tmp_path)) == tmp_path.resolve()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="posix container paths: '/project' resolves to C:\\project on Windows")
 def test_resolve_workspace_in_container_accepts_under_project(monkeypatch):
     monkeypatch.setenv("DEEPAGENTS_IN_CONTAINER", "1")
     assert agent.resolve_workspace("/project/workspace") == \
         __import__("pathlib").Path("/project/workspace")
 
 
+@pytest.mark.skipif(os.name == "nt", reason="posix container paths: '/project' resolves to C:\\project on Windows")
 def test_resolve_workspace_in_container_accepts_project_root(monkeypatch):
     # is_relative_to must treat /project itself as inside (the old startswith
     # check wrongly rejected it).
@@ -377,3 +381,95 @@ def test_build_agent_appends_exclusion_middleware_when_env_set(workspace_sandbox
     monkeypatch.delenv("DEEPAGENTS_LEAN_TOOLS", raising=False)
     agent.build_agent("model:x", workspace_sandbox)
     assert not any(isinstance(m, agent._ExcludeToolsMiddleware) for m in captured["middleware"])
+
+
+# --- M4 slice H backstop: the namespace guard on the shell tool ---------------
+# The seccomp relaxation the jail needs is applied to the WHOLE container, so it
+# hands the agent's shell the same five syscalls. These cover the backend seam;
+# the matcher itself is host-tested in tests/test_nsguard.py.
+
+def _ns_backend(workspace, **kw):
+    return agent._WorkspaceShellBackend(
+        root_dir=str(workspace), virtual_mode=True, inherit_env=False, env={}, **kw
+    )
+
+
+def test_shell_refuses_namespace_command_under_the_jail(workspace_sandbox, monkeypatch, capsys):
+    monkeypatch.setattr(agent.jail, "jail_enabled", lambda: True)
+    monkeypatch.setattr(agent.jail, "already_jailed", lambda: False)
+    monkeypatch.delenv("DEEPAGENTS_NS_GUARD", raising=False)
+    monkeypatch.setattr(
+        agent.LocalShellBackend, "execute",
+        lambda self, command, **kw: pytest.fail("command must not reach the shell"),
+    )
+    backend = _ns_backend(workspace_sandbox)
+    with pytest.raises(agent.nsguard.NamespaceGuardDenied):
+        backend.execute("unshare -Ur /bin/sh")
+    # never silent to the operator, and on stderr so headless stdout stays clean
+    err = capsys.readouterr().err
+    assert "ns-guard DENIED" in err
+
+
+def test_shell_guard_is_inert_with_the_jail_off(workspace_sandbox, monkeypatch):
+    # Removable contract: no jail -> no seccomp relaxation -> nothing to
+    # compensate for, so the shell behaves exactly as it did in M3.
+    monkeypatch.setattr(agent.jail, "jail_enabled", lambda: False)
+    monkeypatch.setattr(agent.jail, "already_jailed", lambda: False)
+    monkeypatch.delenv("DEEPAGENTS_NS_GUARD", raising=False)
+    seen = {}
+    monkeypatch.setattr(
+        agent.LocalShellBackend, "execute",
+        lambda self, command, **kw: seen.update(cmd=command) or "ran",
+    )
+    backend = _ns_backend(workspace_sandbox)
+    assert backend.execute("unshare -Ur /bin/sh") == "ran"
+    assert seen["cmd"] == "unshare -Ur /bin/sh"
+
+
+def test_shell_guard_can_be_forced_on_without_the_jail(workspace_sandbox, monkeypatch):
+    monkeypatch.setattr(agent.jail, "jail_enabled", lambda: False)
+    monkeypatch.setattr(agent.jail, "already_jailed", lambda: False)
+    monkeypatch.setenv("DEEPAGENTS_NS_GUARD", "1")
+    backend = _ns_backend(workspace_sandbox)
+    with pytest.raises(agent.nsguard.NamespaceGuardDenied):
+        backend.execute("mount -o bind /a /b")
+
+
+def test_shell_guard_warn_mode_records_but_still_runs(workspace_sandbox, monkeypatch, capsys):
+    monkeypatch.setattr(agent.jail, "jail_enabled", lambda: True)
+    monkeypatch.setattr(agent.jail, "already_jailed", lambda: False)
+    monkeypatch.setenv("DEEPAGENTS_NS_GUARD", "warn")
+    monkeypatch.setattr(agent.LocalShellBackend, "execute", lambda self, command, **kw: "ran")
+    calls = []
+    backend = _ns_backend(
+        workspace_sandbox,
+        on_command_denied=lambda match, reason, mode: calls.append((match, mode)),
+    )
+    assert backend.execute("unshare -Ur sh") == "ran"
+    assert calls == [("unshare", "warn")]
+    assert "ns-guard WARNING" in capsys.readouterr().err
+
+
+def test_shell_guard_notifies_the_audit_seam_on_block(workspace_sandbox, monkeypatch):
+    monkeypatch.setattr(agent.jail, "jail_enabled", lambda: True)
+    monkeypatch.setattr(agent.jail, "already_jailed", lambda: False)
+    monkeypatch.delenv("DEEPAGENTS_NS_GUARD", raising=False)
+    calls = []
+    backend = _ns_backend(
+        workspace_sandbox,
+        on_command_denied=lambda match, reason, mode: calls.append((match, reason, mode)),
+    )
+    with pytest.raises(agent.nsguard.NamespaceGuardDenied):
+        backend.execute("nsenter -t 1 -m sh")
+    assert len(calls) == 1
+    match, reason, mode = calls[0]
+    assert match == "nsenter" and mode == "block"
+
+
+def test_shell_guard_lets_ordinary_commands_through(workspace_sandbox, monkeypatch):
+    monkeypatch.setattr(agent.jail, "jail_enabled", lambda: True)
+    monkeypatch.setattr(agent.jail, "already_jailed", lambda: False)
+    monkeypatch.delenv("DEEPAGENTS_NS_GUARD", raising=False)
+    monkeypatch.setattr(agent.LocalShellBackend, "execute", lambda self, command, **kw: "ran")
+    backend = _ns_backend(workspace_sandbox)
+    assert backend.execute("pytest tests/ -v") == "ran"

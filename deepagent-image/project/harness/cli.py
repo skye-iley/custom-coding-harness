@@ -1258,6 +1258,15 @@ def main() -> int:
                 if _should_audit_path_denials(hitl_conf)
                 else None
             )
+            # Same seam for the namespace guard (nsguard): a shell command that
+            # reaches for the syscalls slice H's seccomp profile re-permits is
+            # refused by the backend regardless, and -- when HITL is on -- also
+            # recorded to the same out-of-workspace denials sink.
+            on_command_denied = (
+                hitl.make_command_denied_handler(workspace)
+                if _should_audit_path_denials(hitl_conf)
+                else None
+            )
 
             agent = build_agent(
                 chat_model,
@@ -1266,6 +1275,7 @@ def main() -> int:
                 middleware=middleware,
                 checkpointer=checkpointer,
                 on_path_denied=on_path_denied,
+                on_command_denied=on_command_denied,
             )
             if args.headless:
                 # P2: one-shot batch — run the task(s), emit one JSON result on

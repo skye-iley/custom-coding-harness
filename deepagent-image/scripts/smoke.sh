@@ -12,11 +12,16 @@
 #   KEEP_ARTIFACTS=1 ./smoke.sh # ship files that tests write via the `artifact_dir`
 #                               # fixture out to test-artifacts/<timestamp>/ on the host
 #                               # (default: they go to the container's tmp and vanish).
+#   JAIL_CHECK=1 ./smoke.sh     # REQUIRE the M4 slice H jail gate to pass. By default
+#                               # the gate runs but self-skips on a host that cannot
+#                               # nest user namespaces; =1 turns that skip into a
+#                               # failure (use in CI to pin the boundary).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NETJAIL_DIR="$ROOT/netjail"
 NET_JAIL="${NET_JAIL:-}"
 KEEP_ARTIFACTS="${KEEP_ARTIFACTS:-}"
+JAIL_CHECK="${JAIL_CHECK:-}"
 
 # ---------------------------------------------------------------------------
 # NetJail plumbing — mirror of run-docker.sh's NET_JAIL path. Kept in sync with
@@ -171,6 +176,46 @@ for launcher in run-docker.sh run-docker.ps1; do
     || { echo "M4 fail-closed: $launcher lost its fail-closed guard" >&2; exit 1; }
 done
 echo "M4 fail-closed: mask-scan aborts on failure + launchers guard against unmasked launch — ok"
+
+# M4 slice H: the bwrap fs jail actually holds in the built image. This is the §3
+# hard gate ("bwrap --unshare-all must really run here"), plus the boundary
+# properties the jail is supposed to buy — asserted against the harness's own
+# jail.bwrap_args, with NO docker mask applied, so the jail is the only enforcer.
+# Needs the vendored narrow seccomp profile: Docker's default blocks unprivileged
+# userns creation by design, which is exactly why DEEPAGENTS_JAIL is opt-in.
+SECCOMP_PROFILE="$ROOT/seccomp/userns.json"
+if [[ ! -f "$SECCOMP_PROFILE" ]]; then
+  echo "M4 jail: $SECCOMP_PROFILE missing — run 'python3 -m harness seccomp-sync'" >&2
+  exit 1
+fi
+set +e
+# The script is piped in on stdin (`python3 -`) rather than bind-mounted. A bind
+# needs a container-side absolute path, and under Git Bash on Windows MSYS
+# rewrites a lone leading `/` into the host prefix (`/jail-check.py` ->
+# `C:/Program Files/Git/jail-check.py`), breaking the mount target. Neither
+# blanket fix works: MSYS_NO_PATHCONV=1 also un-converts the *host*-side seccomp
+# path the daemon needs, and a `//` escape gets mangled inside the `-v src:dst`
+# triple. stdin has no path to convert, so it is portable by construction.
+docker run --rm -i ${NET_ARGS[@]+"${NET_ARGS[@]}"} ${PROXY_ENV[@]+"${PROXY_ENV[@]}"} \
+  --security-opt "seccomp=$SECCOMP_PROFILE" \
+  -e DEEPAGENTS_JAIL=1 \
+  deepagent-harness python3 - < "$ROOT/scripts/jail-check.py"
+jail_rc=$?
+set -e
+if [[ $jail_rc -eq 77 ]]; then
+  # Environmental, not a regression: some kernels/runtimes refuse nested userns
+  # outright. Only a hard failure when the caller pinned it (CI).
+  if [[ -n "$JAIL_CHECK" ]]; then
+    echo "M4 jail: JAIL_CHECK=1 was set but this host cannot nest user namespaces — failing." >&2
+    exit 1
+  fi
+  echo "M4 jail: SKIPPED (host cannot nest user namespaces). Set JAIL_CHECK=1 to require it."
+elif [[ $jail_rc -ne 0 ]]; then
+  echo "M4 jail: boundary check FAILED (rc=$jail_rc)" >&2
+  exit 1
+else
+  echo "M4 jail: bwrap gate + masked/unmasked/write/ro boundary checks — ok"
+fi
 
 # Full suite via pytest discovery on the test image. -v names every test case
 # (file::test PASSED/FAILED); -ra recaps non-passing tests at the end. Failures

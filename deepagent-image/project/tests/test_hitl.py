@@ -473,3 +473,50 @@ def test_path_denied_handler_never_raises_on_audit_failure(tmp_path, monkeypatch
     err = capsys.readouterr().err
     assert "failed to record path denial" in err
     assert "disk full" in err
+
+
+# --- M4 slice H backstop: namespace-guard denial records ----------------------
+
+def test_command_denied_record_lands_outside_the_workspace(tmp_path):
+    # Same isolation rule as the path denial: an attempt to reach the namespace
+    # syscalls is evidence, and evidence inside the workspace is truncatable by
+    # the agent's own file tools.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    handler = hitl.make_command_denied_handler(workspace)
+    handler("unshare", "'unshare' creates or enters a namespace", "block")
+
+    records = _denials(workspace)
+    assert len(records) == 1
+    assert audit.read_records(workspace) == []
+    assert not audit.interrupts_path(workspace).exists()
+
+
+def test_command_denied_record_keeps_the_match_but_not_the_command(tmp_path):
+    # The command string can carry workspace content, so persisting it would turn
+    # the audit trail into an exfiltration channel (the §10 no-contents backstop).
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    handler = hitl.make_command_denied_handler(workspace)
+    handler("nsenter", "'nsenter' creates or enters a namespace", "block")
+
+    meta = _denials(workspace)[0]["meta"]
+    assert meta["match"] == "nsenter"
+    assert meta["op"] == "shell"
+    assert meta["mode"] == "block"
+    # audit_only: nothing was ever offered to a human for this denial type.
+    assert meta["audit_only"] is True
+
+
+def test_command_denied_handler_never_raises_on_audit_failure(tmp_path, monkeypatch, capsys):
+    # An audit write failure must not fail the turn -- but must not be silent.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    handler = hitl.make_command_denied_handler(workspace)
+
+    def _boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(audit, "record_interrupt", _boom)
+    handler("mount", "'mount' creates or enters a namespace", "block")
+    assert "failed to record namespace denial" in capsys.readouterr().err

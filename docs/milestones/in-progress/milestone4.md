@@ -75,14 +75,22 @@ in **CI** that proves the boundary can't silently regress.
   CI**.
 - The mask/guard is **frozen at launch** — agent runtime edits to any in-workspace `.agentignore`
   cannot unmask the current session; a protection-*reduction* between runs warns loudly.
-- **Every fs-touching tool — shell included — is routed through the bwrap allow-list jail (slice H)**,
-  binds sourced from the resolved policy, designated secrets never bound, and `agent.py` enforces that
-  a new tool can't silently reopen the bypass. This is the difference between "M4 hides some paths"
-  and "M4 is the real trust boundary": deny-list masking (B) hides what it's told to hide, but an
-  allow-list is the only mechanism that fails safe against a path nobody thought to list. Without H,
-  the milestone's own name — *Real* Trust Boundary — isn't earned yet; the boundary is still the
-  Docker container (`mvp.md` §5), same as before M4. **M4 is not done until this bullet holds and
-  `bwrap --unshare-all true` is verified to actually run in the built image** (§3).
+- **Slice H ships, and when enabled (`DEEPAGENTS_JAIL=1`) every fs-touching tool — shell included —
+  is routed through the bwrap allow-list jail**, binds sourced from the resolved policy and
+  designated secrets never bound. Under the shipped re-exec design this is *structural* rather than
+  an `agent.py` assertion: the whole harness process lives in the namespace, so a newly added fs tool
+  has no bypass to reopen (§11.4). This is the difference between "M4 hides some paths" and "M4 is
+  the real trust boundary": deny-list masking (B) hides what it's told to hide, but an allow-list is
+  the only mechanism that fails safe against a path nobody thought to list.
+
+  **The jail is opt-in, and that is a deliberate pinned trade, not an unfinished edge** (§16 fork 7):
+  turning it on requires relaxing the *outer* container's seccomp filter to permit unprivileged user
+  namespaces, which buys the inner boundary at the cost of exposing kernel userns attack surface. A–G's
+  posture therefore stays the default, and the operator opts into H knowingly. So the done-when is
+  **"H is built, verified, and available"** — not "H is on by default." With the jail off, the boundary
+  is the Docker container plus the deny-list mask (`mvp.md` §5), and the docs must keep saying so.
+- **The `bwrap --unshare-all` gate is verified in the built image** (§3, §11.4) — measured, not
+  assumed, and re-checked by `scripts/smoke.{sh,ps1}` (`JAIL_CHECK=1` / `-JailCheck`).
 
 ## 2. Why this milestone now
 
@@ -567,6 +575,28 @@ The seam:
 > Desktop/WSL2 `user/max_user_namespaces` is non-zero and the failure reproduces as root. So the
 > gate is met, but it costs a relaxation of the **outer** boundary to buy the inner one, which is a
 > security-posture decision, not a build detail. Pinned in §16 fork 7.
+>
+> **Re-verified end-to-end under the profile that actually ships** (2026-08-07, Docker Desktop/WSL2,
+> `ubuntu:24.04` image). The earlier measurement only compared *default* vs. *unconfined*; the
+> vendored narrow profile was inferred to work rather than exercised. Run against the real
+> `jail.bwrap_args` output (not hand-rolled binds), with **no docker mask applied**, so the jail is
+> the only enforcer in play:
+>
+> | Check | Result |
+> |---|---|
+> | `bwrap --unshare-all` under `seccomp/userns.json` | **runs** (uid 10001) |
+> | same, under Docker's default profile (control) | refused — `No permissions to create new namespace` |
+> | masked `.env` read **inside** the jail | **0 bytes** (20 bytes outside) — invariant 5 leg 4 |
+> | unmasked `environment.yml` read inside | byte-identical — invariant 8 |
+> | workspace write inside | permitted (live edits still land) |
+> | `/project` write inside | refused — `Read-only file system` |
+>
+> Now automated: `scripts/smoke.{sh,ps1}` `JAIL_CHECK=1` / `-JailCheck`. **Caveat for anyone
+> re-running this by hand:** stage the fixture workspace/state **outside `/tmp`** — `bwrap_args`
+> emits `--tmpfs /tmp` *after* the binds, so a fixture under `/tmp` is overmounted and every result
+> is a false negative. The state dir *is* bound in the harness's own namespace (`checkpoints.sqlite`
+> needs it); dropping the shell's reach into it is the **nested** `sandbox-exec` jail's job, not
+> this one.
 
 **Seccomp (§16 fork 7).** Ship a vendored narrow profile — Docker's default with exactly five
 syscalls relaxed (`clone`, `unshare`, `mount`, `umount2`, `pivot_root`) — not `seccomp=unconfined`.
@@ -643,6 +673,51 @@ approvable case now needs something that makes a masked read explicitly fail —
 (deferred v2) or an overlayfs view (slice I) — not this slice. Building the approve branch here would
 still be dead code. **This corrects the earlier reading of H's inherited scope**, which was written
 against the per-call design.
+
+### 11.5 Namespace guard (slice H backstop) — `harness/nsguard.py` + `agent.py`
+
+**The problem this exists for.** §11.4's jail needs `seccomp/userns.json`, which re-permits `clone`
+(with `CLONE_NEW*`), `unshare`, `mount`, `umount2` and `pivot_root`. That profile is a **`docker run`
+flag**, so it applies to the *entire container* — there is no mechanism to grant it to the harness
+process alone. Enabling the inner jail therefore hands the **agent's shell tool** the same five
+syscalls. That is an unavoidable consequence of the design, not an oversight, but it should not go
+uncompensated.
+
+**What ships.** `nsguard.scan(command)` — pure, stdlib, imports no harness sibling — is called from
+`_WorkspaceShellBackend.execute`/`aexecute` before the command runs. Two layers:
+
+1. **Denied binaries in command position** — `unshare`, `nsenter`, `mount`, `umount`, `chroot`,
+   `pivot_root`, `bwrap`/`sandbox-exec`, container runtimes (`docker`, `podman`, `runc`, …),
+   `capsh`/`setpriv`. Matching is basename-aware (`/usr/bin/unshare` doesn't launder it), skips
+   `VAR=val` prefixes, sees past wrappers (`sudo`, `env`, `timeout 5 …`), and scans **every**
+   `;`/`&&`/`||`/`|` segment, so hiding the call behind a benign first command doesn't work.
+2. **High-signal tokens anywhere** — `pivot_root`, `CLONE_NEW*` (unanchored on the left, so
+   `-DCLONE_NEWUSER` matches), `unshare(`, `setns(`, `os.unshare`, and raw `syscall(272|155|308)`.
+   This catches the interpreter one-liner route that never puts a denied binary in command position.
+   Bare `mount` is **deliberately not** a token pattern — it is ordinary English, and the
+   position-aware binary check already covers the executable form.
+
+On a hit: an always-on `[harness] ns-guard DENIED — …` line on **stderr** (HITL or not, same
+ground-truth reasoning as the path-guard line, stdout stays clean for headless JSON), a structured
+record to `<state-dir>/denials.jsonl` when HITL is on (`hitl.make_command_denied_handler`, same
+out-of-workspace sink as slice D so the agent can't truncate the evidence), and a
+`NamespaceGuardDenied` refusal. **Only the matched token and reason are persisted, never the command
+string** — a command can carry workspace content, and an audit trail that stores it becomes an
+exfiltration channel around the §10 no-contents backstop.
+
+**Scoped to the jail, so the removable contract holds.** `nsguard.guard_mode()` defaults to **off**
+when `DEEPAGENTS_JAIL` is off: no relaxation is applied then, so there is nothing to compensate for
+and the shell behaves byte-for-byte as in M3/A–G. `DEEPAGENTS_NS_GUARD` overrides both ways —
+`0`/`off` disables it under the jail, `warn` logs-and-records without refusing (the escape hatch if a
+denylist entry ever collides with real work), `1`/`block` forces it on with the jail off.
+
+> **This is a tripwire, not containment — do not describe it as a sandbox.** A command-string
+> denylist is phrasing-blind, the same caveat M3 already records for `review_triggers` (where a denied
+> `rm -rf` came back as `rmdir`). Anything compiled from source, base64-decoded, indirected through a
+> variable, or invoked from a runtime this doesn't pattern-match goes straight through. The boundary
+> remains the container plus, when on, the jail's bind set. What this buys is that the casual and
+> scripted attempts — which is what an opportunistic prompt-injected agent actually emits — are
+> refused **and recorded**, so an escape attempt leaves evidence instead of silence.
 
 ## 12. Support tier
 
@@ -728,6 +803,7 @@ provider keys** — every tier is keyless by construction.
 | `DEEPAGENTS_MASK_MODE` | container env | `deny` | `deny` (see all but masked) \| `allow` (see only allow-listed + writable). Overridable per-workspace by the `#!mode:` header directive; env wins if set. |
 | `DEEPAGENTS_AGENTIGNORE` | container env | unset | Override the in-workspace config filename (default `.agentignore`); state-dir authoritative config is unaffected. |
 | `DEEPAGENTS_JAIL` | container env + launcher | `0` (**off**) | `1` routes all fs tools + the shell through the bwrap jail (slice H, §11.4). Off by default because enabling it requires the narrow seccomp relaxation, which trades a little outer-boundary attack surface for the inner one — an operator's call, not a silent default. |
+| `DEEPAGENTS_NS_GUARD` | container env | unset → tracks `DEEPAGENTS_JAIL` | Namespace-guard denylist on the shell tool (§11.5), the backstop for the container-wide seccomp relaxation the jail requires. Default **on with the jail, off without it** (nothing to compensate for). `warn` records without refusing; `0` disables; `1` forces it on with the jail off. |
 
 **Removable contract (mirrors M1 §2.5 / M2 / M3).** The single intentional default-behaviour change is
 **mask-on-by-default** — like M2 changing the default `--thread-id` from `"default"` to a fresh
@@ -842,12 +918,24 @@ authoritative config (raise-only, no `mask_remove`) and takes effect **next run*
    real boundary (`mvp.md` §5). Because the relaxation exposes kernel userns surface, `DEEPAGENTS_JAIL`
    defaults to **off**: turning the jail on is a deliberate operator trade, and A–G's posture stays
    the default.
-8. **fs-tool routing → per-call jailed worker. Decided** (§11.4). Measured: `bwrap` spawn ~5 ms, bare
-   `python3 -S` ~10 ms, but `import deepagents.backends.local_shell` ~2.2 s — so the worker must be
-   **stdlib-only** and a persistent helper is the only way to reuse deepagents' backend faithfully.
-   Per-call wins anyway: no lifecycle, no framing protocol, no health checks, and — decisively — no
-   "helper died, silently fell back to in-process IO" degradation path. The cost is reimplementing
-   thin method bodies client-side, paid for by the differential test in §18.
+8. **fs-tool routing → re-exec the harness into the namespace. Decided** (§11.4). Measured: `bwrap`
+   spawn ~5 ms, bare `python3 -S` ~10 ms, but `import deepagents.backends.local_shell` ~2.2 s.
+
+   *Two designs were costed and beaten.* A **persistent jailed helper** could reuse deepagents'
+   backend faithfully but carries a lifecycle, a framing protocol, health checks, and — decisively —
+   a "helper died, silently fell back to in-process IO" degradation path. A **per-call jailed worker**
+   removes the lifecycle, but the 2.2 s import means the worker must be stdlib-only, so it would have
+   to reimplement `read`/`write`/`edit`/`ls`/`glob` client-side and carry permanent drift risk against
+   upstream, paid for by a differential test.
+
+   **Re-exec beats both**: no worker, no protocol, no reimplementation, no per-op cost, and no
+   mid-session failure mode — the same upstream method bodies simply run inside a narrower namespace,
+   and the all-fs-tools-routed property becomes structural instead of asserted. **This supersedes an
+   earlier revision of this fork that pinned the per-call worker**; invariants written against that
+   design (a jailed worker that explicitly refuses a floor path; a `build_agent` method-set assertion;
+   a jailed-vs-unjailed differential test) do not describe the shipped code and have been rewritten in
+   `milestone4_invariants.md`. The one substantive consequence: re-exec does **not** turn a masked read
+   into an explicit denial, so slice D's approve branch stays deferred (§11.4, invariant 16).
 9. **Still open (small):** whether the protection-*reduction* warning (§10 step 6) becomes a **blocking**
    `approve` interrupt under HITL, or stays a loud non-blocking stderr warning in all modes. Recommend
    **non-blocking warning** for v1 (a legitimate policy relaxation shouldn't wedge a session); revisit if

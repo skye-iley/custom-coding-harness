@@ -400,6 +400,52 @@ def make_path_denied_handler(workspace: Path):
     return _on_path_denied
 
 
+def make_command_denied_handler(workspace: Path):
+    """Build the ``on_command_denied`` callback the shell backend calls when the
+    namespace guard trips (M4 slice H backstop — see ``nsguard``).
+
+    Same shape and same reasoning as ``make_path_denied_handler``: no human is
+    ever asked (there is nothing to approve — the agent's shell has no legitimate
+    use for ``unshare``/``mount``/``pivot_root``), so this records and returns.
+
+    **The record goes to the state dir**, not the workspace, for the same reason:
+    an attempt to escape the namespace is evidence, and evidence parked in
+    ``<workspace>/.agent_telemetry/`` is in-bounds for the agent's own file tools
+    to truncate (invariant 20 / 17a).
+
+    Only the matched token and the reason are persisted — **never the command
+    string**, which can carry workspace content and would turn the audit trail
+    into an exfiltration channel of its own (the §10 no-contents backstop).
+    """
+    sink = audit.denials_path(archive.state_dir(workspace))
+
+    def _on_command_denied(match: str, reason: str, mode: str) -> None:
+        request = new_request(
+            interrupt.KIND_APPROVE,
+            f"namespace guard {mode}ed a shell command: {reason}",
+            default=False,
+            source=interrupt.SOURCE_SYSTEM,
+            meta={
+                "match": match,
+                "op": "shell",
+                "reason": reason,
+                "mode": mode,
+                "audit_only": True,
+            },
+        )
+        try:
+            audit.record_interrupt(
+                workspace, request, False, resolved_by="system", sink=sink
+            )
+        except Exception as exc:  # noqa: BLE001 -- an audit write must never fail a turn
+            print(
+                f"[harness] audit: failed to record namespace denial ({exc})",
+                file=sys.stderr,
+            )
+
+    return _on_command_denied
+
+
 # --- S2: deterministic pause gate --------------------------------------------
 
 

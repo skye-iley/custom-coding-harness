@@ -37,8 +37,11 @@ The boundary is the **Docker container + the docker mount-mask**, *not* a sandbo
 **present-but-empty**, not absent. Keep that in mind: the correct result of a successful mask is a
 file that exists, `ls` shows it, but `cat` yields nothing and its size is 0.
 
-**Known gaps, pending slice H (do not treat these as bugs — they're the reason H is core v1 scope, not
-optional hardening; see `milestone4.md` §3):**
+**Known gaps in the default posture — i.e. with the jail OFF, which is the default.** Slice H has
+**shipped** (opt-in, `DEEPAGENTS_JAIL=1`); the items below describe the boundary you get *without* it,
+which is what an ordinary run has. Do not treat them as bugs. Where H closes one when enabled, that is
+noted inline; to exercise the closed version, see **"Slice H — the bwrap jail"** at the end of this
+document.
 - The `permission_denied` HITL interrupt is **audit-only** — a path-guard denial is always a plain
   refused tool result (never an approval prompt). Do not test for an approval flow; there is nothing
   to approve — every v1 denial is a true workspace escape, which is never approvable by design.
@@ -51,13 +54,18 @@ optional hardening; see `milestone4.md` §3):**
     record of its own escape attempt.
 - **The denial record is not shell-proof.** The state dir defeats the agent's *file* tools (the path
   guard refuses it), but the shell tool is bounded only by the container root, so `cat`/`>` on the
-  absolute state-dir path still works until the bwrap jail (slice H). Don't report that as a bug.
-- The floor's "3rd independent leg" (a file backend that explicitly refuses a floor path) is **not
-  built**. In v1 a floor file is protected by the docker overlay reading empty + the resolver
-  dropping negations — two legs, not three.
+  absolute state-dir path still works. Don't report that as a bug. **Closed by `DEEPAGENTS_JAIL=1`**,
+  where the shell's nested `sandbox-exec` jail binds only the workspace.
+- The floor's **3rd independent leg** is jail-gated. With the jail off, a floor file is protected by
+  the docker overlay reading empty + the resolver dropping negations — **two** legs. With
+  `DEEPAGENTS_JAIL=1` the jail overmounts masked paths empty *inside* the namespace, which is a third
+  leg independent of the docker overlay. (There is no 4th leg — an earlier draft's "jailed worker
+  refuses a floor path" belonged to a design that was not shipped.)
 - The **shell tool is not routed through the path guard.** Shell path-escape is bounded only by the
   container root. A masked file the shell `cat`s still reads empty (the mask covers every process),
-  but the guard itself covers the *file* tools only.
+  but the guard itself covers the *file* tools only. **With the jail on**, shell and file tools share
+  one namespace, so the shell is bounded by the bind set rather than the container root — the guard
+  stays in front as cheap defense-in-depth.
 
 ---
 
@@ -607,9 +615,61 @@ intact, the boundary is holding for read, escape, and config leaks. Add §6 when
 
 ---
 
-**Cross-refs:** `milestone4.md` (§10 resolver, §11 enforcement, §13 knobs, §14 threat model, §15
-gotchas), `milestone4_invariants.md` (the numbered properties), `deepagent-image/CLAUDE.md`
+## Slice H — the bwrap jail (opt-in)
+
+Everything above describes the **default** posture (jail off). This section verifies the boundary you
+get with `DEEPAGENTS_JAIL=1`. It is opt-in because enabling it relaxes the *outer* container's seccomp
+filter to permit unprivileged user namespaces (`milestone4.md` §16 fork 7, `seccomp/README.md`).
+
+**Automated — run this first.** It is the whole section in one command:
+
+```bash
+JAIL_CHECK=1 ./scripts/smoke.sh            # bash
+.\scripts\smoke.ps1 -JailCheck             # PowerShell
+```
+
+Green means: bwrap unshares under the vendored profile, a masked path reads **empty inside the jail
+with the docker mask switched off**, an unmasked file is byte-identical, the workspace is writable,
+and `/project` is read-only. Red on the *first* check usually means the seccomp profile is stale or
+missing — run `python3 -m harness seccomp-sync --check`.
+
+**By hand**, if you want to see it directly:
+
+```bash
+# 1. the gate itself — expect a namespace refusal WITHOUT the profile ...
+docker run --rm deepagent-harness bwrap --unshare-all true
+#    -> bwrap: No permissions to create new namespace   (this failure is CORRECT)
+
+# 2. ... and a clean run WITH it
+docker run --rm --security-opt seccomp=deepagent-image/seccomp/userns.json \
+  deepagent-harness bwrap --unshare-all --ro-bind /usr /usr \
+  --symlink usr/lib64 /lib64 --symlink usr/lib /lib --symlink usr/bin /bin \
+  /usr/bin/echo JAIL_OK
+#    -> JAIL_OK
+```
+
+> **Trap when hand-rolling a fixture:** stage the workspace and state dir **outside `/tmp`**.
+> `jail.bwrap_args` emits `--tmpfs /tmp` *after* the binds, so a fixture under `/tmp` gets
+> overmounted and every check silently reports a false negative (a "masked" file reads empty because
+> the whole tree vanished, not because the mask worked). Use `/project/workspace` and
+> `/project/state`, as the real launcher does.
+
+**What the jail does NOT change** — do not go looking for these:
+
+- A masked read still **succeeds and returns empty**; it does not become an explicit denial. So there
+  is still no approvable `permission_denied` case (invariant 16 stays deferred to `hide` mode or the
+  overlayfs view). Every `PathGuardDenied` is still a true escape.
+- The **state dir is still bound** in the harness's own namespace — `checkpoints.sqlite` needs it.
+  What changes is that the *shell tool* gets a nested jail binding only the workspace, so the shell
+  loses its `cat`/`>` reach into `denials.jsonl`. Verify that from the shell tool, not from the
+  harness process.
+
+---
+
+**Cross-refs:** `milestone4.md` (§10 resolver, §11 enforcement, §11.4 jail, §13 knobs, §14 threat
+model, §15 gotchas), `milestone4_invariants.md` (the numbered properties), `deepagent-image/CLAUDE.md`
 (Workspace visibility / secret masking section), and the code seams: `harness/mask.py`,
 `harness/mask_scan.py`, `harness/pathguard.py`, `harness/doctor.py`, `agent.py`
 (`_WorkspaceShellBackend._resolve_path`), `scripts/run-docker.{ps1,sh}` (mask pre-flight),
-`workflows/git-pr/stage-commit-push.sh` (staging exclusion).
+`workflows/git-pr/stage-commit-push.sh` (staging exclusion), and for slice H `harness/jail.py`,
+`harness/seccomp.py`, `seccomp/userns.json`, `scripts/sandbox-exec.sh`.

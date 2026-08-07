@@ -82,10 +82,14 @@ thread id), isolates workspace dependencies in a workspace-local conda env, and 
 
 ### Core identity — dependency chain (ship order = dependency order)
 
-1. **M4 slice H — bwrap fs-tool jail** (`docs/milestones/in-progress/milestone4.md` §4H; design_doc
-   §2 Bubblewrap Configuration). The real allow-list boundary — routes **both** shell and file tools
-   through the jail. Everything below that claims per-agent isolation is aspirational without it;
-   today's boundary is the docker mount-mask (deny-list, present-but-empty), not a sandbox.
+1. **M4 slice H — bwrap fs-tool jail** (`docs/milestones/in-progress/milestone4.md` §4H/§11.4;
+   design_doc §2 Bubblewrap Configuration). **Built, opt-in (`DEEPAGENTS_JAIL=1`)** — the real
+   allow-list boundary, routing **both** shell and file tools through the jail via a re-exec of the
+   harness into a bwrap namespace. Everything below that claims per-agent isolation is aspirational
+   *unless the jail is on*; with it off — the default, because it needs a narrow seccomp relaxation
+   on the outer container — the boundary remains the docker mount-mask (deny-list,
+   present-but-empty), not a sandbox. Items 2–3 below can now build against a real bind boundary,
+   but must not assume it is enabled.
 2. **`HarnessProfile`** (§2 "HarnessProfile dynamic bind mounts", §4 "Specialized Profiles") —
    per-agent scoped tool/bind config. Depends on (1): profile bind-scoping is only real once bwrap
    enforces it; today there's a fixed bind list and no profile object at all.

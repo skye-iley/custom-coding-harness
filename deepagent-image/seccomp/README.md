@@ -51,6 +51,29 @@ code to the container, historically a source of local privilege-escalation CVEs.
 than the new default posture — enabling it is an operator's deliberate choice to
 trade a little outer-boundary attack surface for a real inner boundary.
 
+## The relaxation is container-wide — and what we do about it
+
+`--security-opt` is a **`docker run` flag**. There is no mechanism to grant the
+relaxed profile to the harness process alone, so switching the jail on hands the
+**agent's shell tool** the same five syscalls. That is inherent to the design,
+not an oversight.
+
+The compensating layer is `harness/nsguard.py` (milestone4.md §11.5, invariant
+36): a denylist on the shell tool's command string covering the common routes —
+`unshare`/`nsenter`/`mount`/`chroot`/`bwrap`/container runtimes in command
+position (basename-matched, wrapper- and `&&`-segment-aware), plus `CLONE_NEW*`,
+`unshare(`, `setns(` and raw `syscall(272|155|308)` anywhere, which is the
+interpreter-one-liner route. A hit is refused, printed to stderr regardless of
+HITL, and recorded to `<state-dir>/denials.jsonl` (match and reason only — never
+the command string). It defaults on exactly when the jail is on; `DEEPAGENTS_NS_GUARD`
+overrides (`warn` = record without refusing, `0` = off).
+
+**It is a tripwire, not containment.** A string denylist is phrasing-blind:
+anything compiled from source, base64-decoded, or indirected through a variable
+passes straight through. Do not read it as making the relaxation safe — the
+boundary is still the container plus the jail's bind set. Its value is that the
+casual attempt is refused and, more importantly, leaves *evidence*.
+
 Two upstream rules explain why all five are needed:
 
 - `clone` is allowed upstream only when the flags word does **not** intersect

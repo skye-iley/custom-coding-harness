@@ -8,7 +8,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install pytest
-      - run: python -m pytest tests/test_mask.py tests/test_pathguard.py tests/test_doctor.py tests/test_cost.py tests/test_providers.py tests/test_archive.py tests/test_resilience.py tests/test_interrupt.py tests/test_audit.py tests/test_ratelimit.py tests/test_hostmap.py tests/test_jail.py tests/test_seccomp.py
+      - run: python -m pytest tests/test_mask.py tests/test_pathguard.py tests/test_doctor.py tests/test_cost.py tests/test_providers.py tests/test_archive.py tests/test_resilience.py tests/test_interrupt.py tests/test_audit.py tests/test_ratelimit.py tests/test_hostmap.py tests/test_jail.py tests/test_seccomp.py tests/test_nsguard.py
         working-directory: deepagent-image/project
       # M4 slice H invariant 31: the vendored seccomp profile must stay Docker's
       # default plus exactly five relaxed syscalls. Catches a swap to
@@ -26,6 +26,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build --target runtime -t deepagent-harness deepagent-image
+      # smoke.sh now also runs the M4 slice H jail gate (bwrap must really unshare
+      # under seccomp/userns.json, and a masked path must read empty inside the
+      # jail with no docker mask in play). It SELF-SKIPS (rc 77) on a host that
+      # cannot nest user namespaces, so it cannot redden CI environmentally.
+      #
+      # Deliberately NOT pinned with JAIL_CHECK=1 yet: whether a GitHub-hosted
+      # runner permits nested userns here is unverified, and pinning it before
+      # one green run would make CI fail for a reason unrelated to the boundary.
+      # Once a run shows "M4 jail: ... ok" rather than "SKIPPED", set
+      # JAIL_CHECK=1 here so a regression that silently disables the jail fails
+      # the build instead of quietly downgrading to a skip.
       - run: deepagent-image/scripts/smoke.sh
   parity:
     runs-on: ubuntu-latest

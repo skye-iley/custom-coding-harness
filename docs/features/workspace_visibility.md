@@ -1,11 +1,12 @@
 # Workspace Visibility & Secret Masking — Feature Plan
 
 > **Status:** 🚧 In-progress (v1) — implemented under `docs/milestones/in-progress/milestone4.md`
-> (Real Trust Boundary), code on `feat/milestone_4`, slices A–G landed, not yet merged. The policy
+> (Real Trust Boundary), code on `feat/milestone_4`, slices **A–H landed**, not yet merged. The policy
 > (`.agentignore` gitignore-parity, 3-tier policy, designated-secret floor), docker mount-mask,
 > path-guard middleware, `permission_denied` interrupt wiring, `harness doctor`, CI pipeline, and
 > security test suite are built. **Slice H (bwrap fs-tool jail) is core v1 scope, not stretch, and is
-> not yet built** — the milestone does not close without it (see `milestone4.md` §3/§14).
+> now built — opt-in via `DEEPAGENTS_JAIL=1`** (§4.2 below), off by default because it needs a narrow
+> seccomp relaxation on the outer container (see `milestone4.md` §16 fork 7).
 > Named
 > feature-plan doc (not a numbered milestone). Referenced from `design_doc.md` §2 (Sandbox &
 > Isolation). Wins over `design_doc.md` for the mechanics of *which workspace paths an agent can see*.

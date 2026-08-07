@@ -44,6 +44,11 @@ on user code inside a separate **workspace** conda env. `project/main.py` is the
   `/project/workspace-seed/` in the image; the real workspace is bind-mounted at run time.
 - `scripts/` — `build`, `run-docker`, `verify`, `smoke`, `sync-models` in both `.ps1` (Windows)
   and `.sh`. `sync-models` is a dev-time registry refresh (see Model routing).
+  `jail-check.py` is the odd one out: a single cross-platform Python script (no `.ps1`/`.sh` pair)
+  driven by `smoke` to verify the M4 slice H bwrap jail actually holds in the built image. It lives
+  here rather than in `tests/` because it only means anything when the container was started with
+  `--security-opt seccomp=seccomp/userns.json`, which a test running *inside* the container cannot
+  set for itself. Exit 77 = skipped (host can't nest userns), 1 = boundary regression.
 - `netjail/` — opt-in deny-all-egress network jail for `run-docker` (`NET_JAIL=1` / `-NetJail`):
   the agent runs on an `--internal` network and reaches only the host ports and internet domains
   declared in `host-services.txt` / `allowed-domains.txt`. See `netjail/README.md`. Core mechanics
@@ -576,6 +581,9 @@ The harness can enforce a trust boundary on the workspace filesystem:
 - `DEEPAGENTS_AGENTIGNORE` (default ".agentignore"): Override the in-workspace config filename.
 - `DEEPAGENTS_JAIL` (default **0, off**): Route all fs tools + the shell through a bubblewrap jail
   (slice H). See "bwrap fs jail" below — enabling it also requires the narrow seccomp profile.
+- `DEEPAGENTS_NS_GUARD` (default: **tracks `DEEPAGENTS_JAIL`**): shell-tool denylist for the namespace
+  syscalls the jail's seccomp profile re-permits container-wide. `warn` = record without refusing,
+  `0` = off, `1` = force on with the jail off. See "bwrap fs jail" below.
 
 ### bwrap fs jail (slice H, opt-in)
 
@@ -598,6 +606,22 @@ creation, so the jail needs `--security-opt seccomp=deepagent-image/seccomp/user
 default with exactly five syscalls relaxed (`clone`, `unshare`, `mount`, `umount2`, `pivot_root`).
 That relaxation grants no privilege (the kernel still enforces capabilities) but does expose kernel
 userns attack surface, so turning it on is a deliberate trade. See `seccomp/README.md`.
+
+**The relaxation is container-wide, and `harness/nsguard.py` is the backstop.** `--security-opt` is a
+`docker run` flag — it cannot be scoped to the harness process — so enabling the jail hands the
+*agent's shell* those same five syscalls. `nsguard` denylists the common routes at the shell seam:
+`unshare`/`nsenter`/`mount`/`chroot`/`bwrap`/container runtimes in command position (basename-matched,
+sees past `sudo`/`timeout` wrappers, scans every `&&`/`;`/`|` segment), plus `CLONE_NEW*`, `unshare(`,
+`setns(`, raw `syscall(272|155|308)` anywhere — the interpreter one-liner route. A hit is refused,
+printed to stderr regardless of HITL, and (HITL on) recorded to `<state-dir>/denials.jsonl` with the
+**match and reason only, never the command string** (a command can carry workspace content).
+Defaults on exactly when the jail is on, so the removable contract is untouched;
+`DEEPAGENTS_NS_GUARD=warn` records without refusing, `=0` disables, `=1` forces it on with the jail off.
+
+**It is a tripwire, not containment — never describe it as sandboxing.** A string denylist is
+phrasing-blind (the same caveat as `review_triggers`, where a denied `rm -rf` came back as `rmdir`);
+anything compiled, base64-decoded, or indirected passes. The value is that a casual escape attempt is
+refused and leaves evidence instead of silence.
 
 `run-docker.{ps1,sh}` pass the profile automatically when `DEEPAGENTS_JAIL` is on, and **fail closed**
 if it is missing rather than launching unjailed. `harness doctor` verifies the profile is still
