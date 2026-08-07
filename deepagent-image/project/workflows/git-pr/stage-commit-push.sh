@@ -11,15 +11,33 @@ git add -A
 # still guards the default in-workspace `.deepagents` layout.
 git reset -q -- .deepagents .agent_telemetry 2>/dev/null || true
 
-# M4: exclude resolved mask set from staging so masked secrets are never pushed.
-# Runs mask-scan inside the agent container (state dir is writable here).
+# M4 (§15.1): exclude the resolved mask set from staging so masked secrets are
+# never pushed. Reads the FROZEN <state>/mask-snapshot.txt written by the
+# host-side pre-flight scan at launch — never re-runs mask-scan here. A live
+# rescan would reflect whatever .agentignore currently says, and the workspace
+# .agentignore is agent-writable; an agent (or prompt injection) could delete a
+# mask entry mid-session and a rescan would then fail to exclude a path whose
+# content is still frozen-empty in the real mounted fs, letting the empty
+# version get committed over the real secret. The snapshot is the one thing
+# that can't be tampered with post-launch (state dir is agent-unreachable).
 if [ "${DEEPAGENTS_MASK:-1}" != "0" ]; then
-  mask_scan_output=$(python3 -m harness mask-scan "$PWD" "${DEEPAGENTS_STATE_DIR:-$PWD/.deepagents}" 2>/dev/null) || true
-  if [ -n "$mask_scan_output" ]; then
-    echo "$mask_scan_output" | while IFS=' ' read -r mode type tier relpath rest; do
-      relpath="$(printf '%s' "$relpath" | sed 's/%20/ /g')"
+  mask_state_dir="${DEEPAGENTS_STATE_DIR:-$PWD/.deepagents}"
+  mask_snapshot="$mask_state_dir/mask-snapshot.txt"
+  # Normal path: the launcher already froze this snapshot before the container
+  # started (invariant: exclusion keys off the frozen set, never a live
+  # rescan — see the comment above). If it's missing — masking was enabled
+  # without going through the normal launch flow — fall back to scanning now
+  # rather than leaving the masked path unexcluded and letting its blanked
+  # content get committed over the real secret.
+  if [ ! -f "$mask_snapshot" ]; then
+    python3 -m harness mask-scan "$PWD" "$mask_state_dir" >/dev/null 2>&1 || true
+  fi
+  if [ -f "$mask_snapshot" ]; then
+    while IFS=' ' read -r tier relpath; do
+      relpath="${relpath%$(printf '\r')}"  # defensive: strip a stray CR (CRLF-written snapshot)
+      [ -n "$relpath" ] || continue
       git reset -q -- "$relpath" 2>/dev/null || true
-    done
+    done < "$mask_snapshot"
   fi
 fi
 

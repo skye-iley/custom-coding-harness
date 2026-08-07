@@ -584,11 +584,13 @@ id_rsa
 
 #!mode:allow
 
-# Paths the agent CAN see (gitignore negation):
-!src/
-!tests/
-!README.md
-!package.json
+# Paths the agent CAN see — PLAIN patterns, not negation. In allow mode a
+# plain pattern match IS the allow-list entry (the resolver flips it visible);
+# `!`-negation has no special meaning here and does NOT allow-list a path.
+src/
+tests/
+README.md
+package.json
 
 # Everything else is hidden (including defaults like .env)
 ```

@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from harness import audit, interrupt
+from harness import archive, audit, interrupt, pathguard
 from harness._compat import compat_import
 from harness.config import Config, match_triggers
 from harness.interrupt import (
@@ -181,7 +181,12 @@ def resolve_value(
 
     Headless (no human): apply the §6 fail-closed policy — fall through to the
     default, deny an approve, or abort (raising ``InterruptAborted``). Interactive:
-    ask the channel. ``resolved_by`` is "human" | "headless-default" | "denied"."""
+    ask the channel. ``resolved_by`` is "human" | "headless-default" | "denied".
+
+    A fourth value, **"system"**, appears in the audit trail but never comes from
+    here: ``make_path_denied_handler`` records a decision that was never offered to
+    anyone (see its ``meta["audit_only"]``), bypassing this resolution path
+    entirely."""
     if headless or channel is None:
         decision = headless_decision(
             request,
@@ -323,6 +328,122 @@ def make_ask_human_tool(default_source: str = interrupt.SOURCE_ASK_HUMAN):
         return interrupt.raise_interrupt(request)
 
     return ask_human
+
+
+# --- S4: permission_denied system interrupt (M4 slice D) --------------------
+
+
+def make_path_denied_handler(workspace: Path):
+    """Build the ``on_path_denied`` callback ``_WorkspaceShellBackend`` calls on a
+    path-guard denial (M4 slice D — completes the M3 S4 follow-up).
+
+    ``pathguard.validate_path`` only ever denies a true workspace escape
+    (``commonpath`` mismatch — traversal, absolute path, symlink-out); it has no
+    floor/mask awareness, that leg is deferred to the bwrap slice (H). A true
+    escape is **never approvable** — honoring an operator "yes" here would let a
+    single mis-click defeat the path guard (design_doc.md §2 threat model) — so
+    this does not suspend the graph or offer a choice. It writes a structured
+    record of the denial, then always denies.
+
+    **The record goes to the state dir, not the workspace.** A denial is evidence
+    that the agent tried to escape; parking that evidence in
+    ``<workspace>/.agent_telemetry/`` would leave it in-bounds for the agent's own
+    file tools to truncate. ``audit.denials_path(archive.state_dir(workspace))``
+    puts it outside the workspace mount, the same isolation M2 gave ``past.sqlite``
+    (M4 invariant 20). Two limits, both inherited from that M2 seam and neither
+    hidden: it is **not shell-proof** until the bwrap jail (slice H) — the shell tool
+    is bounded by the container root, not the path guard, so it can still reach the
+    state dir by absolute path; and it depends on ``DEEPAGENTS_STATE_DIR`` being set
+    (``run-docker`` always sets it to ``/project/state``), because ``state_dir``
+    otherwise falls back to ``<workspace>/.deepagents`` — in-workspace, and back
+    within reach of the agent's file tools.
+
+    Wired only when HITL is on and the ``permission_denied`` system interrupt is
+    enabled (``cli.main``); ``on_path_denied=None`` (HITL off, or the interrupt
+    disabled) skips this structured record. The operator-visible stderr line is
+    **not** gated on any of that — it is emitted by the backend itself
+    (``agent._resolve_path``) so an escape attempt is never silent.
+    """
+    sink = audit.denials_path(archive.state_dir(workspace))
+
+    def _on_path_denied(resolved: str, base: str) -> bool:
+        relpath = pathguard.relative_to(resolved, base) if base else resolved
+        request = new_request(
+            interrupt.KIND_APPROVE,
+            f"path-guard denied an out-of-workspace access: {relpath}",
+            default=False,
+            source=interrupt.SOURCE_SYSTEM,
+            # audit_only: no human was ever asked. Without it a replay reads
+            # `kind=approve, resolved_value=False` as "someone declined", when in
+            # fact nothing was offered — this denial type has no approve branch.
+            meta={
+                "path": relpath,
+                "op": "file",
+                "reason": "workspace escape",
+                "audit_only": True,
+            },
+        )
+        try:
+            audit.record_interrupt(
+                workspace, request, False, resolved_by="system", sink=sink
+            )
+        except Exception as exc:  # noqa: BLE001 -- an audit write must never fail a turn
+            # Never silent: this is the record of a boundary violation, so a
+            # failed write is itself worth surfacing (matches the other three
+            # record_interrupt call sites, which all report to stderr).
+            print(
+                f"[harness] audit: failed to record path denial ({exc})",
+                file=sys.stderr,
+            )
+        return False
+
+    return _on_path_denied
+
+
+def make_command_denied_handler(workspace: Path):
+    """Build the ``on_command_denied`` callback the shell backend calls when the
+    namespace guard trips (M4 slice H backstop — see ``nsguard``).
+
+    Same shape and same reasoning as ``make_path_denied_handler``: no human is
+    ever asked (there is nothing to approve — the agent's shell has no legitimate
+    use for ``unshare``/``mount``/``pivot_root``), so this records and returns.
+
+    **The record goes to the state dir**, not the workspace, for the same reason:
+    an attempt to escape the namespace is evidence, and evidence parked in
+    ``<workspace>/.agent_telemetry/`` is in-bounds for the agent's own file tools
+    to truncate (invariant 20 / 17a).
+
+    Only the matched token and the reason are persisted — **never the command
+    string**, which can carry workspace content and would turn the audit trail
+    into an exfiltration channel of its own (the §10 no-contents backstop).
+    """
+    sink = audit.denials_path(archive.state_dir(workspace))
+
+    def _on_command_denied(match: str, reason: str, mode: str) -> None:
+        request = new_request(
+            interrupt.KIND_APPROVE,
+            f"namespace guard {mode}ed a shell command: {reason}",
+            default=False,
+            source=interrupt.SOURCE_SYSTEM,
+            meta={
+                "match": match,
+                "op": "shell",
+                "reason": reason,
+                "mode": mode,
+                "audit_only": True,
+            },
+        )
+        try:
+            audit.record_interrupt(
+                workspace, request, False, resolved_by="system", sink=sink
+            )
+        except Exception as exc:  # noqa: BLE001 -- an audit write must never fail a turn
+            print(
+                f"[harness] audit: failed to record namespace denial ({exc})",
+                file=sys.stderr,
+            )
+
+    return _on_command_denied
 
 
 # --- S2: deterministic pause gate --------------------------------------------

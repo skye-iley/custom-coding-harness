@@ -462,3 +462,79 @@ def test_git_pr_excludes_masked_secret_from_staging(tmp_path):
         ["git", "show", "HEAD:app.py"], cwd=repo, capture_output=True, text=True, check=True
     ).stdout
     assert head_app == "x = 2\n"
+
+
+@pytest.mark.skipif(not (_HAS_SH and _HAS_GIT), reason="needs sh and git")
+def test_git_pr_exclusion_survives_agentignore_tampering(tmp_path):
+    """§15.1 regression: the exclusion list must come from the FROZEN
+    <state>/mask-snapshot.txt, not a live re-scan of the workspace .agentignore.
+
+    A general/user-tier mask entry (unlike the hardcoded .env pattern-default)
+    lives in the workspace's own .agentignore — which the agent can edit. If
+    git-pr recomputed the mask set live at commit time, an agent deleting that
+    line mid-session would make the recompute stop excluding the path, even
+    though the real mounted fs is still frozen-empty for it (the docker overlay
+    was fixed at launch) — so the emptied content would get committed over the
+    real secret. This asserts the frozen snapshot is used instead: the .env
+    entry is removed from .agentignore mid-session and the file's content still
+    isn't committed as empty.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
+
+    git("init", "-q")
+    git("config", "user.email", "t@t")
+    git("config", "user.name", "t")
+    git("config", "commit.gpgsign", "false")
+
+    (repo / "private").mkdir()
+    (repo / "private" / "notes.md").write_text("REALPRIVATE=1\n", encoding="utf-8")
+    (repo / ".agentignore").write_text("private/notes.md\n", encoding="utf-8")
+    (repo / "app.py").write_text("x = 1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "seed")
+
+    # Simulate the container view: the docker mask overlay (frozen at launch,
+    # when .agentignore still had the entry) makes the file read EMPTY.
+    (repo / "private" / "notes.md").write_text("", encoding="utf-8")
+    (repo / "app.py").write_text("x = 2\n", encoding="utf-8")
+
+    # The launch-time scan wrote this snapshot before the agent could touch
+    # anything — it's what the exclusion must key off.
+    state = tmp_path / "state"
+    state.mkdir()
+    # newline="\n": _write_snapshot runs inside the Linux container and never
+    # CRLFs this file; force LF here so a Windows test host doesn't inject a
+    # \r that the real production write path would never produce.
+    (state / "mask-snapshot.txt").write_text("user private/notes.md\n", encoding="utf-8", newline="\n")
+    (state / "session.env").write_text(
+        "DEEPAGENTS_SESSION_ID=test\nDEEPAGENTS_SESSION_BRANCH=agent/test\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    # Mid-session tampering: the agent (or a prompt injection) deletes the
+    # .agentignore entry. The mount is already frozen, so this changes nothing
+    # about what the file actually reads — but it would fool a live re-scan.
+    (repo / ".agentignore").unlink()
+
+    env = dict(os.environ)
+    env["DEEPAGENTS_WORKSPACE"] = str(repo)
+    env["DEEPAGENTS_STATE_DIR"] = str(state)
+    env["PYTHONPATH"] = str(_PROJECT_ROOT)
+    subprocess.run(["sh", str(_STAGE_SCRIPT)], env=env, check=True, capture_output=True, text=True)
+
+    head_notes = subprocess.run(
+        ["git", "show", "HEAD:private/notes.md"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout
+    assert head_notes == "REALPRIVATE=1\n", (
+        "git-pr blanked a masked secret into the commit after .agentignore tampering "
+        "— exclusion must read the frozen mask-snapshot.txt, not a live re-scan"
+    )
+    head_app = subprocess.run(
+        ["git", "show", "HEAD:app.py"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout
+    assert head_app == "x = 2\n"

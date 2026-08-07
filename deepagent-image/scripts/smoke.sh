@@ -12,11 +12,22 @@
 #   KEEP_ARTIFACTS=1 ./smoke.sh # ship files that tests write via the `artifact_dir`
 #                               # fixture out to test-artifacts/<timestamp>/ on the host
 #                               # (default: they go to the container's tmp and vanish).
+#   JAIL_CHECK=1 ./smoke.sh     # REQUIRE the M4 slice H jail gate to pass. By default
+#                               # the gate runs but self-skips on a host that cannot
+#                               # build the jail — either the kernel/runtime refuses
+#                               # nested userns, or the host LSM denies bwrap's mounts;
+#                               # =1 turns that skip into a failure (pin the boundary).
+#   DEEPAGENTS_JAIL_APPARMOR=unconfined ./smoke.sh
+#                               # run the jail gate with AppArmor off for that container.
+#                               # Needed on Ubuntu/Debian Docker, where `docker-default`
+#                               # denies `mount` regardless of seccomp (milestone4.md
+#                               # §11.6). Drops the WHOLE profile, not just that rule.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NETJAIL_DIR="$ROOT/netjail"
 NET_JAIL="${NET_JAIL:-}"
 KEEP_ARTIFACTS="${KEEP_ARTIFACTS:-}"
+JAIL_CHECK="${JAIL_CHECK:-}"
 
 # ---------------------------------------------------------------------------
 # NetJail plumbing — mirror of run-docker.sh's NET_JAIL path. Kept in sync with
@@ -172,6 +183,63 @@ for launcher in run-docker.sh run-docker.ps1; do
 done
 echo "M4 fail-closed: mask-scan aborts on failure + launchers guard against unmasked launch — ok"
 
+# M4 slice H: the bwrap fs jail actually holds in the built image. This is the §3
+# hard gate ("bwrap --unshare-all must really run here"), plus the boundary
+# properties the jail is supposed to buy — asserted against the harness's own
+# jail.bwrap_args, with NO docker mask applied, so the jail is the only enforcer.
+# Needs the vendored narrow seccomp profile: Docker's default blocks unprivileged
+# userns creation by design, which is exactly why DEEPAGENTS_JAIL is opt-in.
+SECCOMP_PROFILE="$ROOT/seccomp/userns.json"
+if [[ ! -f "$SECCOMP_PROFILE" ]]; then
+  echo "M4 jail: $SECCOMP_PROFILE missing — run 'python3 -m harness seccomp-sync'" >&2
+  exit 1
+fi
+set +e
+# The script is piped in on stdin (`python3 -`) rather than bind-mounted. A bind
+# needs a container-side absolute path, and under Git Bash on Windows MSYS
+# rewrites a lone leading `/` into the host prefix (`/jail-check.py` ->
+# `C:/Program Files/Git/jail-check.py`), breaking the mount target. Neither
+# blanket fix works: MSYS_NO_PATHCONV=1 also un-converts the *host*-side seccomp
+# path the daemon needs, and a `//` escape gets mangled inside the `-v src:dst`
+# triple. stdin has no path to convert, so it is portable by construction.
+# M4 slice J (§11.6): on an AppArmor-confined host, seccomp is only half the gate —
+# Docker's `docker-default` profile denies `mount` outright, so bwrap fails after
+# `unshare` succeeds. Unset (the default) means we pass nothing and the check skips
+# on such a host. `unconfined` makes it run everywhere at the cost of dropping the
+# WHOLE profile, not just its `deny mount,` — a wider trade than the five relaxed
+# syscalls, so it is opt-in and announced, never a silent default.
+APPARMOR_ARGS=()
+if [[ -n "${DEEPAGENTS_JAIL_APPARMOR:-}" ]]; then
+  APPARMOR_ARGS=(--security-opt "apparmor=$DEEPAGENTS_JAIL_APPARMOR")
+  if [[ "$DEEPAGENTS_JAIL_APPARMOR" == "unconfined" ]]; then
+    echo "M4 jail: AppArmor DISABLED for this container (apparmor=unconfined) — drops docker-default entirely, not just its deny-mount rule." >&2
+  else
+    echo "M4 jail: using AppArmor profile '$DEEPAGENTS_JAIL_APPARMOR' (must already be loaded on the host)." >&2
+  fi
+fi
+docker run --rm -i ${NET_ARGS[@]+"${NET_ARGS[@]}"} ${PROXY_ENV[@]+"${PROXY_ENV[@]}"} \
+  --security-opt "seccomp=$SECCOMP_PROFILE" \
+  ${APPARMOR_ARGS[@]+"${APPARMOR_ARGS[@]}"} \
+  -e DEEPAGENTS_JAIL=1 \
+  deepagent-harness python3 - < "$ROOT/scripts/jail-check.py"
+jail_rc=$?
+set -e
+if [[ $jail_rc -eq 77 ]]; then
+  # Environmental, not a regression, for either reason the gate can report: the
+  # kernel/runtime refuses nested userns, or the host LSM denies bwrap's mounts.
+  # Only a hard failure when the caller pinned it (CI).
+  if [[ -n "$JAIL_CHECK" ]]; then
+    echo "M4 jail: JAIL_CHECK=1 was set but this host cannot build the jail (see the SKIPPED reason above) — failing." >&2
+    exit 1
+  fi
+  echo "M4 jail: SKIPPED (host cannot build the jail — see reason above). Set JAIL_CHECK=1 to require it."
+elif [[ $jail_rc -ne 0 ]]; then
+  echo "M4 jail: boundary check FAILED (rc=$jail_rc)" >&2
+  exit 1
+else
+  echo "M4 jail: bwrap gate + masked/unmasked/write/ro boundary checks — ok"
+fi
+
 # Full suite via pytest discovery on the test image. -v names every test case
 # (file::test PASSED/FAILED); -ra recaps non-passing tests at the end. Failures
 # print the failing test id, file:line, and asserted values by default.
@@ -179,4 +247,14 @@ docker run --rm ${NET_ARGS[@]+"${NET_ARGS[@]}"} ${PROXY_ENV[@]+"${PROXY_ENV[@]}"
   ${ARTIFACT_ARGS[@]+"${ARTIFACT_ARGS[@]}"} \
   deepagent-harness-test python3 -m pytest tests/ -v -ra
 
-[[ -n "$ARTIFACT_HOST_DIR" ]] && echo "Test artifacts saved under $ARTIFACT_HOST_DIR"
+# NOT `[[ -n "$X" ]] && echo …`: as the *last* statement that idiom makes the
+# script's exit status the status of the test, so a clean run with
+# KEEP_ARTIFACTS unset exited 1 and reported the whole smoke as failed. `set -e`
+# doesn't catch it (errexit skips the left side of a `&&` list) and it only bites
+# on the success path, so it stayed invisible until CI ran the script directly.
+if [[ -n "$ARTIFACT_HOST_DIR" ]]; then
+  echo "Test artifacts saved under $ARTIFACT_HOST_DIR"
+fi
+
+# Explicit: the script succeeded iff it reached here (set -e aborts otherwise).
+exit 0

@@ -342,10 +342,55 @@ mask_cleanup() {
   [[ -n "$EMPTY_DIR" && -d "$EMPTY_DIR" ]] && rm -rf "$EMPTY_DIR" 2>/dev/null || true
 }
 
+# M4 slice H: the bwrap fs jail needs the narrow seccomp profile, because Docker's
+# default profile blocks unprivileged user-namespace creation (see seccomp/README.md).
+# Off by default (§13) — enabling it trades a little outer-boundary attack surface
+# for a real inner boundary, so it is the operator's explicit call. Fail closed: if
+# the jail is asked for and the profile is missing, refuse to launch rather than run
+# unjailed while the operator believes otherwise.
+JAIL_ARGS=()
+jail_setup() {
+  local jail_mode="${DEEPAGENTS_JAIL:-$(_env_file_get DEEPAGENTS_JAIL)}"
+  case "${jail_mode:-0}" in
+    0 | false | no | off | "") return 0 ;;
+  esac
+  local profile="$ROOT/seccomp/userns.json"
+  if [[ ! -f "$profile" ]]; then
+    echo "[jail] FATAL: DEEPAGENTS_JAIL is on but $profile is missing — refusing to launch unjailed. Run 'python3 -m harness seccomp-sync' or set DEEPAGENTS_JAIL=0." >&2
+    exit 1
+  fi
+  JAIL_ARGS=(--security-opt "seccomp=$profile")
+  echo "Jail: bwrap fs jail ON (narrow seccomp profile)" >&2
+
+  # M4 slice J (§11.6): seccomp is only ONE of the two gates. On an AppArmor host
+  # (Ubuntu/Debian Docker) the generated `docker-default` profile carries a literal
+  # `deny mount,`, so bwrap gets past `unshare` and then fails at its first mount —
+  # and entering a user namespace does not shed AppArmor confinement, so nothing the
+  # jail does from inside can work around it. Until slice J vendors a narrowed
+  # profile, the operator's options are this knob or an unconfined host.
+  #
+  # Unset (default): pass nothing. The harness then fails CLOSED at startup with a
+  # diagnostic naming AppArmor (jail.preflight) rather than running unjailed.
+  local apparmor="${DEEPAGENTS_JAIL_APPARMOR:-$(_env_file_get DEEPAGENTS_JAIL_APPARMOR)}"
+  if [[ -n "$apparmor" ]]; then
+    JAIL_ARGS+=(--security-opt "apparmor=$apparmor")
+    if [[ "$apparmor" == "unconfined" ]]; then
+      echo "Jail: AppArmor DISABLED for this container (apparmor=unconfined)." >&2
+      echo "      This drops ALL of docker-default — the /proc and /sys write denials and the" >&2
+      echo "      ptrace peer restriction — not just its deny-mount rule. Wider than the five" >&2
+      echo "      relaxed syscalls DEEPAGENTS_JAIL alone costs. See milestone4.md §11.6." >&2
+    else
+      echo "Jail: AppArmor profile '$apparmor' (must already be loaded on the host via apparmor_parser)." >&2
+    fi
+  fi
+}
+jail_setup
+
 # Assemble the agent `docker run` invocation into an array. NET_ARGS / PROXY_ENV
 # are set either by netjail_up (jail mode) or to the bridge defaults below.
 build_agent_run() {
   AGENT_RUN=(docker run --rm $TTY_FLAGS
+    ${JAIL_ARGS[@]+"${JAIL_ARGS[@]}"}
     "${CAP_FLAGS[@]}"
     "${NET_ARGS[@]}"
     ${USER_FLAGS[@]+"${USER_FLAGS[@]}"}

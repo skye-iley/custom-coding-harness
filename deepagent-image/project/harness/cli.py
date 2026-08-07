@@ -22,7 +22,16 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 import json
 
-from harness import archive, audit, config as hitl_config, hitl, interrupt, refresh, resilience
+from harness import (
+    archive,
+    audit,
+    config as hitl_config,
+    hitl,
+    interrupt,
+    jail,
+    refresh,
+    resilience,
+)
 from harness.agent import (
     DEFAULT_TASK,
     build_agent,
@@ -732,6 +741,16 @@ def _run_turn_hitl(agent, text, config, *, stream, extra_messages, hitl_ctx):
             raise
 
 
+def _should_audit_path_denials(hitl_conf) -> bool:
+    """True when a path-guard denial should be wired to the permission_denied
+    audit trail (M4 slice D) -- HITL is on and the system interrupt is enabled.
+
+    Gates only the *structured* record (`<state-dir>/denials.jsonl`). The
+    operator-visible stderr line is emitted by the backend unconditionally, so an
+    escape attempt is never silent even with HITL off."""
+    return hitl_conf is not None and hitl_conf.system_interrupt_enabled("permission_denied")
+
+
 def _build_hitl_ctx(hitl_conf, workspace: Path, session, interactive: bool, headless: bool):
     """Assemble the per-run HitlContext, or None when HITL is off. The REPL
     channel reuses the same line-read seam the prompt loop uses (so history /
@@ -1077,6 +1096,10 @@ def dispatch(argv: list[str]) -> int:
         from harness.doctor import doctor_main
 
         return doctor_main(argv[1:])
+    if argv and argv[0] == "seccomp-sync":
+        from harness.seccomp import seccomp_sync_main
+
+        return seccomp_sync_main(argv[1:])
     return main()
 
 
@@ -1087,6 +1110,26 @@ def main() -> int:
 
     _stage("container loading")
     workspace = resolve_workspace(args.workspace)
+
+    # M4 slice H: re-exec into the bwrap fs jail before anything heavy loads, so
+    # every tool in this process -- file tools, shell, any future MCP fs tool --
+    # inherits the namespace. No-op unless DEEPAGENTS_JAIL=1 (off by default,
+    # §13); does not return when it does fire. Fatal if the jail was asked for
+    # and cannot be built: continuing unjailed would leave the operator believing
+    # in a boundary that is not there.
+    if jail.jail_enabled() and not jail.already_jailed():
+        _jail_state = archive.state_dir(workspace)
+        try:
+            jail.maybe_reexec(
+                workspace,
+                _jail_state,
+                jail.masked_from_snapshot(_jail_state, workspace),
+                empty_file=jail.ensure_empty_file(_jail_state),
+            )
+        except jail.JailUnavailable as exc:
+            print(f"[harness] fs jail unavailable: {exc}", file=sys.stderr)
+            return 2
+
     model = choose_model(args.model)
     validate_credentials(model)
 
@@ -1203,11 +1246,27 @@ def main() -> int:
                 if mask_tool is not None:
                     tools.append(mask_tool)
 
-            # M4: path-guard denial — pathguard only denies outright escapes,
-            # which are never approvable. No HITL interrupt for v1; the
-            # permission_denied system_interrupt seam is reserved for future
-            # in-bounds mask denials (§11.3 v1 honesty).
-            on_path_denied = None
+            # M4 slice D: path-guard denial -> permission_denied audit trail.
+            # pathguard only ever denies outright workspace escapes, which are
+            # never approvable (hitl.make_path_denied_handler), so this never
+            # suspends the graph for a decision -- it writes a structured record
+            # to <state-dir>/denials.jsonl (outside the workspace, so the agent
+            # cannot truncate the evidence of its own escape attempt). The
+            # always-on stderr denial line lives in agent._resolve_path.
+            on_path_denied = (
+                hitl.make_path_denied_handler(workspace)
+                if _should_audit_path_denials(hitl_conf)
+                else None
+            )
+            # Same seam for the namespace guard (nsguard): a shell command that
+            # reaches for the syscalls slice H's seccomp profile re-permits is
+            # refused by the backend regardless, and -- when HITL is on -- also
+            # recorded to the same out-of-workspace denials sink.
+            on_command_denied = (
+                hitl.make_command_denied_handler(workspace)
+                if _should_audit_path_denials(hitl_conf)
+                else None
+            )
 
             agent = build_agent(
                 chat_model,
@@ -1216,6 +1275,7 @@ def main() -> int:
                 middleware=middleware,
                 checkpointer=checkpointer,
                 on_path_denied=on_path_denied,
+                on_command_denied=on_command_denied,
             )
             if args.headless:
                 # P2: one-shot batch — run the task(s), emit one JSON result on

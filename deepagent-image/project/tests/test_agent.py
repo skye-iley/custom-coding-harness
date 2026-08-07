@@ -13,6 +13,8 @@ auto-removed, so nothing lands in the repo or the mounted workspace.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 pytest.importorskip("deepagents")  # image-only; skipped on a bare host
@@ -29,12 +31,14 @@ def test_resolve_workspace_outside_container_allows_any_path(tmp_path, monkeypat
     assert agent.resolve_workspace(str(tmp_path)) == tmp_path.resolve()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="posix container paths: '/project' resolves to C:\\project on Windows")
 def test_resolve_workspace_in_container_accepts_under_project(monkeypatch):
     monkeypatch.setenv("DEEPAGENTS_IN_CONTAINER", "1")
     assert agent.resolve_workspace("/project/workspace") == \
         __import__("pathlib").Path("/project/workspace")
 
 
+@pytest.mark.skipif(os.name == "nt", reason="posix container paths: '/project' resolves to C:\\project on Windows")
 def test_resolve_workspace_in_container_accepts_project_root(monkeypatch):
     # is_relative_to must treat /project itself as inside (the old startswith
     # check wrongly rejected it).
@@ -191,6 +195,102 @@ def test_backend_guards_upstream_resolve_path(workspace_sandbox):
     )
 
 
+# --- _WorkspaceShellBackend on_path_denied seam (M4 slice D) ---------------
+#
+# deepagents' own LocalShellBackend._resolve_path already rejects most
+# traversal/absolute-escape forms before our override's pathguard check even
+# runs (pathguard is a belt-and-suspenders backstop, per its module docstring).
+# So to exercise OUR guard-calling logic in isolation -- independent of exactly
+# which escape shapes the current upstream version happens to catch first --
+# these stub out the parent resolution to simulate an upstream that returns an
+# out-of-bounds path unchecked.
+
+def test_backend_calls_on_path_denied_on_escape(workspace_sandbox, monkeypatch):
+    outside = str(workspace_sandbox.parent / "evil" / "x")
+    monkeypatch.setattr(agent.LocalShellBackend, "_resolve_path", lambda self, key: outside)
+
+    seen = {}
+
+    def _on_denied(resolved, base):
+        seen["resolved"] = resolved
+        seen["base"] = base
+        return False  # never approve -- matches hitl.make_path_denied_handler
+
+    backend = agent._WorkspaceShellBackend(
+        root_dir=str(workspace_sandbox), virtual_mode=True, inherit_env=False, env={},
+        on_path_denied=_on_denied,
+    )
+    with pytest.raises(agent.PathGuardDenied):
+        backend._resolve_path("whatever")
+    assert seen == {"resolved": outside, "base": str(workspace_sandbox)}
+
+
+def test_backend_honors_true_return_from_on_path_denied(workspace_sandbox, monkeypatch):
+    # Generic seam test: if a callback ever DOES approve (True), the backend
+    # must not re-raise. hitl.make_path_denied_handler never returns True in
+    # v1 (tested separately) -- this proves the backend-side contract only.
+    outside = str(workspace_sandbox.parent / "evil" / "x")
+    monkeypatch.setattr(agent.LocalShellBackend, "_resolve_path", lambda self, key: outside)
+
+    backend = agent._WorkspaceShellBackend(
+        root_dir=str(workspace_sandbox), virtual_mode=True, inherit_env=False, env={},
+        on_path_denied=lambda resolved, base: True,
+    )
+    backend._resolve_path("whatever")  # should not raise
+
+
+def test_backend_denies_escape_without_a_handler(workspace_sandbox, monkeypatch):
+    # M4 invariant 18 (off-HITL = plain refusal). HITL off means on_path_denied is
+    # None -- the guard must still refuse. Previously only asserted indirectly via
+    # cli._should_audit_path_denials returning False, which says nothing about
+    # what the backend actually does.
+    outside = str(workspace_sandbox.parent / "evil" / "x")
+    monkeypatch.setattr(agent.LocalShellBackend, "_resolve_path", lambda self, key: outside)
+
+    backend = agent._WorkspaceShellBackend(
+        root_dir=str(workspace_sandbox), virtual_mode=True, inherit_env=False, env={},
+        on_path_denied=None,
+    )
+    with pytest.raises(agent.PathGuardDenied):
+        backend._resolve_path("whatever")
+
+
+@pytest.mark.parametrize("handler", [None, lambda resolved, base: False])
+def test_backend_reports_denial_on_stderr(workspace_sandbox, monkeypatch, capsys, handler):
+    # A workspace escape is never silent to the operator, HITL or not. Without
+    # this the only trace off-HITL is the tool-error string the MODEL reads back,
+    # which it can quietly route around. Must be stderr -- stdout is the headless
+    # JSON result contract.
+    outside = str(workspace_sandbox.parent / "evil" / "x")
+    monkeypatch.setattr(agent.LocalShellBackend, "_resolve_path", lambda self, key: outside)
+
+    backend = agent._WorkspaceShellBackend(
+        root_dir=str(workspace_sandbox), virtual_mode=True, inherit_env=False, env={},
+        on_path_denied=handler,
+    )
+    with pytest.raises(agent.PathGuardDenied):
+        backend._resolve_path("whatever")
+
+    captured = capsys.readouterr()
+    assert "path-guard DENIED" in captured.err
+    assert captured.out == ""
+
+
+def test_backend_stays_quiet_when_a_handler_approves(workspace_sandbox, monkeypatch, capsys):
+    # The denial line reports a REFUSAL. An approved access (unreachable in v1,
+    # see hitl.make_path_denied_handler) is not one, so it must not print.
+    outside = str(workspace_sandbox.parent / "evil" / "x")
+    monkeypatch.setattr(agent.LocalShellBackend, "_resolve_path", lambda self, key: outside)
+
+    backend = agent._WorkspaceShellBackend(
+        root_dir=str(workspace_sandbox), virtual_mode=True, inherit_env=False, env={},
+        on_path_denied=lambda resolved, base: True,
+    )
+    backend._resolve_path("whatever")
+
+    assert "DENIED" not in capsys.readouterr().err
+
+
 # --- build_agent prompt assembly (AGENTS.md append) ------------------------
 
 def test_build_agent_appends_agents_md(workspace_sandbox, monkeypatch):
@@ -281,3 +381,95 @@ def test_build_agent_appends_exclusion_middleware_when_env_set(workspace_sandbox
     monkeypatch.delenv("DEEPAGENTS_LEAN_TOOLS", raising=False)
     agent.build_agent("model:x", workspace_sandbox)
     assert not any(isinstance(m, agent._ExcludeToolsMiddleware) for m in captured["middleware"])
+
+
+# --- M4 slice H backstop: the namespace guard on the shell tool ---------------
+# The seccomp relaxation the jail needs is applied to the WHOLE container, so it
+# hands the agent's shell the same five syscalls. These cover the backend seam;
+# the matcher itself is host-tested in tests/test_nsguard.py.
+
+def _ns_backend(workspace, **kw):
+    return agent._WorkspaceShellBackend(
+        root_dir=str(workspace), virtual_mode=True, inherit_env=False, env={}, **kw
+    )
+
+
+def test_shell_refuses_namespace_command_under_the_jail(workspace_sandbox, monkeypatch, capsys):
+    monkeypatch.setattr(agent.jail, "jail_enabled", lambda: True)
+    monkeypatch.setattr(agent.jail, "already_jailed", lambda: False)
+    monkeypatch.delenv("DEEPAGENTS_NS_GUARD", raising=False)
+    monkeypatch.setattr(
+        agent.LocalShellBackend, "execute",
+        lambda self, command, **kw: pytest.fail("command must not reach the shell"),
+    )
+    backend = _ns_backend(workspace_sandbox)
+    with pytest.raises(agent.nsguard.NamespaceGuardDenied):
+        backend.execute("unshare -Ur /bin/sh")
+    # never silent to the operator, and on stderr so headless stdout stays clean
+    err = capsys.readouterr().err
+    assert "ns-guard DENIED" in err
+
+
+def test_shell_guard_is_inert_with_the_jail_off(workspace_sandbox, monkeypatch):
+    # Removable contract: no jail -> no seccomp relaxation -> nothing to
+    # compensate for, so the shell behaves exactly as it did in M3.
+    monkeypatch.setattr(agent.jail, "jail_enabled", lambda: False)
+    monkeypatch.setattr(agent.jail, "already_jailed", lambda: False)
+    monkeypatch.delenv("DEEPAGENTS_NS_GUARD", raising=False)
+    seen = {}
+    monkeypatch.setattr(
+        agent.LocalShellBackend, "execute",
+        lambda self, command, **kw: seen.update(cmd=command) or "ran",
+    )
+    backend = _ns_backend(workspace_sandbox)
+    assert backend.execute("unshare -Ur /bin/sh") == "ran"
+    assert seen["cmd"] == "unshare -Ur /bin/sh"
+
+
+def test_shell_guard_can_be_forced_on_without_the_jail(workspace_sandbox, monkeypatch):
+    monkeypatch.setattr(agent.jail, "jail_enabled", lambda: False)
+    monkeypatch.setattr(agent.jail, "already_jailed", lambda: False)
+    monkeypatch.setenv("DEEPAGENTS_NS_GUARD", "1")
+    backend = _ns_backend(workspace_sandbox)
+    with pytest.raises(agent.nsguard.NamespaceGuardDenied):
+        backend.execute("mount -o bind /a /b")
+
+
+def test_shell_guard_warn_mode_records_but_still_runs(workspace_sandbox, monkeypatch, capsys):
+    monkeypatch.setattr(agent.jail, "jail_enabled", lambda: True)
+    monkeypatch.setattr(agent.jail, "already_jailed", lambda: False)
+    monkeypatch.setenv("DEEPAGENTS_NS_GUARD", "warn")
+    monkeypatch.setattr(agent.LocalShellBackend, "execute", lambda self, command, **kw: "ran")
+    calls = []
+    backend = _ns_backend(
+        workspace_sandbox,
+        on_command_denied=lambda match, reason, mode: calls.append((match, mode)),
+    )
+    assert backend.execute("unshare -Ur sh") == "ran"
+    assert calls == [("unshare", "warn")]
+    assert "ns-guard WARNING" in capsys.readouterr().err
+
+
+def test_shell_guard_notifies_the_audit_seam_on_block(workspace_sandbox, monkeypatch):
+    monkeypatch.setattr(agent.jail, "jail_enabled", lambda: True)
+    monkeypatch.setattr(agent.jail, "already_jailed", lambda: False)
+    monkeypatch.delenv("DEEPAGENTS_NS_GUARD", raising=False)
+    calls = []
+    backend = _ns_backend(
+        workspace_sandbox,
+        on_command_denied=lambda match, reason, mode: calls.append((match, reason, mode)),
+    )
+    with pytest.raises(agent.nsguard.NamespaceGuardDenied):
+        backend.execute("nsenter -t 1 -m sh")
+    assert len(calls) == 1
+    match, reason, mode = calls[0]
+    assert match == "nsenter" and mode == "block"
+
+
+def test_shell_guard_lets_ordinary_commands_through(workspace_sandbox, monkeypatch):
+    monkeypatch.setattr(agent.jail, "jail_enabled", lambda: True)
+    monkeypatch.setattr(agent.jail, "already_jailed", lambda: False)
+    monkeypatch.delenv("DEEPAGENTS_NS_GUARD", raising=False)
+    monkeypatch.setattr(agent.LocalShellBackend, "execute", lambda self, command, **kw: "ran")
+    backend = _ns_backend(workspace_sandbox)
+    assert backend.execute("pytest tests/ -v") == "ran"

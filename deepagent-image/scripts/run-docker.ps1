@@ -314,8 +314,17 @@ if ($MaskMode -eq "" -or $MaskMode -eq "1") {
     ) + $ScanModeArgs + @(
         "deepagent-harness", "python3", "-m", "harness", "mask-scan"
     )
+    # Native command stderr must not become a terminating error under
+    # ErrorActionPreference=Stop (see Remove-ContainerIfExists above) — mask-scan
+    # writes EXPECTED warnings to stderr (protection-reduction, floor-negation),
+    # and without this override the launcher would crash on any of them instead
+    # of printing and continuing per invariant 24 ("protection reduction is loud",
+    # not fatal).
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     $scanOutput = & docker @scanRunArgs 2>$scanErr.FullName
     $scanRc = $LASTEXITCODE
+    $ErrorActionPreference = $prevEap
     if ((Get-Item $scanErr.FullName).Length -gt 0) {
         Get-Content $scanErr.FullName | ForEach-Object { Write-Host $_ }
     }
@@ -340,9 +349,61 @@ if ($MaskMode -eq "" -or $MaskMode -eq "1") {
     }
 }
 
+# M4 slice H: the bwrap fs jail needs the narrow seccomp profile, because Docker's
+# default profile blocks unprivileged user-namespace creation (see seccomp/README.md).
+# Off by default (§13) - enabling it trades a little outer-boundary attack surface
+# for a real inner boundary, so it is the operator's explicit call. Fail closed: if
+# the jail is asked for and the profile is missing, refuse to launch rather than run
+# unjailed while the operator believes otherwise.
+$JailArgs = @()
+$JailMode = $env:DEEPAGENTS_JAIL
+if (-not $JailMode) {
+    $jailLine = Select-String -Path $EnvFile -Pattern '^\s*DEEPAGENTS_JAIL\s*=' -ErrorAction SilentlyContinue | Select-Object -Last 1
+    if ($jailLine) {
+        $JailMode = ($jailLine.Line -replace '^\s*DEEPAGENTS_JAIL\s*=', '').Trim().Trim('"').Trim("'")
+    }
+}
+if ($JailMode -and $JailMode -notin @("0", "false", "no", "off")) {
+    $SeccompProfile = Join-Path $PSScriptRoot "..\seccomp\userns.json"
+    if (-not (Test-Path $SeccompProfile)) {
+        Write-Error "[jail] FATAL: DEEPAGENTS_JAIL is on but $SeccompProfile is missing - refusing to launch unjailed. Run 'python3 -m harness seccomp-sync' or set DEEPAGENTS_JAIL=0."
+        exit 1
+    }
+    $JailArgs = @("--security-opt", "seccomp=$((Resolve-Path $SeccompProfile).Path)")
+    Write-Host "Jail: bwrap fs jail ON (narrow seccomp profile)"
+
+    # M4 slice J (§11.6): seccomp is only ONE of the two gates. On an AppArmor host
+    # (Ubuntu/Debian Docker) the generated `docker-default` profile carries a literal
+    # `deny mount,`, so bwrap gets past `unshare` and then fails at its first mount -
+    # and entering a user namespace does not shed AppArmor confinement, so nothing the
+    # jail does from inside can work around it. Until slice J vendors a narrowed
+    # profile, the operator's options are this knob or an unconfined host.
+    #
+    # Unset (default): pass nothing. The harness then fails CLOSED at startup with a
+    # diagnostic naming AppArmor (jail.preflight) rather than running unjailed.
+    $Apparmor = $env:DEEPAGENTS_JAIL_APPARMOR
+    if (-not $Apparmor) {
+        $aaLine = Select-String -Path $EnvFile -Pattern '^\s*DEEPAGENTS_JAIL_APPARMOR\s*=' -ErrorAction SilentlyContinue | Select-Object -Last 1
+        if ($aaLine) {
+            $Apparmor = ($aaLine.Line -replace '^\s*DEEPAGENTS_JAIL_APPARMOR\s*=', '').Trim().Trim('"').Trim("'")
+        }
+    }
+    if ($Apparmor) {
+        $JailArgs += @("--security-opt", "apparmor=$Apparmor")
+        if ($Apparmor -eq "unconfined") {
+            Write-Host "Jail: AppArmor DISABLED for this container (apparmor=unconfined)."
+            Write-Host "      This drops ALL of docker-default - the /proc and /sys write denials and the"
+            Write-Host "      ptrace peer restriction - not just its deny-mount rule. Wider than the five"
+            Write-Host "      relaxed syscalls DEEPAGENTS_JAIL alone costs. See milestone4.md 11.6."
+        } else {
+            Write-Host "Jail: AppArmor profile '$Apparmor' (must already be loaded on the host via apparmor_parser)."
+        }
+    }
+}
+
 $dockerArgs = @(
     "run", "--rm"
-) + $TtyFlags + @(
+) + $TtyFlags + $JailArgs + @(
     "--cpus", $Cpus,
     "--memory", $Memory,
     "--pids-limit", $PidsLimit

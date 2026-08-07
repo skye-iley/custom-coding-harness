@@ -1,10 +1,12 @@
 # Workspace Visibility & Secret Masking — Feature Plan
 
 > **Status:** 🚧 In-progress (v1) — implemented under `docs/milestones/in-progress/milestone4.md`
-> (Real Trust Boundary), code on `feat/milestone_4`, slices A–G landed, not yet merged. The policy
+> (Real Trust Boundary), code on `feat/milestone_4`, slices **A–H landed**, not yet merged. The policy
 > (`.agentignore` gitignore-parity, 3-tier policy, designated-secret floor), docker mount-mask,
 > path-guard middleware, `permission_denied` interrupt wiring, `harness doctor`, CI pipeline, and
-> security test suite are built. Stretch H (bwrap fs-tool jail) is not yet built.
+> security test suite are built. **Slice H (bwrap fs-tool jail) is core v1 scope, not stretch, and is
+> now built — opt-in via `DEEPAGENTS_JAIL=1`** (§4.2 below), off by default because it needs a narrow
+> seccomp relaxation on the outer container (see `milestone4.md` §16 fork 7).
 > Named
 > feature-plan doc (not a numbered milestone). Referenced from `design_doc.md` §2 (Sandbox &
 > Isolation). Wins over `design_doc.md` for the mechanics of *which workspace paths an agent can see*.
@@ -103,7 +105,7 @@ expose a designated secret, and warns.
 | Layer | Model | Covers | Absence | Status |
 |---|---|---|---|---|
 | **4.1 Docker mount mask** | deny-list | **all tools** (file + shell + any proc — real fs) | present-but-empty | buildable now |
-| **4.2 bwrap fs-tool jail** | **allow-list** | shell **+ all fs-touching file tools** (once routed) | true absent | `sandbox-exec` built, not wired |
+| **4.2 bwrap fs-tool jail** | **allow-list** | shell **+ all fs-touching file tools** | true absent | **built, opt-in** (`DEEPAGENTS_JAIL=1`) |
 | **4.3 overlayfs view** | allow-list | all tools, tool-agnostic | true absent | optional extension, not built |
 
 ### 4.1 Docker mount mask (interim, approved for v1)
@@ -123,14 +125,26 @@ expose a designated secret, and warns.
 
 ### 4.2 bwrap fs-tool jail (the real allow-list boundary)
 
-The design's real boundary (`design_doc.md` §2, L245/L857). `scripts/sandbox-exec.sh` exists but is
-**built-not-wired**, and nested-userns-in-docker is **unverified** (`design_doc.md` §2, ~L87-91).
+> **Status: BUILT (M4 slice H), opt-in via `DEEPAGENTS_JAIL=1`.** Nested-userns-in-docker is now
+> **verified**: it fails under Docker's default seccomp and works under a vendored **narrow** profile
+> (Docker's default + exactly `clone`/`unshare`/`mount`/`umount2`/`pivot_root`, see
+> `deepagent-image/seccomp/README.md`). Off by default because that relaxation exposes kernel
+> user-namespace surface — a deliberate operator trade, not a silent default.
+>
+> **Routing is by re-exec, not per-tool.** The harness re-execs *itself* into the bwrap namespace at
+> startup (`harness/jail.py`), so the in-process file tools inherit it with upstream deepagents code
+> running untouched — no per-tool wrapper, no reimplementation, no per-op cost. The shell tool then
+> runs in a **nested** jail via `sandbox-exec` binding only the workspace, which closes the standing
+> gap where the shell could reach the state dir by absolute path. The per-tool alternatives were
+> costed and rejected: a jailed worker cannot import deepagents (~2.2 s per call), so it would have
+> had to reimplement the file-tool method bodies. See `milestone4.md` §11.4 and §16 fork 8.
+
+The design's real boundary (`design_doc.md` §2, L245/L857).
 
 - **Route ALL fs-touching tools through the jail, not just the shell.** deepagents' file tools
-  (read / write / edit / ls / glob) run **in-process** today and read the container's real fs — so
-  bwrap over the shell alone leaves the file tools bypassing it. Close the gap by executing every
-  fs tool inside the agent's bwrap namespace (per-tool `sandbox-exec`, or a persistent jailed
-  tool-executor), so the **same bind whitelist** gates shell and file access uniformly.
+  (read / write / edit / ls / glob) run **in-process** and read the container's real fs — so
+  bwrap over the shell alone would leave the file tools bypassing it. Solved structurally: the whole
+  *process* is in the namespace, so every tool in it is, including any future MCP fs tool.
 - Binds sourced from the resolved policy: allow-list mode binds only listed base dirs; workspace
   bound writable so agent-created files persist; designated secrets **never** bound.
 - **Verify nested userns runs first** (may need `--security-opt` / userns tweaks); until wired +

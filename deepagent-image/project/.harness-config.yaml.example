@@ -36,4 +36,8 @@ on_deny: halt
 system_interrupts:
   missing_price: true       # surface before untracked spend accrues (M1 ledger)
   provider_error: true      # after P1 retry/backoff is exhausted: retry / abort
-  permission_denied: true   # a path-guard / NetJail / bwrap denial → allow once / deny
+  permission_denied: true   # path-guard denial → structured record in <state-dir>/denials.jsonl.
+                            # Audit-only: never offers "allow once". Every denial the
+                            # guard can raise today is a true workspace escape, which is
+                            # never approvable. The operator-visible stderr line is always
+                            # emitted, with or without this key.

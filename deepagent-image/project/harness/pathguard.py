@@ -30,12 +30,18 @@ class PathGuardDenied(PermissionError):
     def __init__(self, target: str, base: str, reason: str = "path traversal"):
         self.target = target
         self.base = base
-        self.relpath = _relative(target, base) if base else target
+        self.relpath = relative_to(target, base) if base else target
         super().__init__(f"{reason}: {target} (base: {base})")
 
 
-def _relative(target: str, base: str) -> str:
-    """Best-effort relpath computation for the audit trail."""
+def relative_to(target: str, base: str) -> str:
+    """Best-effort relpath computation for the audit trail.
+
+    ``os.path.relpath`` *raises* on inputs a denial can legitimately produce (a
+    different Windows drive; an empty path on posix), and every caller here is
+    already inside an exception path where a second exception would replace the
+    real ``PathGuardDenied``. So it never raises — it degrades to the absolute
+    target instead."""
     try:
         return os.path.relpath(target, base)
     except (ValueError, OSError):

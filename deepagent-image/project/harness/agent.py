@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import os
+import shlex
+import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from deepagents import create_deep_agent
 from deepagents.backends import LocalShellBackend
 from langchain.agents.middleware.types import AgentMiddleware
 
+from harness import jail, nsguard
 from harness.loaders import _read_optional_text
 from harness.mask import append_deny
 from harness.pathguard import PathGuardDenied, validate_path
@@ -181,7 +184,7 @@ class _WorkspaceShellBackend(LocalShellBackend):
     (see tests/test_agent.py::test_backend_guards_upstream_resolve_path).
     """
 
-    def __init__(self, *args, on_path_denied=None, **kwargs):
+    def __init__(self, *args, on_path_denied=None, on_command_denied=None, **kwargs):
         if not any(
             "_resolve_path" in klass.__dict__ for klass in LocalShellBackend.__mro__
         ):
@@ -191,7 +194,72 @@ class _WorkspaceShellBackend(LocalShellBackend):
                 "upstream backend API and update the override."
             )
         self._on_path_denied = on_path_denied
+        self._on_command_denied = on_command_denied
         super().__init__(*args, **kwargs)
+
+    def _guard_namespace_syscalls(self, command: str) -> None:
+        """Refuse shell commands that reach for the relaxed namespace syscalls.
+
+        Slice H's seccomp profile re-permits `clone`/`unshare`/`mount`/`umount2`/
+        `pivot_root` for the **whole container** — the filter is a `docker run`
+        flag, so it cannot be scoped to the harness process alone. That hands the
+        agent's shell the same five syscalls. This is the compensating denylist
+        (milestone4.md §11.5).
+
+        It is a tripwire, not containment: a string denylist is phrasing-blind and
+        anything compiled, encoded, or indirected gets through. Its value is that
+        the casual attempt is refused *and recorded* out of the agent's reach,
+        rather than succeeding silently. Off unless the jail is on (nothing to
+        compensate for otherwise), so the removable contract is untouched.
+        """
+        mode = nsguard.guard_mode(jail_on=jail.jail_enabled() or jail.already_jailed())
+        if mode == nsguard.MODE_OFF:
+            return
+        hit = nsguard.scan(command)
+        if not hit:
+            return
+        match, reason = hit
+        verb = "DENIED" if mode == nsguard.MODE_BLOCK else "WARNING"
+        # Always on stderr, HITL or not — same ground-truth reasoning as the
+        # path-guard line: the only other trace is the tool-error string the model
+        # reads back and can route around. stdout stays clean for headless JSON.
+        print(
+            f"[harness] ns-guard {verb} — {reason} ({match!r}) in a shell command",
+            file=sys.stderr,
+        )
+        if self._on_command_denied:
+            self._on_command_denied(match, reason, mode)
+        if mode == nsguard.MODE_BLOCK:
+            raise nsguard.NamespaceGuardDenied(match, reason)
+
+    def execute(self, command: str, **kwargs):
+        """Run the shell tool inside a *nested* bwrap jail when the fs jail is on.
+
+        The harness process is already inside its own namespace (jail.maybe_reexec),
+        which is what gives the in-process file tools their boundary. But that
+        namespace still binds the state dir -- the harness needs
+        checkpoints.sqlite -- and the shell tool is not covered by the path guard
+        (invariant 14). So the shell gets a second, tighter namespace via
+        sandbox-exec, which binds only the workspace. That closes invariant 17a's
+        one standing limit: the shell can no longer reach <state-dir>/denials.jsonl
+        by absolute path and truncate the record of its own escape attempt.
+
+        Nested userns is verified working in the built image under the narrow
+        seccomp profile (milestone4.md §11.4). Off-jail this is a plain
+        passthrough, so the M3 shell behaviour is untouched.
+        """
+        self._guard_namespace_syscalls(command)
+        if not jail.already_jailed():
+            return super().execute(command, **kwargs)
+        wrapped = f"sandbox-exec exec -- /bin/sh -c {shlex.quote(command)}"
+        return super().execute(wrapped, **kwargs)
+
+    async def aexecute(self, command: str, **kwargs):
+        self._guard_namespace_syscalls(command)
+        if not jail.already_jailed():
+            return await super().aexecute(command, **kwargs)
+        wrapped = f"sandbox-exec exec -- /bin/sh -c {shlex.quote(command)}"
+        return await super().aexecute(wrapped, **kwargs)
 
     def _resolve_path(self, key: str) -> Path:
         if self.virtual_mode:
@@ -204,11 +272,25 @@ class _WorkspaceShellBackend(LocalShellBackend):
         if base:
             try:
                 validate_path(str(resolved), base)
-            except PathGuardDenied:
-                if self._on_path_denied:
-                    if self._on_path_denied(str(resolved), base) is not True:
-                        raise
-                else:
+            except PathGuardDenied as exc:
+                approved = (
+                    self._on_path_denied(str(resolved), base) is True
+                    if self._on_path_denied
+                    else False
+                )
+                if not approved:
+                    # Unconditional, HITL or not. The structured record in the
+                    # state dir is HITL-gated, but a workspace escape must never
+                    # be *silent* to the operator: without this the only trace is
+                    # the tool-error string the model reads back, which it can
+                    # quietly route around. Same ground-truth-over-model reasoning
+                    # as PauseMiddleware's "DENIED — NOT executed" line. stderr, so
+                    # the headless JSON stdout contract is untouched.
+                    print(
+                        f"[harness] path-guard DENIED — {exc.relpath} escapes the "
+                        "workspace; access refused",
+                        file=sys.stderr,
+                    )
                     raise
         return resolved
 
@@ -391,7 +473,8 @@ def build_agent(
     tools: list | None = None,
     middleware: list[AgentMiddleware] | None = None,
     checkpointer: Any = None,
-    on_path_denied: callable | None = None,
+    on_path_denied: Callable[[str, str], bool] | None = None,
+    on_command_denied: Callable[[str, str, str], None] | None = None,
 ):
     workspace.mkdir(parents=True, exist_ok=True)
     backend = _WorkspaceShellBackend(
@@ -400,6 +483,7 @@ def build_agent(
         inherit_env=False,
         env=_agent_shell_env(),
         on_path_denied=on_path_denied,
+        on_command_denied=on_command_denied,
     )
 
     agents_md = _read_optional_text(Path.cwd() / "AGENTS.md")

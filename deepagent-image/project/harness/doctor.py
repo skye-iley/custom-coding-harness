@@ -11,6 +11,9 @@ Checks:
   - Optional config: .mcp.json, hooks.json parse; workflows parse.
   - Mask/floor (new, M4): runs mask.resolve; asserts floor is present and no
     negation/allow targets a floor path.
+  - State-dir isolation (new, M4): in-container, the harness state dir must
+    resolve *outside* the workspace, or the agent's own file tools can read and
+    rewrite the stores that are supposed to be beyond its reach.
 """
 
 from __future__ import annotations
@@ -31,6 +34,22 @@ def _load_providers(providers_dir: str | Path | None = None) -> list:
 
 def _provider_model_dir(providers_dir: Path) -> Path:
     return providers_dir
+
+
+def state_dir_inside_workspace(state_dir: str | Path, workspace: str | Path) -> bool:
+    """True when the harness state dir resolves inside the workspace tree.
+
+    ``realpath`` + ``commonpath`` (not ``startswith``) for the same reason
+    ``pathguard`` uses them: a sibling like ``<ws>-state`` must not read as
+    inside ``<ws>``, and a symlinked state dir must be judged by its target.
+    ``commonpath`` raises on inputs with no shared root (different Windows
+    drives) — that is definitively *not* inside, so it degrades to False."""
+    try:
+        state = os.path.realpath(str(state_dir))
+        ws = os.path.realpath(str(workspace))
+        return os.path.commonpath([state, ws]) == ws
+    except (ValueError, OSError):
+        return False
 
 
 def doctor_main(argv: list[str]) -> int:
@@ -147,6 +166,107 @@ def doctor_main(argv: list[str]) -> int:
         records.append(("error", f"mask resolve: {exc}"))
     except Exception as exc:
         records.append(("error", f"mask resolve: {exc}"))
+
+    # --- State-dir isolation ---------------------------------------------------
+    # `archive.state_dir` falls back to `<workspace>/.deepagents` when
+    # DEEPAGENTS_STATE_DIR is unset. In-container that fallback puts
+    # checkpoints.sqlite / past.sqlite / denials.jsonl back inside the workspace
+    # bind-mount, in-bounds for the path guard and writable by the agent's own
+    # file tools — including the denial log recording its escape attempts. Both
+    # launchers set the var, so this asserts a launcher invariant nothing else
+    # checks (M4 invariants 20 / 17a; the "boundary cannot silently regress" role
+    # doctor already plays for the floor).
+    if state_dir_inside_workspace(state_dir, workspace):
+        if os.environ.get("DEEPAGENTS_IN_CONTAINER") == "1":
+            records.append((
+                "error",
+                f"state dir {state_dir} is INSIDE the workspace {workspace} — "
+                "checkpoints.sqlite / past.sqlite / denials.jsonl are reachable by the "
+                "agent's own file tools. Set DEEPAGENTS_STATE_DIR to a path outside the "
+                "workspace mount (run-docker uses /project/state)."
+            ))
+        else:
+            records.append((
+                "info",
+                f"state dir {state_dir} is inside the workspace — the documented bare-host "
+                "layout (no container boundary to protect). In-container this is an error."
+            ))
+    else:
+        records.append(("info", f"state dir {state_dir} is outside the workspace"))
+
+    # --- Jail / seccomp (M4 slice H) -------------------------------------------
+    # Only checked when the operator opted in: the jail is off by default (§13),
+    # and doctor must not fail every run for a feature nobody enabled.
+    from harness import jail as jail_mod
+    from harness import seccomp as seccomp_mod
+
+    if not jail_mod.jail_enabled():
+        records.append(("info", "fs jail off (DEEPAGENTS_JAIL unset) — slice H checks skipped"))
+    else:
+        profile_path = seccomp_mod.profile_path()
+        if not profile_path.is_file():
+            records.append((
+                "error",
+                f"fs jail is on but the seccomp profile is missing at {profile_path} — "
+                "run 'python3 -m harness seccomp-sync'"
+            ))
+        else:
+            try:
+                problems = seccomp_mod.verify_profile(seccomp_mod.load_profile(profile_path))
+            except (OSError, ValueError) as exc:
+                records.append(("error", f"seccomp profile unreadable: {exc}"))
+            else:
+                for problem in problems:
+                    records.append(("error", f"seccomp profile: {problem}"))
+                if not problems:
+                    records.append((
+                        "info",
+                        "seccomp profile is Docker's default plus exactly "
+                        f"{list(seccomp_mod.RELAXED_SYSCALLS)}",
+                    ))
+
+        # LSM gate (M4 slice J, §11.6). seccomp and AppArmor are independent, and a
+        # correct seccomp profile says nothing about the second one: docker-default
+        # denies `mount` outright, which is not something the jail can work around
+        # from inside the namespace. Surfaced here so it is a pre-flight finding
+        # naming the real cause, not a bwrap error the operator has to decode.
+        confinement = jail_mod.apparmor_confinement()
+        apparmor_opt = (os.environ.get("DEEPAGENTS_JAIL_APPARMOR") or "").strip()
+        if confinement:
+            records.append((
+                "error",
+                f"fs jail is on but this container is confined by AppArmor profile "
+                f"'{confinement}', which denies the mounts bwrap needs (seccomp is not "
+                "the problem). Relaunch with DEEPAGENTS_JAIL_APPARMOR=unconfined — which "
+                "drops the whole profile, not just its deny-mount rule — or load the "
+                "narrowed profile (milestone4.md §11.6, slice J).",
+            ))
+        elif apparmor_opt == "unconfined":
+            # Not an error (the operator asked for it) but never silent: this is a
+            # wider trade than the five relaxed syscalls DEEPAGENTS_JAIL alone costs.
+            records.append((
+                "warning",
+                "fs jail: AppArmor is disabled for this container "
+                "(DEEPAGENTS_JAIL_APPARMOR=unconfined). That drops all of docker-default "
+                "— the /proc and /sys write denials and the ptrace peer restriction — "
+                "not only its deny-mount rule.",
+            ))
+        else:
+            records.append(("info", "fs jail: no AppArmor confinement in force"))
+
+        # The real gate: bwrap being installed says nothing about whether seccomp
+        # will actually let it unshare. Only meaningful in-container.
+        if os.environ.get("DEEPAGENTS_IN_CONTAINER") == "1":
+            jail_problems = jail_mod.preflight()
+            for problem in jail_problems:
+                records.append(("error", f"fs jail: {problem}"))
+            if not jail_problems:
+                records.append(("info", "fs jail: bwrap can create a user namespace here"))
+        else:
+            records.append((
+                "info",
+                "fs jail: userns probe skipped off-container (run it in the image)",
+            ))
 
     # --- Summary ---------------------------------------------------------------
     errors = [r for r in records if r[0] == "error"]

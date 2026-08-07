@@ -88,3 +88,31 @@ def test_validate_path_or_none_validates(tmp_path):
     target.write_text("content")
     result = pg.validate_path_or_none(str(target), str(base))
     assert result == os.path.realpath(str(target))
+
+
+# --- relative_to (audit-trail helper, M4 slice D) --------------------------
+
+
+def test_relative_to_computes_a_relpath():
+    assert pg.relative_to("/workspace/sub/f.txt", "/workspace") == os.path.join("sub", "f.txt")
+
+
+def test_relative_to_never_raises(monkeypatch):
+    # Callers run inside an `except PathGuardDenied` block, where a second
+    # exception would replace the PermissionError the tool layer expects. So the
+    # inputs relpath genuinely rejects (another Windows drive, empty path) must
+    # degrade to the absolute target rather than propagate.
+    def _boom(*a, **k):
+        raise ValueError("path is on mount 'C:', start on mount 'D:'")
+
+    monkeypatch.setattr(os.path, "relpath", _boom)
+    assert pg.relative_to("/outside/x", "/workspace") == "/outside/x"
+
+
+def test_denied_relpath_survives_a_relpath_failure(monkeypatch):
+    def _boom(*a, **k):
+        raise ValueError("no common prefix")
+
+    monkeypatch.setattr(os.path, "relpath", _boom)
+    exc = pg.PathGuardDenied("/outside/x", "/workspace")
+    assert exc.relpath == "/outside/x"
