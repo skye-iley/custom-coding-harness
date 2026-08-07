@@ -21,7 +21,17 @@ git reset -q -- .deepagents .agent_telemetry 2>/dev/null || true
 # version get committed over the real secret. The snapshot is the one thing
 # that can't be tampered with post-launch (state dir is agent-unreachable).
 if [ "${DEEPAGENTS_MASK:-1}" != "0" ]; then
-  mask_snapshot="${DEEPAGENTS_STATE_DIR:-$PWD/.deepagents}/mask-snapshot.txt"
+  mask_state_dir="${DEEPAGENTS_STATE_DIR:-$PWD/.deepagents}"
+  mask_snapshot="$mask_state_dir/mask-snapshot.txt"
+  # Normal path: the launcher already froze this snapshot before the container
+  # started (invariant: exclusion keys off the frozen set, never a live
+  # rescan — see the comment above). If it's missing — masking was enabled
+  # without going through the normal launch flow — fall back to scanning now
+  # rather than leaving the masked path unexcluded and letting its blanked
+  # content get committed over the real secret.
+  if [ ! -f "$mask_snapshot" ]; then
+    python3 -m harness mask-scan "$PWD" "$mask_state_dir" >/dev/null 2>&1 || true
+  fi
   if [ -f "$mask_snapshot" ]; then
     while IFS=' ' read -r tier relpath; do
       relpath="${relpath%$(printf '\r')}"  # defensive: strip a stray CR (CRLF-written snapshot)

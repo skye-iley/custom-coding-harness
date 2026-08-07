@@ -546,6 +546,13 @@ is image-only (smoke).
   (accumulated AI reasoning / tool calls / tool results from earlier super-steps, via
   `cli._dump_partial`); off by default. A pre-generation failure (e.g. a 500 that
   fails before the model emits anything) legitimately shows no new state.
+  **No built-in way to see the raw prompt/response on a successful turn** (system
+  prompt, full message history, tool schemas, tool-call/result blocks, as literally
+  sent to/from the model) — `DEEPAGENTS_DEBUG` is failure-only and checkpointer-state,
+  not raw wire text. Today's workaround for a local model: run the model server with
+  its own debug logging (e.g. `OLLAMA_DEBUG=1` + `ollama serve` in a foreground
+  terminal) and watch that. A `DEEPAGENTS_RAW_TRACE` mode is proposed in
+  `design_doc.md` §11 (Framework Enhancements) — not built.
 - **NetJail is deny-all by default.** When you implement a feature that needs a host service
   (e.g. a daemon on the Docker host) or internet access (a model API, package registry, git
   remote), you MUST also grant it in the jail or it silently breaks under `NET_JAIL=1` /

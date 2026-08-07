@@ -1027,6 +1027,15 @@ system_interrupts:                # which harness events raise (vs. log/crash)
 *   **Long-Term Project Memory**: Integrate a vector database (e.g., Qdrant or ChromaDB) to store a persistent, compressed index of the entire project history and decision logs.
 
 ### Framework Enhancements
+*   **Raw prompt/response debug mode**: a `DEEPAGENTS_RAW_TRACE=1` (or `--raw-trace`) startup flag
+    that prints, per turn, the literal text the model receives and returns — full system prompt,
+    message/turn history, tool schemas, and tool-call/tool-result blocks, as close as possible to
+    what the model itself sees (raw tags included, e.g. Ollama's chat-template markers), with only
+    minimal formatting added (turn/role separators) for human readability. Distinct from
+    `DEEPAGENTS_DEBUG` (checkpointer-state dump, failure-only): this is always-on-when-set, every
+    turn, success or failure — for diagnosing weak/local-model tool-calling failures (hallucinated
+    tool JSON, ignored instructions) without switching to the model server's own debug logging
+    (e.g. `OLLAMA_DEBUG=1`) as a workaround.
 *   **Automated Benchmarking Suite**: Quantitatively measure the harness (routing, compression, memory) against known-correct coding tasks. Budget is tight — full SWE-bench (2294 instances) is out of reach — so the plan is a cost-tiered ladder, cheapest signal first, built on a shared batch driver.
 
     **Benchmark tiers (cheapest first):**
