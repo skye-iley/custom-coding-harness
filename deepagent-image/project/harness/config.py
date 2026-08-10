@@ -412,7 +412,11 @@ def load_profile(path: Path) -> dict:
             _fail(source, f"unexpected indented line {raw.strip()!r} (profile is flat scalars only)")
         key, _, value = raw.partition(":")
         key = key.strip()
-        value = _strip_comment(value.strip())
+        value = value.strip()
+        # A key with nothing but a trailing comment ("key:   # note") is an
+        # unset key, not a literal value starting with "#" -- _strip_comment
+        # only trims a *trailing* comment off a real value.
+        value = "" if value.startswith("#") else _strip_comment(value)
         if key not in PROFILE_FIELDS:
             _fail(source, f"unknown key {key!r}")
         if not value:

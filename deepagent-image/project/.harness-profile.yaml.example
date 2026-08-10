@@ -1,0 +1,32 @@
+# Unified config profile — Milestone 5 (milestone5.md / milestone5_spec.md §5).
+#
+# Copy to `.harness-profile.yaml` to persist explicit choices across runs. Any
+# key you leave blank (or omit) falls through to env / .env / built-in default
+# in that order (see harness/config.py's resolve_settings precedence). Delete
+# the file entirely to fall back to that chain for everything -- removable
+# contract, identical to no profile ever having existed.
+#
+# Written by `harness config` / `harness config security` (--save) or the
+# in-session `/config save` -- both go through the same save_profile() writer,
+# which merges into whatever is already here rather than overwriting it.
+#
+# NOT here: thread_id (per-run, not a standing preference), headless (a mode
+# picked per-invocation), mask_enabled (a debugging escape hatch, kept
+# env-only on purpose). Secrets never go here -- those stay in .env only.
+
+# --- in-session-live (also editable via /config without a container restart) ---
+
+model:                 # e.g. openai:gpt-5.5 -- same spec as DEEPAGENTS_MODEL / --model
+topic:
+max_cost:
+max_tokens:
+
+# --- pre-spinup (fixed at container start; edit via `harness config` before the next launch) ---
+
+mask_mode: deny        # deny | allow
+jail: false
+jail_apparmor:          # unset = auto; "unconfined"; or a host-loaded profile name
+cpus: "2"
+memory: 4g
+pids_limit: "512"
+net_jail: false

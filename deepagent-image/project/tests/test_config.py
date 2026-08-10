@@ -5,6 +5,8 @@ Pure stdlib; config files written to pytest tmp_path.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from _bootstrap import _load
@@ -283,6 +285,28 @@ def test_load_profile_unknown_key_fails(tmp_path):
     p.write_text("modle: typo\n", encoding="utf-8")
     with pytest.raises(SystemExit):
         cfg.load_profile(p)
+
+
+def test_load_profile_comment_only_value_is_unset(tmp_path):
+    """A `key:   # note` line (used throughout .harness-profile.yaml.example for
+    every unset key) must resolve as absent, not as a literal string starting
+    with '#' -- regression for a bug where _strip_comment only trims a
+    *trailing* comment off a real value, not a value that IS a comment."""
+    p = tmp_path / ".harness-profile.yaml"
+    p.write_text("model:   # e.g. openai:gpt-5.5\njail: true\n", encoding="utf-8")
+    values = cfg.load_profile(p)
+    assert "model" not in values
+    assert values == {"jail": True}
+
+
+def test_example_profile_file_parses_cleanly():
+    """The checked-in .harness-profile.yaml.example must itself be valid --
+    every unset key blank, no stray comment text leaking into a value."""
+    example = Path(__file__).resolve().parent.parent / ".harness-profile.yaml.example"
+    values = cfg.load_profile(example)
+    assert set(values) <= cfg.PROFILE_FIELDS
+    for v in values.values():
+        assert not (isinstance(v, str) and v.startswith("#"))
 
 
 def test_load_profile_typed_fields(tmp_path):
