@@ -159,14 +159,14 @@ def test_should_audit_path_denials_off_when_hitl_off():
 def test_should_audit_path_denials_off_when_interrupt_disabled():
     import harness.config as hitl_config
 
-    conf = hitl_config.Config(system_interrupts={"permission_denied": False})
+    conf = hitl_config.HitlSection(system_interrupts={"permission_denied": False})
     assert cli._should_audit_path_denials(conf) is False
 
 
 def test_should_audit_path_denials_on_when_enabled():
     import harness.config as hitl_config
 
-    conf = hitl_config.Config(system_interrupts={"permission_denied": True})
+    conf = hitl_config.HitlSection(system_interrupts={"permission_denied": True})
     assert cli._should_audit_path_denials(conf) is True
 
 

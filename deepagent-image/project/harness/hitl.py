@@ -32,7 +32,7 @@ from typing import Callable
 
 from harness import archive, audit, interrupt, pathguard
 from harness._compat import compat_import
-from harness.config import Config, match_triggers
+from harness.config import HitlSection, match_triggers
 from harness.interrupt import (
     InterruptRequest,
     headless_decision,
@@ -52,7 +52,7 @@ class HitlContext:
     otherwise (MVP path). ``channel`` is the REPL renderer (interactive) or
     ``None`` (headless, resolve via the §6 fail-closed policy)."""
 
-    config: Config
+    config: HitlSection
     workspace: Path
     channel: "Channel | None"
     headless: bool
@@ -175,7 +175,7 @@ def resolve_value(
     *,
     channel: Channel | None,
     headless: bool,
-    config: Config,
+    config: HitlSection,
 ) -> tuple[object, str]:
     """Resolve one interrupt to (value, resolved_by).
 
@@ -205,7 +205,7 @@ def run_interrupt_loop(
     *,
     channel: Channel | None,
     headless: bool,
-    config: Config,
+    config: HitlSection,
     workspace: Path,
     audit_on: bool = True,
 ):
@@ -250,7 +250,7 @@ def resume_command(value):
 # --- S2: the session-end PR approval gate ------------------------------------
 
 
-def should_gate_pr(config: "Config | None", *, interactive: bool, has_session: bool) -> bool:
+def should_gate_pr(config: "HitlSection | None", *, interactive: bool, has_session: bool) -> bool:
     """Whether the session-end PR should pause for human approval (the ``pause``
     action tier applied to the ``session.end`` hook — the "approve the PR" half of
     the strict/guided presets).
@@ -517,7 +517,7 @@ class PauseMiddleware(AgentMiddleware):
     to honor.
     """
 
-    def __init__(self, config: Config):
+    def __init__(self, config: HitlSection):
         super().__init__()
         self._config = config
         self._gate_all_tools = "tool.start" in config.gated_hooks()
