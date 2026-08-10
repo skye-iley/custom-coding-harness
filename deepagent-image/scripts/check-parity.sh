@@ -45,6 +45,13 @@ markers=(
   "refusing to launch unmasked"
   "DEEPAGENTS_MASK"
   "DEEPAGENTS_MASK_MODE"
+  # M4 slice J: the AppArmor preflight. A one-sided edit here means one platform
+  # silently launches a jail that will die inside the container, or (worse) skips
+  # the fail-closed abort. install-apparmor-profile.sh itself is Linux-only and so
+  # has no .ps1 twin — deliberately absent from `pairs` above.
+  "deepagent-userns"
+  "install-apparmor-profile"
+  "DEEPAGENTS_JAIL_APPARMOR"
 )
 rd_ps1="$ROOT/scripts/run-docker.ps1"
 rd_sh="$ROOT/scripts/run-docker.sh"

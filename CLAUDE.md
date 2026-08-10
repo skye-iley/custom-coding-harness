@@ -19,8 +19,8 @@ secret-safe containers.
       resilience/headless prereqs it rides on. **Built** — see §0 build status for what shipped vs.
       deferred, and the "Human-in-the-loop" section in `deepagent-image/CLAUDE.md`.
   - `docs/milestones/in-progress/` — **being built** milestones (doc + separate invariants doc + code
-    on a feature branch). *(`milestone4.md` — **Real Trust Boundary**, code on `feat/milestone_4`,
-    slices **A–H all landed, J planned**, not yet merged (workspace visibility — `.agentignore`, 3-tier policy,
+    on a feature branch). *(`milestone4.md` — **Real Trust Boundary**, merged to `main`,
+    slices **A–J all landed** (workspace visibility — `.agentignore`, 3-tier policy,
     designated-secret floor —, docker mount-mask, path-guard middleware, `harness doctor`, CI pipeline,
     security test suite). **Slice H (bwrap fs-tool jail) is built and opt-in** (`DEEPAGENTS_JAIL=1`),
     shipped as a **re-exec of the harness into a bwrap namespace** rather than the per-call jailed
@@ -35,13 +35,20 @@ secret-safe containers.
     the docs must keep saying so. The `bwrap --unshare-all` gate is **verified in the built image on a
     host with no LSM policy loaded** (Docker Desktop/WSL2) under the profile that ships, re-checkable
     via `scripts/smoke.{sh,ps1}` `JAIL_CHECK=1`/`-JailCheck`. **On an AppArmor host the jail does not
-    start**: seccomp is only one of two independent gates, and Docker's `docker-default` profile
-    denies `mount` outright, so bwrap fails *after* `unshare` succeeds. That covers Ubuntu/Debian
-    Docker and GitHub runners. It fails **closed** (a diagnostic naming AppArmor, never an unjailed
-    run); the interim knob is `DEEPAGENTS_JAIL_APPARMOR=unconfined`, which works everywhere but drops
-    the whole profile rather than one rule. The real fix is **slice J** — vendor `docker-default` with
-    only its `mount` rule narrowed, same shape as `seccomp-sync` — **planned, not built**
-    (`milestone4.md` §11.6, §16 fork 10, invariants 37–38). SELinux hosts are untested.
+    start** without slice J: seccomp is only one of two independent gates, and Docker's
+    `docker-default` profile denies `mount` outright, so bwrap fails *after* `unshare` succeeds.
+    **Slice J — vendored `docker-default` with only its `mount` rule narrowed** (same shape as
+    `seccomp-sync`) — is **built** (`docs/milestones/in-progress/milestone4.1.md`): the profile,
+    `apparmor-sync --check`, install script, and `run-docker`/`harness doctor` wiring have all
+    landed. **UNCONFIRMED:** the one thing not done is the live-host measurement on a real
+    AppArmor-confined machine (Ubuntu/Debian Docker, GitHub runners) — no such host has been
+    available to verify it on. CI's `apparmor-load-probe` job carries this measurement and is
+    deliberately non-gating until it reports; until it does, treat the mount rule set as *derived,
+    not confirmed*, same caveat `milestone4.1.md` and `apparmor/README.md` carry. The interim knob
+    `DEEPAGENTS_JAIL_APPARMOR=unconfined` still works everywhere but drops the whole LSM profile
+    rather than one rule — prefer the vendored profile once confirmed.
+    (`milestone4.md` §11.6, §16 fork 10, invariants 37–38; `milestone4.1.md` §1/§13.1). SELinux
+    hosts are untested.
     Slice D (`permission_denied` interrupt) is
     **built, audit-only** — a path-guard denial (always a true workspace escape in v1; pathguard has
     no floor/mask awareness) never offers an interactive approve — a real escape must never be a thing

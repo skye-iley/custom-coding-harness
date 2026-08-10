@@ -230,16 +230,41 @@ def doctor_main(argv: list[str]) -> int:
         # denies `mount` outright, which is not something the jail can work around
         # from inside the namespace. Surfaced here so it is a pre-flight finding
         # naming the real cause, not a bwrap error the operator has to decode.
-        confinement = jail_mod.apparmor_confinement()
+        from harness import apparmor as apparmor_mod
+
+        confinement, mode = jail_mod.apparmor_confinement_detail()
         apparmor_opt = (os.environ.get("DEEPAGENTS_JAIL_APPARMOR") or "").strip()
-        if confinement:
+        # A child profile reports as "parent//child"; the parent is what
+        # `--security-opt apparmor=` selected, so match on that segment.
+        parent = confinement.split("//")[0] if confinement else None
+
+        if parent == apparmor_mod.PROFILE_NAME and mode == "complain":
+            # Complain mode logs violations and allows them. bwrap would run and
+            # the LSM would be enforcing nothing — the most dangerous of the
+            # possible outcomes, because it looks like success (invariant 40).
+            records.append((
+                "error",
+                f"fs jail: AppArmor profile '{confinement}' is loaded in COMPLAIN mode, "
+                "which logs violations instead of blocking them — the profile is in "
+                "force in name only. Reload it enforcing: "
+                "'sudo scripts/install-apparmor-profile.sh' (apparmor_parser -r, not -C).",
+            ))
+        elif parent == apparmor_mod.PROFILE_NAME:
+            records.append((
+                "info",
+                f"fs jail: AppArmor profile '{confinement}' in force — the LSM gate is "
+                "satisfied by the narrowed profile (slice J), not by dropping the LSM",
+            ))
+        elif confinement:
             records.append((
                 "error",
                 f"fs jail is on but this container is confined by AppArmor profile "
                 f"'{confinement}', which denies the mounts bwrap needs (seccomp is not "
-                "the problem). Relaunch with DEEPAGENTS_JAIL_APPARMOR=unconfined — which "
-                "drops the whole profile, not just its deny-mount rule — or load the "
-                "narrowed profile (milestone4.md §11.6, slice J).",
+                "the problem). Load the narrowed profile on the Docker daemon's host — "
+                "'sudo deepagent-image/scripts/install-apparmor-profile.sh', then relaunch "
+                f"(run-docker selects '{apparmor_mod.PROFILE_NAME}' by default on Linux). "
+                "Failing that, DEEPAGENTS_JAIL_APPARMOR=unconfined works everywhere but "
+                "drops the whole profile, not just its deny-mount rule.",
             ))
         elif apparmor_opt == "unconfined":
             # Not an error (the operator asked for it) but never silent: this is a
@@ -253,6 +278,40 @@ def doctor_main(argv: list[str]) -> int:
             ))
         else:
             records.append(("info", "fs jail: no AppArmor confinement in force"))
+
+        # Invariant 38 — the LSM twin of the seccomp narrowness check above. The
+        # vendored profile is a generated artifact; a hand-edit, a widened rule
+        # set, or a `mount,` catch-all has to fail here (and so in CI) rather
+        # than sail through because the jail still starts.
+        aa_profile_path = apparmor_mod.profile_path()
+        if not aa_profile_path.is_file():
+            records.append((
+                "error",
+                f"fs jail: the vendored AppArmor profile is missing at {aa_profile_path} — "
+                "run 'python3 -m harness apparmor-sync'",
+            ))
+        else:
+            try:
+                aa_text = apparmor_mod.load_text(aa_profile_path)
+                aa_baseline_path = apparmor_mod.baseline_path()
+                aa_baseline = (
+                    apparmor_mod.load_text(aa_baseline_path)
+                    if aa_baseline_path.is_file()
+                    else None
+                )
+            except OSError as exc:
+                records.append(("error", f"AppArmor profile unreadable: {exc}"))
+            else:
+                aa_problems = apparmor_mod.verify_profile(aa_text, aa_baseline)
+                for problem in aa_problems:
+                    records.append(("error", f"AppArmor profile: {problem}"))
+                if not aa_problems:
+                    records.append((
+                        "info",
+                        "AppArmor profile is docker-default with exactly "
+                        f"{len(apparmor_mod.RELAXED_MOUNT_RULES)} mount rules replacing "
+                        "`deny mount,`",
+                    ))
 
         # The real gate: bwrap being installed says nothing about whether seccomp
         # will actually let it unshare. Only meaningful in-container.

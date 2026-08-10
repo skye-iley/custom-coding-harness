@@ -1100,6 +1100,10 @@ def dispatch(argv: list[str]) -> int:
         from harness.seccomp import seccomp_sync_main
 
         return seccomp_sync_main(argv[1:])
+    if argv and argv[0] == "apparmor-sync":
+        from harness.apparmor import apparmor_sync_main
+
+        return apparmor_sync_main(argv[1:])
     return main()
 
 

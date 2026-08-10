@@ -8,7 +8,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install pytest
-      - run: python -m pytest tests/test_mask.py tests/test_pathguard.py tests/test_doctor.py tests/test_cost.py tests/test_providers.py tests/test_archive.py tests/test_resilience.py tests/test_interrupt.py tests/test_audit.py tests/test_ratelimit.py tests/test_hostmap.py tests/test_jail.py tests/test_seccomp.py tests/test_nsguard.py
+      - run: python -m pytest tests/test_mask.py tests/test_pathguard.py tests/test_doctor.py tests/test_cost.py tests/test_providers.py tests/test_archive.py tests/test_resilience.py tests/test_interrupt.py tests/test_audit.py tests/test_ratelimit.py tests/test_hostmap.py tests/test_jail.py tests/test_seccomp.py tests/test_nsguard.py tests/test_apparmor.py
         working-directory: deepagent-image/project
       # M4 slice H invariant 31 (the vendored seccomp profile must stay Docker's
       # default plus exactly five relaxed syscalls, so a swap to `seccomp=unconfined`
@@ -24,6 +24,44 @@ jobs:
       # conventions in deepagent-image/CLAUDE.md). Installing the runtime dependency
       # tree just to reach a check the test suite already makes is the wrong trade, so
       # the step is gone rather than papered over. The tests are the gate.
+      #
+      # M4 slice J invariant 38 is the LSM twin of the above and rides the same step:
+      # tests/test_apparmor.py::test_committed_profile_is_narrow asserts the committed
+      # apparmor/deepagent-userns is docker-default plus exactly our mount diff, and
+      # ::test_committed_baseline_is_reproducible_from_the_pinned_template asserts the
+      # diff base was not quietly weakened to match a widened profile. Both are offline
+      # and need no AppArmor kernel, which is why they belong in the host tier.
+  apparmor-load-probe:
+    # MEASUREMENT, NOT A GATE (milestone4.1.md §10 step 2 / fork J2). Slice J's spec
+    # explicitly refuses to pin a CI jail gate on an assumption — the whole milestone
+    # exists because slice H shipped "verified" on a host class that could not see the
+    # AppArmor gate at all. So this job asks the question on the record: can a
+    # GitHub-hosted runner load an AppArmor profile, and does the jail then start?
+    #
+    # continue-on-error until a run answers it. Then: if it loads, fold the install
+    # into the `smoke` job and pin JAIL_CHECK=1 there (turning today's rc-77 skip into
+    # a real red/green gate); if it does not, delete this job and record why beside the
+    # smoke comment below. Either way the next edit here is driven by an observation.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --target runtime -t deepagent-harness deepagent-image
+      - name: What confines a container here by default?
+        run: |
+          docker run --rm deepagent-harness sh -c \
+            'cat /proc/self/attr/apparmor/current 2>/dev/null || cat /proc/self/attr/current 2>/dev/null || echo "(no LSM attr)"'
+      - name: Load the narrowed profile into the runner kernel
+        run: sudo deepagent-image/scripts/install-apparmor-profile.sh
+      - name: Does the daemon accept it?
+        run: docker run --rm --security-opt apparmor=deepagent-userns deepagent-harness true
+      - name: Does the jail start under it?
+        run: |
+          docker run --rm -i \
+            --security-opt seccomp=deepagent-image/seccomp/userns.json \
+            --security-opt apparmor=deepagent-userns \
+            -e DEEPAGENTS_JAIL=1 \
+            deepagent-harness python3 - < deepagent-image/scripts/jail-check.py
   image-tests:
     runs-on: ubuntu-latest
     steps:

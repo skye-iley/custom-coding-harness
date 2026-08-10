@@ -208,13 +208,35 @@ set +e
 # on such a host. `unconfined` makes it run everywhere at the cost of dropping the
 # WHOLE profile, not just its `deny mount,` — a wider trade than the five relaxed
 # syscalls, so it is opt-in and announced, never a silent default.
+#
+# Slice J adds the narrowed profile: when the operator sets nothing, prefer
+# `deepagent-userns` **if the daemon already has it loaded**. Unlike run-docker this
+# does NOT abort when it is missing — smoke's job is to report, and jail-check.py
+# already self-skips (rc 77) on an LSM denial rather than reddening the run.
 APPARMOR_ARGS=()
-if [[ -n "${DEEPAGENTS_JAIL_APPARMOR:-}" ]]; then
-  APPARMOR_ARGS=(--security-opt "apparmor=$DEEPAGENTS_JAIL_APPARMOR")
-  if [[ "$DEEPAGENTS_JAIL_APPARMOR" == "unconfined" ]]; then
+APPARMOR_CHOICE="${DEEPAGENTS_JAIL_APPARMOR:-}"
+if [[ -z "$APPARMOR_CHOICE" ]]; then
+  # LSM-in-force first, then the profile probe — a daemon with no AppArmor support
+  # accepts `--security-opt apparmor=<anything>` and ignores it, so probing first
+  # would claim a profile that is loaded nowhere. Mirror of run-docker.
+  aa_in_force="$(docker run --rm deepagent-harness sh -c \
+    'cat /proc/self/attr/apparmor/current 2>/dev/null || cat /proc/self/attr/current 2>/dev/null || true' \
+    2>/dev/null | tr -d '\0' | sed 's/ (.*//' | tr -d '[:space:]')"
+  case "$aa_in_force" in
+    "" | unconfined | kernel) : ;;
+    *)
+      if docker run --rm --security-opt "apparmor=deepagent-userns" deepagent-harness true >/dev/null 2>&1; then
+        APPARMOR_CHOICE="deepagent-userns"
+      fi
+      ;;
+  esac
+fi
+if [[ -n "$APPARMOR_CHOICE" ]]; then
+  APPARMOR_ARGS=(--security-opt "apparmor=$APPARMOR_CHOICE")
+  if [[ "$APPARMOR_CHOICE" == "unconfined" ]]; then
     echo "M4 jail: AppArmor DISABLED for this container (apparmor=unconfined) — drops docker-default entirely, not just its deny-mount rule." >&2
   else
-    echo "M4 jail: using AppArmor profile '$DEEPAGENTS_JAIL_APPARMOR' (must already be loaded on the host)." >&2
+    echo "M4 jail: using AppArmor profile '$APPARMOR_CHOICE' (loaded on the Docker daemon's host)." >&2
   fi
 fi
 docker run --rm -i ${NET_ARGS[@]+"${NET_ARGS[@]}"} ${PROXY_ENV[@]+"${PROXY_ENV[@]}"} \

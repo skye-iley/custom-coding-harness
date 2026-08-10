@@ -366,23 +366,85 @@ jail_setup() {
   # (Ubuntu/Debian Docker) the generated `docker-default` profile carries a literal
   # `deny mount,`, so bwrap gets past `unshare` and then fails at its first mount —
   # and entering a user namespace does not shed AppArmor confinement, so nothing the
-  # jail does from inside can work around it. Until slice J vendors a narrowed
-  # profile, the operator's options are this knob or an unconfined host.
+  # jail does from inside can work around it. Slice J vendors a narrowed profile
+  # (apparmor/deepagent-userns) that keeps every other docker-default rule.
   #
-  # Unset (default): pass nothing. The harness then fails CLOSED at startup with a
-  # diagnostic naming AppArmor (jail.preflight) rather than running unjailed.
+  # Unset (default): select the narrowed profile and PROBE that the daemon will
+  # accept it, before launching anything real. Mirror of run-docker.ps1.
   local apparmor="${DEEPAGENTS_JAIL_APPARMOR:-$(_env_file_get DEEPAGENTS_JAIL_APPARMOR)}"
+  if [[ -z "$apparmor" ]]; then
+    # NOT `$(...)`: the autoselect fails closed with `exit 1`, which inside a
+    # command substitution would only kill the subshell and let the launch proceed.
+    APPARMOR_CHOICE=""
+    _apparmor_autoselect
+    apparmor="$APPARMOR_CHOICE"
+  fi
   if [[ -n "$apparmor" ]]; then
     JAIL_ARGS+=(--security-opt "apparmor=$apparmor")
     if [[ "$apparmor" == "unconfined" ]]; then
       echo "Jail: AppArmor DISABLED for this container (apparmor=unconfined)." >&2
       echo "      This drops ALL of docker-default — the /proc and /sys write denials and the" >&2
       echo "      ptrace peer restriction — not just its deny-mount rule. Wider than the five" >&2
-      echo "      relaxed syscalls DEEPAGENTS_JAIL alone costs. See milestone4.md §11.6." >&2
+      echo "      relaxed syscalls DEEPAGENTS_JAIL alone costs. See apparmor/README.md." >&2
     else
-      echo "Jail: AppArmor profile '$apparmor' (must already be loaded on the host via apparmor_parser)." >&2
+      echo "Jail: AppArmor profile '$apparmor' (loaded on the Docker daemon's host)." >&2
     fi
   fi
+}
+
+# Does the daemon accept this AppArmor profile? Asks the DAEMON rather than reading
+# /sys/kernel/security/apparmor/profiles locally: the profile must be loaded on the
+# machine running dockerd, which for a remote daemon / Colima-Lima VM / WSL distro is
+# not this machine — a local read would need root AND would lie in exactly those cases.
+_apparmor_profile_available() {
+  docker run --rm --security-opt "apparmor=$1" deepagent-harness true >/dev/null 2>&1
+}
+
+# What AppArmor profile does an ordinary container get here? Empty ⇒ this daemon's
+# host loads no AppArmor policy (Docker Desktop / WSL2 / macOS), so the jail needs
+# no profile at all.
+_apparmor_in_force() {
+  docker run --rm deepagent-harness sh -c \
+    'cat /proc/self/attr/apparmor/current 2>/dev/null || cat /proc/self/attr/current 2>/dev/null || true' \
+    2>/dev/null | tr -d '\0' | sed 's/ (.*//' | tr -d '[:space:]'
+}
+
+# Pick the AppArmor stance when the operator set no explicit one. Sets
+# APPARMOR_CHOICE (empty = pass nothing) and must be called WITHOUT a subshell so
+# its fail-closed `exit` actually aborts the launch. Fails closed on purpose:
+# never silently fall back to apparmor=unconfined, which is a categorically wider
+# trade (a whole LSM off, vs. five relaxed syscalls) that only an operator may make.
+APPARMOR_CHOICE=""
+_apparmor_autoselect() {
+  local profile="deepagent-userns"
+  APPARMOR_CHOICE=""
+
+  # Order matters, and not for performance. A daemon with no AppArmor support
+  # ACCEPTS `--security-opt apparmor=<anything>` and ignores it (measured on
+  # Docker Desktop/WSL2), so probing first would "succeed" against a profile that
+  # is not loaded anywhere and make the launcher announce a boundary that does not
+  # exist. Ask what actually confines a container here before asking for a profile.
+  local in_force
+  in_force="$(_apparmor_in_force)"
+  case "$in_force" in
+    "" | unconfined | kernel)
+      # No LSM on the daemon's host — nothing to relax, pass nothing.
+      return 0
+      ;;
+  esac
+
+  if _apparmor_profile_available "$profile"; then
+    APPARMOR_CHOICE="$profile"
+    return 0
+  fi
+  echo "[jail] FATAL: DEEPAGENTS_JAIL is on and this daemon confines containers with" >&2
+  echo "       AppArmor profile '$in_force', whose 'deny mount,' blocks bwrap at its first" >&2
+  echo "       mount (seccomp is NOT the problem — see apparmor/README.md). The narrowed" >&2
+  echo "       profile '$profile' is not loaded on the Docker daemon's host." >&2
+  echo "       Load it:      sudo $ROOT/scripts/install-apparmor-profile.sh" >&2
+  echo "       Wider trade:  DEEPAGENTS_JAIL_APPARMOR=unconfined  (drops ALL of $in_force)" >&2
+  echo "       Or:           DEEPAGENTS_JAIL=0" >&2
+  exit 1
 }
 jail_setup
 

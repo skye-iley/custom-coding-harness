@@ -340,3 +340,58 @@ def test_apparmor_hint_names_both_remedies():
     # Must not send the operator back to the seccomp profile: it is already correct
     # in this failure mode, and that misdirection is the whole point of invariant 37.
     assert "seccomp=" not in hint
+
+
+# --- confinement detail: profile + enforcement mode (M4 slice J, invariant 40) --
+
+
+def test_apparmor_confinement_detail_reports_the_mode(tmp_path, monkeypatch):
+    """The mode is the difference between an enforced boundary and a logged one."""
+    attr = tmp_path / "apparmor_current"
+    attr.write_text("deepagent-userns (enforce)")
+    monkeypatch.setattr(jail, "_APPARMOR_ATTR_PATH", str(attr))
+
+    assert jail.apparmor_confinement_detail() == ("deepagent-userns", "enforce")
+
+
+def test_apparmor_confinement_detail_surfaces_complain_mode(tmp_path, monkeypatch):
+    """A complain-mode profile logs violations and ALLOWS them.
+
+    bwrap would run and the LSM would be enforcing nothing, so doctor has to be
+    able to tell this apart from a real load rather than seeing only the name.
+    """
+    attr = tmp_path / "apparmor_current"
+    attr.write_text("deepagent-userns (complain)")
+    monkeypatch.setattr(jail, "_APPARMOR_ATTR_PATH", str(attr))
+
+    assert jail.apparmor_confinement_detail() == ("deepagent-userns", "complain")
+
+
+def test_apparmor_confinement_detail_keeps_child_profiles_intact(tmp_path, monkeypatch):
+    """AppArmor reports sub-profiles as `parent//child`; callers match the parent."""
+    attr = tmp_path / "apparmor_current"
+    attr.write_text("deepagent-userns//bwrap (enforce)")
+    monkeypatch.setattr(jail, "_APPARMOR_ATTR_PATH", str(attr))
+
+    profile, mode = jail.apparmor_confinement_detail()
+
+    assert profile == "deepagent-userns//bwrap"
+    assert profile.split("//")[0] == "deepagent-userns"
+    assert mode == "enforce"
+
+
+def test_apparmor_confinement_detail_is_empty_when_unconfined(tmp_path, monkeypatch):
+    attr = tmp_path / "apparmor_current"
+    attr.write_text("unconfined")
+    monkeypatch.setattr(jail, "_APPARMOR_ATTR_PATH", str(attr))
+
+    assert jail.apparmor_confinement_detail() == (None, None)
+
+
+def test_apparmor_confinement_detail_survives_a_missing_mode_suffix(tmp_path, monkeypatch):
+    """Not every kernel/version appends "(mode)". A bare name must still parse."""
+    attr = tmp_path / "apparmor_current"
+    attr.write_text("docker-default")
+    monkeypatch.setattr(jail, "_APPARMOR_ATTR_PATH", str(attr))
+
+    assert jail.apparmor_confinement_detail() == ("docker-default", None)
