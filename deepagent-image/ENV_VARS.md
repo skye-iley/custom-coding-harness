@@ -6,6 +6,13 @@ or at runtime (`docker run -e VAR=value`).
 Launcher-side vars (host-side only, read by run-docker.sh/ps1 before `docker run`) 
 are in [Launcher Environment](./CLAUDE.md#launcher-environment-host-side-not-env).
 
+**Persisted alternative to hand-editing `.env` (Milestone 5):** every var below has a
+matching field in `project/.harness-profile.yaml` (copy from `.harness-profile.yaml.example`),
+resolved through `harness/config.py`'s `CLI flag > env var > profile file > default`
+precedence. Write it with `harness config` / `harness config security` (host wizard) or the
+in-session `/config set ... ` + `/config save`, instead of editing `.env` by hand for knobs
+you want to persist across runs. See "Unified config" in `CLAUDE.md` for the full picture.
+
 ## Provider Authentication (Mutually Exclusive or Complementary)
 
 | Var | Purpose | Type | Default | Example |
@@ -125,5 +132,13 @@ See [Launcher Environment](./CLAUDE.md#launcher-environment-host-side-not-env) i
 | `PIDS_LIMIT` | `-PidsLimit` | Docker PID limit (fork-bomb guard) | `512` |
 | `EPHEMERAL` | `-Ephemeral` | Mount throwaway workspace copy; revert on close | off |
 | `SAVE_WORKSPACE` | `-SaveWorkspace` | Ephemeral + snapshot to workspace-logs/<ts>/ | off |
+| `DEEPAGENTS_MODEL` | `-Model` | Model spec, forwarded into the container as `-e` even when absent from `.env` | from profile/`.env` |
+| `DEEPAGENTS_MASK_MODE` | `-MaskMode` | Mask visibility mode (`deny`\|`allow`) | from profile/`.env` |
+| `DEEPAGENTS_JAIL` | `-Jail` | bwrap fs jail on/off | from profile/`.env` |
+| `DEEPAGENTS_JAIL_APPARMOR` | `-JailApparmor` | AppArmor stance for the jail | from profile/`.env` |
+
+(Milestone 5, C3: these four resolve `-Flag > host env > project/.env > .harness-profile.yaml >
+default` via `scripts/lib/config.{ps1,sh}`, the same precedence `harness/config.py` uses
+container-side — see "Unified config" in `CLAUDE.md`.)
 | `NET_JAIL` | `-NetJail` | Deny-all-egress network jail (see netjail/README.md) | off |
 | `DEEPAGENTS_JAIL_APPARMOR` | — | AppArmor stance for the bwrap jail. **Unset = auto (slice J):** `run-docker` asks the daemon what confines a container; no LSM → passes nothing; LSM in force + `deepagent-userns` loaded → selects it; LSM in force + not loaded → **aborts pre-flight** with the install command, never falling back to `unconfined`. `unconfined` = works everywhere at the cost of dropping the **whole** `docker-default` profile, not just its `deny mount,`. Any other value = a host-loaded profile name. Load the profile on the **daemon's** host: `sudo scripts/install-apparmor-profile.sh` | unset (auto) |

@@ -24,6 +24,38 @@ def test_doctor_clean_workspace_no_errors(tmp_path):
     assert rc == 0
 
 
+def test_doctor_prints_resolved_config_summary(tmp_path, monkeypatch, capsys):
+    # Milestone 5, C8: doctor reports the resolved config (profile + env + CLI
+    # merge via resolve_settings, no cli= override) instead of raw env grepping.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DEEPAGENTS_MODEL", raising=False)
+    monkeypatch.delenv("DEEPAGENTS_JAIL", raising=False)
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    state = tmp_path / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    doctor.doctor_main([str(ws), str(state)])
+    err = capsys.readouterr().err
+    assert "resolved config:" in err
+    assert "mask_mode=deny" in err
+    assert "jail=off" in err
+    assert "hitl=off" in err
+
+
+def test_doctor_resolved_config_summary_reflects_profile(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DEEPAGENTS_JAIL", raising=False)
+    (tmp_path / ".harness-profile.yaml").write_text("jail: true\nmodel: openai:gpt-5.5\n", encoding="utf-8")
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    state = tmp_path / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    doctor.doctor_main([str(ws), str(state)])
+    err = capsys.readouterr().err
+    assert "model=openai:gpt-5.5 (profile)" in err
+    assert "jail=on (profile)" in err
+
+
 def test_doctor_workspace_with_env_file(tmp_path):
     ws = tmp_path / "workspace"
     ws.mkdir()
