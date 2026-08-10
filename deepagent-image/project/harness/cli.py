@@ -1366,6 +1366,13 @@ def dispatch(argv: list[str]) -> int:
         from harness.doctor import doctor_main
 
         return doctor_main(argv[1:])
+    if argv and argv[0] == "config":
+        # Milestone 5, C6/C7: keyless pre-spinup config wizard. A separate module
+        # (not cli.py's REPL-side /config) so it stays dependency-light -- no
+        # deepagents/langgraph/langchain pulled in just to run the wizard.
+        from harness.config_cli import config_main
+
+        return config_main(argv[1:])
     if argv and argv[0] == "seccomp-sync":
         from harness.seccomp import seccomp_sync_main
 
