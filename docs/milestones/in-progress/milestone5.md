@@ -2,10 +2,11 @@
 
 ## 0. Build status
 
-**Planned** — docs only, no code yet. `milestone5_spec.md` (same folder) is the full
-implementation-level spec: exact module layout, `Settings` dataclass, precedence algorithm, file
-formats, CLI/REPL surfaces, and the concrete file-by-file diff. Read this doc for scope/DoD/why;
-read the spec for how.
+**In-progress** — build started on `feat/milestone5-unified-config`. `milestone5_spec.md` (same
+folder) is the full implementation-level spec: exact module layout, `Settings` dataclass,
+precedence algorithm, file formats, CLI/REPL surfaces, and the concrete file-by-file diff.
+`milestone5_invariants.md` (same folder) is the checkable-assertion companion — read this doc for
+scope/DoD/why, the spec for how, the invariants doc for what must hold.
 
 ## 1. Goal & Definition of Done
 
