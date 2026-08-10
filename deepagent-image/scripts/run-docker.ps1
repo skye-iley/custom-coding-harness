@@ -29,6 +29,11 @@ param(
     [string]$MaskMode = "",
     [string]$Jail = "",
     [string]$JailApparmor = "",
+    # Write/update .harness-config.yaml's autonomy_level before launch (strict|
+    # guided|autonomous). An imperative action, not a resolved Settings field --
+    # HITL's presence-of-file-turns-it-on design (M3) means this necessarily
+    # turns HITL on if it wasn't already; that's the point, not a side effect.
+    [string]$Autonomy = "",
     # NetJail (see netjail\README.md): run the agent on an --internal docker
     # network with no route to host or internet, punching only the holes declared
     # in netjail\host-services.txt (host ports) and netjail\allowed-domains.txt
@@ -462,6 +467,31 @@ $dockerArgs = @(
 $GitConfig = Join-Path $env:USERPROFILE ".gitconfig"
 if (Test-Path $GitConfig) {
     $dockerArgs += "-v", "${GitConfig}:/home/agent/.gitconfig:ro"
+}
+
+# -Autonomy: write/update autonomy_level in .harness-config.yaml before the
+# mount check below sees it. Plain text edit (no YAML parser, matching every
+# other host-side scrape/write in this script) -- replace the existing
+# `autonomy_level:` line if present, else prepend one (creating the file if it
+# doesn't exist yet).
+if ($Autonomy) {
+    if ($Autonomy -notin @("strict", "guided", "autonomous")) {
+        Write-Error "[harness] FATAL: -Autonomy must be one of strict|guided|autonomous, got '$Autonomy'"
+        exit 1
+    }
+    $HitlConfigPath = Join-Path $Root "project\.harness-config.yaml"
+    if (Test-Path $HitlConfigPath) {
+        $existing = Get-Content $HitlConfigPath
+        if ($existing -match '^\s*autonomy_level\s*:') {
+            $updated = $existing -replace '^\s*autonomy_level\s*:.*', "autonomy_level: $Autonomy"
+        } else {
+            $updated = @("autonomy_level: $Autonomy") + $existing
+        }
+        Set-Content -Path $HitlConfigPath -Value $updated -Encoding utf8
+    } else {
+        Set-Content -Path $HitlConfigPath -Value "autonomy_level: $Autonomy" -Encoding utf8
+    }
+    Write-Host "HITL: autonomy_level set to '$Autonomy' in .harness-config.yaml (turns HITL on for this run if it wasn't already)"
 }
 
 # HITL config: .harness-config.yaml is host-local + gitignored (like .env), so it

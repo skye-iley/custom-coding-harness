@@ -120,6 +120,58 @@ def agentignore_add_pattern(workspace: Path, pattern: str) -> Path:
     return path
 
 
+def netjail_dir() -> Path:
+    """The repo's netjail/ dir, resolved relative to this file (a sibling of
+    project/, one level up from harness/) -- valid when `harness config` runs
+    on the host (the intended usage: pre-spinup, before docker run) against a
+    checked-out repo. Not present inside a running container (netjail/ is
+    host-only config, never COPYed into the image), so callers must handle a
+    missing directory gracefully rather than assume it exists."""
+    return Path(__file__).resolve().parent.parent.parent / "netjail"
+
+
+def netjail_list_entries(path: Path) -> list[str]:
+    """Non-comment, non-blank lines, in file order. `[]` if the file is absent."""
+    if not path.is_file():
+        return []
+    return [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+
+def netjail_add_entry(path: Path, entry: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    sep = "\n" if existing and not existing.endswith("\n") else ""
+    with path.open("a", encoding="utf-8") as f:
+        f.write(f"{sep}{entry}\n")
+
+
+def netjail_remove_entry(path: Path, index: int) -> str | None:
+    """Remove the `index`-th (0-based) non-comment, non-blank entry, leaving
+    comments/blank lines elsewhere untouched. Returns the removed entry's
+    text, or `None` if `index` is out of range or the file doesn't exist."""
+    if not path.is_file():
+        return None
+    lines = path.read_text(encoding="utf-8").splitlines()
+    out: list[str] = []
+    count = -1
+    removed = None
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            count += 1
+            if count == index:
+                removed = stripped
+                continue  # drop this line, keep everything else
+        out.append(line)
+    if removed is not None:
+        path.write_text("\n".join(out) + "\n", encoding="utf-8")
+    return removed
+
+
 def agentignore_add_floor(workspace: Path, pattern: str) -> Path:
     """Append `pattern` inside the `#!floor: ... #!floor-end` block, creating
     the block (at EOF) if the file has none yet. Returns the file path."""
@@ -266,6 +318,49 @@ def _wizard_agentignore_step() -> None:
             return
 
 
+def _wizard_netjail_step() -> None:
+    net_dir = netjail_dir()
+    if not net_dir.is_dir():
+        print(f"[harness] NetJail directory not found at {net_dir} -- skipping (host-side only; "
+              "run `harness config security` from a checked-out repo, not inside a container).")
+        return
+    files = {
+        "host-services.txt (host port forwarders)": "host-services.txt",
+        "allowed-domains.txt (egress domains)": "allowed-domains.txt",
+    }
+    while True:
+        which = _numbered_choice("NetJail allowlists:", ["done", *files], default_index=0)
+        if which == "done":
+            return
+        fname = files[which]
+        path = net_dir / fname
+        entries = netjail_list_entries(path)
+        print(f"\n{fname}:")
+        if not entries:
+            print("  (empty)")
+        for i, e in enumerate(entries, 1):
+            print(f"  {i}) {e}")
+        action = _numbered_choice("Action:", ["back", "add", "delete"], default_index=0)
+        if action == "back":
+            continue
+        if action == "add":
+            hint = "name port, e.g. ollama 11434" if fname == "host-services.txt" else "domain, e.g. api.github.com"
+            entry = input(f"new entry ({hint}): ").strip()
+            if entry:
+                netjail_add_entry(path, entry)
+                print(f"[harness] added {entry!r} to {fname}")
+        elif action == "delete":
+            if not entries:
+                print("[harness] nothing to delete.")
+                continue
+            raw = input(f"entry number to delete [1-{len(entries)}]: ").strip()
+            if raw.isdigit() and 1 <= int(raw) <= len(entries):
+                removed = netjail_remove_entry(path, int(raw) - 1)
+                print(f"[harness] removed {removed!r} from {fname}")
+            else:
+                print(f"[harness] invalid entry number {raw!r}.")
+
+
 def _run_wizard(*, security_only: bool, auto_save: bool) -> int:
     if not sys.stdin.isatty():
         print(
@@ -286,6 +381,7 @@ def _run_wizard(*, security_only: bool, auto_save: bool) -> int:
         hitl_choice = _wizard_hitl_step()
     else:
         _wizard_agentignore_step()
+        _wizard_netjail_step()
 
     print()
     print("Summary:")

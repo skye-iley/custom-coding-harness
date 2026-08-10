@@ -267,13 +267,41 @@ if [[ -f "$HOME/.gitconfig" ]]; then
   GIT_MOUNT=(-v "$HOME/.gitconfig:$HOME_DIR/.gitconfig:ro")
 fi
 
+# AUTONOMY: write/update autonomy_level in .harness-config.yaml before the mount
+# check below sees it. Plain text edit (no YAML parser, matching every other
+# host-side scrape/write in this script) -- replace the existing
+# `autonomy_level:` line if present, else prepend one (creating the file if it
+# doesn't exist yet). An imperative action, not a resolved Settings field --
+# HITL's presence-of-file-turns-it-on design (M3) means this necessarily turns
+# HITL on if it wasn't already; that's the point, not a side effect.
+HITL_CONFIG_PATH="$ROOT/project/.harness-config.yaml"
+if [[ -n "${AUTONOMY:-}" ]]; then
+  case "$AUTONOMY" in
+    strict | guided | autonomous) ;;
+    *)
+      echo "[harness] FATAL: AUTONOMY must be one of strict|guided|autonomous, got '$AUTONOMY'" >&2
+      exit 1
+      ;;
+  esac
+  if [[ -f "$HITL_CONFIG_PATH" ]] && grep -q '^[[:space:]]*autonomy_level[[:space:]]*:' "$HITL_CONFIG_PATH"; then
+    sed -i.bak "s/^[[:space:]]*autonomy_level[[:space:]]*:.*/autonomy_level: $AUTONOMY/" "$HITL_CONFIG_PATH"
+    rm -f "$HITL_CONFIG_PATH.bak"
+  elif [[ -f "$HITL_CONFIG_PATH" ]]; then
+    { echo "autonomy_level: $AUTONOMY"; cat "$HITL_CONFIG_PATH"; } > "$HITL_CONFIG_PATH.tmp"
+    mv "$HITL_CONFIG_PATH.tmp" "$HITL_CONFIG_PATH"
+  else
+    echo "autonomy_level: $AUTONOMY" > "$HITL_CONFIG_PATH"
+  fi
+  echo "HITL: autonomy_level set to '$AUTONOMY' in .harness-config.yaml (turns HITL on for this run if it wasn't already)"
+fi
+
 # HITL config: .harness-config.yaml is host-local + gitignored (like .env), so it
 # is NOT baked into the image. Mount it into /project (the harness CWD) when
 # present so its mere presence turns HITL on (cli reads Path.cwd()/.harness-config.yaml).
 # Absent => not mounted => HITL stays off (byte-for-byte Milestone 2).
 HITL_MOUNT=()
-if [[ -f "$ROOT/project/.harness-config.yaml" ]]; then
-  HITL_MOUNT=(-v "$ROOT/project/.harness-config.yaml:/project/.harness-config.yaml:ro")
+if [[ -f "$HITL_CONFIG_PATH" ]]; then
+  HITL_MOUNT=(-v "$HITL_CONFIG_PATH:/project/.harness-config.yaml:ro")
   echo "HITL config: mounted (.harness-config.yaml present)"
 fi
 

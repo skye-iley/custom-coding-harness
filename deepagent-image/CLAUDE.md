@@ -767,17 +767,25 @@ the baseline record of defaults when nothing else overrides it.
     equivalent env vars (`.sh`, which already treats `VAR=x ./run-docker.sh` as its "flag"
     mechanism), each resolving through `scripts/lib/config.{ps1,sh}`'s
     `Resolve-HostSetting`/`_resolve_host_setting` — the same four-tier precedence, since a
-    Docker flag has no way to read `Settings` directly.
+    Docker flag has no way to read `Settings` directly. `-Autonomy`/`AUTONOMY` is shaped
+    differently: the HITL preset isn't a `Settings`/profile field (it's a whole-file swap-in --
+    `.harness-config.yaml`'s presence *is* the on/off switch), so it's a plain-text write/update
+    of the `autonomy_level:` line (creating the file if absent), not a four-tier resolve --
+    necessarily turns HITL on for the run if it wasn't already.
   - **`harness config`** (keyless, `harness/config_cli.py`) — the pre-spinup wizard: model +
     security posture + HITL preset, then confirms (or `--save` skips the prompt) before writing
     `.harness-profile.yaml`. `harness config show` prints the resolved config with no prompts;
     `harness config set <field> <value>` is a one-shot, non-interactive write (validated by
     round-tripping through the profile parser, rolled back on a bad value).
-    **`harness config security`** is the same wizard with the model/HITL screens skipped, plus a
-    `.agentignore` quick-edit (add a masked path or a floor entry) — a convenience wrapper over
-    the workspace's `.agentignore`, not a new masking mechanism (M4 still owns that file's
-    format). Dependency-light on purpose: stdlib + `harness.config` + `harness.providers` only,
-    no langchain/deepagents — importing it doesn't need the runtime stack the way `cli.py` does.
+    **`harness config security`** is the same wizard with the model/HITL screens skipped, plus
+    two quick-edit loops: `.agentignore` (add a masked path or a floor entry, appending to the
+    workspace's `.agentignore` -- a convenience wrapper, not a new masking mechanism, M4 still
+    owns that file's format) and NetJail allowlists (add/delete entries in
+    `netjail/host-services.txt` / `netjail/allowed-domains.txt` in place, preserving comments --
+    resolved relative to `config_cli.py`'s own path since `netjail/` isn't copied into the image,
+    so this only works run on the host, same pre-spinup context every other knob here assumes).
+    Dependency-light on purpose: stdlib + `harness.config` + `harness.providers` only, no
+    langchain/deepagents -- importing it doesn't need the runtime stack the way `cli.py` does.
 - **In-session, `/config`** (REPL, always in the slash menu): `/config` shows the resolved
   config, source-tagged, live fields first then the pre-spinup half read-only; `/config set
   <field> <value>` edits one live field (`model` rebuilds the agent through the same
@@ -841,7 +849,7 @@ harness past topics                         # list all topics
 harness config                              # full interactive wizard, then confirms save
 harness config show                         # print resolved config, no prompts
 harness config set <field> <value>          # one-shot, non-interactive
-harness config security                     # security-only wizard + .agentignore quick-edit
+harness config security                     # security-only wizard + .agentignore/NetJail quick-edit
 ```
 
 (Requires the harness venv: `source deepagent-image/.venv/bin/activate` or install locally)

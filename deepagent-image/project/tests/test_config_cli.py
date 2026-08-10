@@ -314,6 +314,9 @@ def test_run_wizard_end_to_end_writes_profile_and_hitl(tmp_path, monkeypatch, ca
 def test_run_wizard_auto_save_skips_confirmation(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cc.sys.stdin, "isatty", lambda: True)
+    # Isolate from the real repo's netjail/ dir -- point at an empty tmp dir so
+    # the netjail step's "not found" branch fires with no prompt consumed.
+    monkeypatch.setattr(cc, "netjail_dir", lambda: tmp_path / "no-netjail-here")
     for p in cc.PROVIDERS:
         monkeypatch.delenv(p.api_key_env, raising=False)
     _input_sequence(monkeypatch, [
@@ -326,6 +329,93 @@ def test_run_wizard_auto_save_skips_confirmation(tmp_path, monkeypatch):
     # it, proven by the sequence above being exactly exhausted with no
     # StopIteration (a 3rd queued input would go unused and be silently fine,
     # but a missing one would raise -- absence of that error is the assertion).
+
+
+# --- NetJail list editor (harness config security) -----------------------------
+
+
+def test_netjail_dir_resolves_relative_to_module():
+    # Portable across host-checkout and in-container layouts: netjail_dir() is
+    # always three parents up from this file (harness/ -> project/ -> its
+    # parent), whatever that parent is named. The host checkout names it
+    # "deepagent-image"; a container's flattened /project has no such sibling
+    # at all (netjail/ isn't COPYed in) -- that asymmetry is exactly why the
+    # wizard step checks .is_dir() rather than assuming the path is valid.
+    expected = cc.Path(cc.__file__).resolve().parent.parent.parent / "netjail"
+    assert cc.netjail_dir() == expected
+    assert cc.netjail_dir().name == "netjail"
+
+
+def test_netjail_list_entries_skips_comments_and_blanks(tmp_path):
+    p = tmp_path / "host-services.txt"
+    p.write_text("# comment\n\nollama 11434\n  \n# another\nredis 6379\n", encoding="utf-8")
+    assert cc.netjail_list_entries(p) == ["ollama 11434", "redis 6379"]
+
+
+def test_netjail_list_entries_absent_file_is_empty(tmp_path):
+    assert cc.netjail_list_entries(tmp_path / "missing.txt") == []
+
+
+def test_netjail_add_entry_appends(tmp_path):
+    p = tmp_path / "allowed-domains.txt"
+    p.write_text("# header\nexample.com\n", encoding="utf-8")
+    cc.netjail_add_entry(p, "api.github.com")
+    assert cc.netjail_list_entries(p) == ["example.com", "api.github.com"]
+
+
+def test_netjail_add_entry_creates_file(tmp_path):
+    p = tmp_path / "sub" / "allowed-domains.txt"
+    cc.netjail_add_entry(p, "example.com")
+    assert cc.netjail_list_entries(p) == ["example.com"]
+
+
+def test_netjail_remove_entry_by_index_preserves_comments(tmp_path):
+    p = tmp_path / "host-services.txt"
+    p.write_text("# header\nollama 11434\n# note\nredis 6379\n", encoding="utf-8")
+    removed = cc.netjail_remove_entry(p, 0)
+    assert removed == "ollama 11434"
+    text = p.read_text(encoding="utf-8")
+    assert "# header" in text and "# note" in text
+    assert cc.netjail_list_entries(p) == ["redis 6379"]
+
+
+def test_netjail_remove_entry_out_of_range_returns_none(tmp_path):
+    p = tmp_path / "host-services.txt"
+    p.write_text("ollama 11434\n", encoding="utf-8")
+    assert cc.netjail_remove_entry(p, 5) is None
+    assert cc.netjail_list_entries(p) == ["ollama 11434"]  # untouched
+
+
+def test_netjail_remove_entry_absent_file_returns_none(tmp_path):
+    assert cc.netjail_remove_entry(tmp_path / "missing.txt", 0) is None
+
+
+def test_wizard_netjail_step_missing_dir_prints_and_returns(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cc, "netjail_dir", lambda: tmp_path / "nope")
+    cc._wizard_netjail_step()  # no input() call should happen
+    assert "not found" in capsys.readouterr().out
+
+
+def test_wizard_netjail_step_add_then_delete(tmp_path, monkeypatch, capsys):
+    net_dir = tmp_path / "netjail"
+    net_dir.mkdir()
+    monkeypatch.setattr(cc, "netjail_dir", lambda: net_dir)
+    _input_sequence(monkeypatch, [
+        "2",             # host-services.txt
+        "2",             # action: add
+        "ollama 11434",  # new entry
+        "2",             # host-services.txt again
+        "3",             # action: delete
+        "1",             # delete entry #1
+        "2",             # host-services.txt again
+        "1",             # action: back
+        "1",             # done
+    ])
+    cc._wizard_netjail_step()
+    assert cc.netjail_list_entries(net_dir / "host-services.txt") == []
+    out = capsys.readouterr().out
+    assert "added 'ollama 11434'" in out
+    assert "removed 'ollama 11434'" in out
 
 
 def test_config_main_dispatches_show(tmp_path, monkeypatch, capsys):

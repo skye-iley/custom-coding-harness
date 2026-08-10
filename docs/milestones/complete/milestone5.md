@@ -2,13 +2,15 @@
 
 ## 0. Build status
 
-**Built** — C1–C8 all landed on `feat/milestone5-unified-config`. `milestone5_spec.md` (same
-folder) is the implementation-level spec this was built from; §8 below is the checkable-invariant
-companion, folded in on completion per the repo's milestone lifecycle. Three deliberate deviations
-from the original spec sketch, each scoped down for a lower-risk v1 rather than left half-built —
-see the per-slice notes in §4 (C3 drops the planned `-Autonomy` flag, C5 drops the planned
-arrow-key menu for typed commands, C7 drops the planned NetJail list editor) — and one real bug the
-build surfaced and fixed along the way (§4 C5's `PauseMiddleware` caching note).
+**Built** — C1–C8 all landed on `feat/milestone5-unified-config`, plus two follow-ups added after
+initial review (`-Autonomy`/`AUTONOMY` in C3, the NetJail list editor in C7 — both initially scoped
+out for time, then built once asked "why not?"). `milestone5_spec.md` (same folder) is the
+implementation-level spec this was built from; §8 below is the checkable-invariant companion,
+folded in on completion per the repo's milestone lifecycle. One deliberate deviation from the
+original spec sketch remains: C5 drops the planned arrow-key `/config` menu for typed commands
+(see its §4 note — most settable fields are free text, not a fixed choice list, so a picker UI
+doesn't fit most of them anyway). One real bug the build surfaced and fixed along the way: §4 C5's
+`PauseMiddleware` caching note.
 
 ## 1. Goal & Definition of Done
 
@@ -102,16 +104,19 @@ on the parser (rather than argparse's implicit default) so "not passed" is disti
 "passed as falsy" — the trick `--headless` (`action="store_true", default=None`) needs. No new
 container-side flags were needed.
 
-### C3 — CLI flag parity (host side, `run-docker.{ps1,sh}`) — **built, one flag dropped**
+### C3 — CLI flag parity (host side, `run-docker.{ps1,sh}`) — **built**
 
-Adds `-Model`, `-MaskMode`, `-Jail`, `-JailApparmor` to `run-docker.ps1` (`.sh`'s "flag" is already
-its env-var invocation, `VAR=x ./run-docker.sh`, so no new `.sh` flags were needed — only the
-shared resolver). **Dropped from the original plan: `-Autonomy`/`AUTONOMY`.** The HITL preset isn't
-a `Settings`/profile field — it's a whole-file swap-in (`.harness-config.yaml`'s presence *is* the
-on/off switch, §6 fork 1) — so writing it from the host side is `harness config`'s job (C6), not a
-`run-docker` flag; a `-Autonomy` flag would have needed its own separate write path to a different
-file, duplicating what the wizard already does. `DEEPAGENTS_MASK` (mask on/off) deliberately keeps
-no flag/profile tier either — it's a debugging escape hatch, not a saveable default, matching
+Adds `-Model`, `-MaskMode`, `-Jail`, `-JailApparmor`, `-Autonomy` to `run-docker.ps1` (`.sh`'s
+"flag" is already its env-var invocation, `VAR=x ./run-docker.sh`, so no new `.sh` flags were
+needed — only the shared resolver). `-Autonomy`/`AUTONOMY` is shaped differently from the other
+four: the HITL preset isn't a `Settings`/profile field, it's a whole-file swap-in
+(`.harness-config.yaml`'s presence *is* the on/off switch, §6 fork 1), so it isn't resolved
+through `Resolve-HostSetting`'s four-tier chain — it's a plain-text write/update of the
+`autonomy_level:` line (creating the file if absent, preserving every other line if present),
+mirroring `harness config`'s `write_hitl_preset` but in bash/PowerShell so `run-docker` stays
+Python-independent. Necessarily turns HITL on for the run if it wasn't already (that's the
+point, not a side effect — printed, never silent). `DEEPAGENTS_MASK` (mask on/off) deliberately
+keeps no flag/profile tier either — it's a debugging escape hatch, not a saveable default, matching
 `Settings.mask_enabled`'s exclusion from the profile (§5). A new `scripts/lib/config.{ps1,sh}`
 (`Resolve-HostSetting` / `_resolve_host_setting`) replaces three near-duplicated scrape blocks per
 script with one function; `check-parity.{ps1,sh}` gained a fixture-based section proving both
@@ -165,17 +170,21 @@ deterministically testable via a stubbed `input()`. The HITL preset needed a wri
 exist (M3 never wrote `.harness-config.yaml`, only hand-copied the `.example`); `write_hitl_preset`
 only touches the `autonomy_level` line, so a hand-edited `review_triggers` block survives.
 
-### C7 — `harness config security` (host side, keyless, pre-spinup) — **built, narrower than planned**
+### C7 — `harness config security` (host side, keyless, pre-spinup) — **built**
 
 The tail of C6's same wizard with the model/HITL screens skipped ("already the same program, a
-narrower entry point"): mask mode, jail/AppArmor toggle, resource caps, plus a `.agentignore`
-quick-edit (add a masked path or a floor entry, appending to the **workspace's** `.agentignore` —
-a convenience wrapper, not a new masking mechanism; M4 still owns the file's format).
-**Dropped from the original plan: the NetJail domain/host-service list editor.** `netjail/`'s
-allowlist files are plain text edited directly today; wiring a guided editor for them was judged
-lower-value than the rest of this slice for the time available and is a natural, separable
-follow-up, not a removed capability (nothing about NetJail got harder to configure — it just didn't
-get easier).
+narrower entry point"): mask mode, jail/AppArmor toggle, resource caps, plus two quick-edit
+loops:
+- **`.agentignore`** — add a masked path or a floor entry, appending to the **workspace's**
+  `.agentignore` — a convenience wrapper, not a new masking mechanism; M4 still owns the file's
+  format.
+- **NetJail allowlists** — add/delete entries in `netjail/host-services.txt` and
+  `netjail/allowed-domains.txt` (list current entries, add one, or delete by number), editing the
+  files in place while preserving their comments. Resolved relative to `config_cli.py`'s own file
+  path (`netjail/` is a sibling of `project/`, not copied into the image), so this only works when
+  `harness config security` runs on the host against a checked-out repo — the same pre-spinup
+  context every other knob in this slice assumes. Inside a container it reports the directory as
+  not found and skips, rather than erroring.
 
 ### C8 — `harness doctor` + docs integration — **built**
 

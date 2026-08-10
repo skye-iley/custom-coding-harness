@@ -6,10 +6,12 @@ built from: module layout, data shapes, precedence algorithm, file formats, CLI/
 the concrete diff to existing modules.
 
 Written during planning, before code existed, so it reads in the past-planning tense throughout
-("will", "gets", proposed line numbers). Three details it describes did not ship as written —
-`milestone5.md` §4 (C3, C5, C7) has the as-built account and why; treat this file as the design
-rationale and everything else as accurate. Line-number references below may also have drifted as
-code moved; per `docs/README.md`, the code wins on any mismatch.
+("will", "gets", proposed line numbers). One detail it describes did not ship as written — the
+arrow-key `/config` menu sketched in §8 shipped as typed commands instead; `milestone5.md` §4 C5
+has the as-built account and why. Treat this file as the design rationale and everything else
+(including the `-Autonomy` flag and the `harness config security` NetJail editor, both of which
+did ship, just not exactly as first sketched) as accurate in intent. Line-number references below
+may also have drifted as code moved; per `docs/README.md`, the code wins on any mismatch.
 
 ## 1. Resolved forks
 
