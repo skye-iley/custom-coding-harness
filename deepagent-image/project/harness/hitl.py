@@ -520,11 +520,13 @@ class PauseMiddleware(AgentMiddleware):
     def __init__(self, config: HitlSection):
         super().__init__()
         self._config = config
-        self._gate_all_tools = "tool.start" in config.gated_hooks()
-        self._on_deny = getattr(config, "on_deny", "halt")
 
     def _should_gate(self, name, values, command):
-        if self._gate_all_tools:
+        # Read live off self._config, not cached at construction: Milestone 5's
+        # /config set hitl.autonomy_level mutates this same (frozen-but-
+        # object.__setattr__-mutated) HitlSection in place, and that change must
+        # take effect on the very next gated call, not require an agent rebuild.
+        if "tool.start" in self._config.gated_hooks():
             return True, None
         hit = match_triggers(
             self._config.review_triggers,
@@ -574,7 +576,7 @@ class PauseMiddleware(AgentMiddleware):
             file=sys.stderr,
         )
         blocked = _blocked_result(request, name)
-        if self._on_deny == "halt":
+        if getattr(self._config, "on_deny", "halt") == "halt":
             # End the turn now: no post-deny model call, no bypass window. The caller
             # pairs `blocked` into checkpoint state and returns to the human prompt.
             raise HaltTurn(blocked, name or "")

@@ -10,6 +10,7 @@ the harness byte-for-byte MVP when nothing needs tracking (§2.5).
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import sys
 
@@ -454,10 +455,10 @@ def test_run_repl_turn_error_interactive_survives_to_next_prompt(monkeypatch):
 # --- prompt_toolkit REPL input ergonomics (M3 slice 6, PR-a) ---
 
 def test_slash_commands_gated_on_archive():
-    # /exit and /quit always available; /recall and /topic only when the past
-    # archive is on (they are inert otherwise, so must not appear in the menu).
+    # /exit, /quit, /config always available; /recall and /topic only when the
+    # past archive is on (they are inert otherwise, so must not appear in the menu).
     base = cli.slash_commands(archive_on=False)
-    assert set(base) == {"/exit", "/quit"}
+    assert set(base) == {"/exit", "/quit", "/config"}
 
     witharchive = cli.slash_commands(archive_on=True)
     assert {"/recall", "/topic"} <= set(witharchive)
@@ -502,6 +503,7 @@ def test_completion_candidates_match_typed_slash_token():
 
     assert cli._completion_candidates("/re", cmds) == [("/recall", cmds["/recall"])]
     assert sorted(c for c, _ in cli._completion_candidates("/", cmds)) == [
+        "/config",
         "/exit",
         "/quit",
         "/recall",
@@ -646,3 +648,331 @@ def test_dump_partial_never_raises_when_get_state_fails(monkeypatch, capsys):
     agent = _StatefulAgent(raises=RuntimeError("checkpointer gone"))
     cli._dump_partial(agent, {})  # must not raise out of an error handler
     assert "partial state unavailable" in capsys.readouterr().err
+
+
+# --- Milestone 5, C5: /config REPL command ------------------------------------
+
+cfg = _load("harness.config")
+
+
+def test_parse_config_command_bare_and_with_subcommand():
+    assert cli._parse_config_command("/config") == ("", [])
+    assert cli._parse_config_command("/config save") == ("save", [])
+    assert cli._parse_config_command("/config set model openai:gpt-5.5") == (
+        "set", ["model", "openai:gpt-5.5"],
+    )
+
+
+def test_parse_config_set_args_valid():
+    assert cli._parse_config_set_args(["model", "openai:gpt-5.5"]) == ("model", "openai:gpt-5.5")
+    # Values may contain spaces (e.g. a topic label); only the first token is the field.
+    assert cli._parse_config_set_args(["topic", "auth", "refactor"]) == ("topic", "auth refactor")
+
+
+def test_parse_config_set_args_too_few_raises():
+    with pytest.raises(ValueError, match="usage"):
+        cli._parse_config_set_args(["model"])
+    with pytest.raises(ValueError, match="usage"):
+        cli._parse_config_set_args([])
+
+
+def test_parse_config_set_args_prespinup_field_rejected():
+    with pytest.raises(ValueError, match="fixed for this container"):
+        cli._parse_config_set_args(["jail", "true"])
+    with pytest.raises(ValueError, match="fixed for this container"):
+        cli._parse_config_set_args(["mask_mode", "allow"])
+
+
+def test_parse_config_set_args_unknown_field_rejected():
+    with pytest.raises(ValueError, match="unknown field"):
+        cli._parse_config_set_args(["bogus", "x"])
+
+
+def test_config_prespinup_fields_match_live_fields_complement():
+    # milestone5_invariants.md #4: derived from LIVE_FIELDS, not hand-duplicated.
+    settings_fields = {f.name for f in dataclasses.fields(cfg.Settings)}
+    assert set(cli._CONFIG_PRESPINUP_FIELDS) == settings_fields - cfg.LIVE_FIELDS
+
+
+def test_handle_config_bare_prints_lines(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    model, new_agent, topic = cli._handle_config(
+        "/config",
+        config={"configurable": {"thread_id": "session-x"}},
+        current_model="openai:gpt-5.5",
+        topic="auth",
+        tracker=None,
+        hitl_conf=None,
+        rebuild_agent=None,
+        edited=set(),
+    )
+    assert model == "openai:gpt-5.5" and new_agent is None and topic == "auth"
+    err = capsys.readouterr().err
+    assert "model" in err and "openai:gpt-5.5" in err
+    assert "thread_id" in err and "session-x" in err
+    assert "pre-spinup" in err
+    assert "hitl" in err and "off" in err  # no hitl_conf => shown as off
+
+
+def test_handle_config_set_model_rebuilds_and_switches(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    calls = []
+
+    def fake_rebuild(spec):
+        calls.append(spec)
+        return f"agent-for-{spec}"
+
+    edited = set()
+    model, new_agent, topic = cli._handle_config(
+        "/config set model openai:gpt-6",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="openai:gpt-5.5",
+        topic=None,
+        tracker=None,
+        hitl_conf=None,
+        rebuild_agent=fake_rebuild,
+        edited=edited,
+    )
+    assert calls == ["openai:gpt-6"]
+    assert model == "openai:gpt-6"
+    assert new_agent == "agent-for-openai:gpt-6"
+    assert "model" in edited
+
+
+def test_handle_config_set_model_failure_keeps_old_model(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+
+    def fake_rebuild(spec):
+        raise SystemExit("no credentials for that provider")
+
+    model, new_agent, topic = cli._handle_config(
+        "/config set model bogus:model",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="openai:gpt-5.5",
+        topic=None,
+        tracker=None,
+        hitl_conf=None,
+        rebuild_agent=fake_rebuild,
+        edited=set(),
+    )
+    assert model == "openai:gpt-5.5"
+    assert new_agent is None
+    assert "failed" in capsys.readouterr().err
+
+
+def test_handle_config_set_model_without_rebuild_agent_is_unavailable(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    model, new_agent, topic = cli._handle_config(
+        "/config set model openai:gpt-6",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="openai:gpt-5.5",
+        topic=None,
+        tracker=None,
+        hitl_conf=None,
+        rebuild_agent=None,
+        edited=set(),
+    )
+    assert model == "openai:gpt-5.5" and new_agent is None
+    assert "unavailable" in capsys.readouterr().err
+
+
+def test_handle_config_set_thread_id_mutates_config_dict(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    config = {"configurable": {"thread_id": "old-thread"}}
+    edited = set()
+    cli._handle_config(
+        "/config set thread_id new-thread",
+        config=config,
+        current_model="m",
+        topic=None,
+        tracker=None,
+        hitl_conf=None,
+        rebuild_agent=None,
+        edited=edited,
+    )
+    assert config["configurable"]["thread_id"] == "new-thread"
+    assert "thread_id" in edited
+
+
+def test_handle_config_set_topic_returns_new_topic(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    model, new_agent, topic = cli._handle_config(
+        "/config set topic new-topic-label",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="m",
+        topic="old-topic",
+        tracker=None,
+        hitl_conf=None,
+        rebuild_agent=None,
+        edited=set(),
+    )
+    assert topic == "new-topic-label"
+
+
+def test_handle_config_set_budget_without_tracker_refuses(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    cli._handle_config(
+        "/config set max_cost 5.0",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="m",
+        topic=None,
+        tracker=None,
+        hitl_conf=None,
+        rebuild_agent=None,
+        edited=set(),
+    )
+    assert "no cost tracker active" in capsys.readouterr().err
+
+
+class _FakeTracker:
+    def __init__(self):
+        self._max_cost = None
+        self._max_tokens = None
+
+
+def test_handle_config_set_budget_mutates_tracker(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    tracker = _FakeTracker()
+    edited = set()
+    cli._handle_config(
+        "/config set max_cost 12.5",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="m",
+        topic=None,
+        tracker=tracker,
+        hitl_conf=None,
+        rebuild_agent=None,
+        edited=edited,
+    )
+    assert tracker._max_cost == 12.5
+    assert "max_cost" in edited
+
+    cli._handle_config(
+        "/config set max_tokens 1000",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="m",
+        topic=None,
+        tracker=tracker,
+        hitl_conf=None,
+        rebuild_agent=None,
+        edited=edited,
+    )
+    assert tracker._max_tokens == 1000
+
+
+def test_handle_config_set_budget_bad_number(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    tracker = _FakeTracker()
+    cli._handle_config(
+        "/config set max_cost not-a-number",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="m",
+        topic=None,
+        tracker=tracker,
+        hitl_conf=None,
+        rebuild_agent=None,
+        edited=set(),
+    )
+    assert tracker._max_cost is None
+    assert "must be a number" in capsys.readouterr().err
+
+
+def test_handle_config_set_hitl_without_hitl_conf_refuses(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    cli._handle_config(
+        "/config set hitl.autonomy_level strict",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="m",
+        topic=None,
+        tracker=None,
+        hitl_conf=None,
+        rebuild_agent=None,
+        edited=set(),
+    )
+    assert "HITL is off" in capsys.readouterr().err
+
+
+def test_handle_config_set_hitl_mutates_live_object(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    hitl_conf = cfg.HitlSection(autonomy_level="guided")
+    edited = set()
+    cli._handle_config(
+        "/config set hitl.autonomy_level strict",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="m",
+        topic=None,
+        tracker=None,
+        hitl_conf=hitl_conf,
+        rebuild_agent=None,
+        edited=edited,
+    )
+    # Frozen dataclass, mutated via object.__setattr__ -- same object, new value,
+    # so PauseMiddleware.wrap_tool_call (which reads self._config live) sees it.
+    assert hitl_conf.autonomy_level == "strict"
+    assert "hitl.autonomy_level" in edited
+
+
+def test_handle_config_set_hitl_invalid_value_rejected(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    hitl_conf = cfg.HitlSection(autonomy_level="guided")
+    cli._handle_config(
+        "/config set hitl.autonomy_level reckless",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="m",
+        topic=None,
+        tracker=None,
+        hitl_conf=hitl_conf,
+        rebuild_agent=None,
+        edited=set(),
+    )
+    assert hitl_conf.autonomy_level == "guided"  # unchanged
+    assert "must be one of" in capsys.readouterr().err
+
+
+def test_handle_config_save_writes_profile(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    edited = {"model", "topic"}
+    cli._handle_config(
+        "/config save",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="openai:gpt-6",
+        topic="my-topic",
+        tracker=None,
+        hitl_conf=None,
+        rebuild_agent=None,
+        edited=edited,
+    )
+    values = cfg.load_profile(tmp_path / cfg.PROFILE_NAME)
+    assert values["model"] == "openai:gpt-6"
+    assert values["topic"] == "my-topic"
+
+
+def test_handle_config_save_nothing_edited_is_a_noop(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    cli._handle_config(
+        "/config save",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="m",
+        topic=None,
+        tracker=None,
+        hitl_conf=None,
+        rebuild_agent=None,
+        edited=set(),
+    )
+    assert not (tmp_path / cfg.PROFILE_NAME).exists()
+    assert "nothing session-edited" in capsys.readouterr().err
+
+
+def test_handle_config_unknown_subcommand(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    cli._handle_config(
+        "/config frobnicate",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="m",
+        topic=None,
+        tracker=None,
+        hitl_conf=None,
+        rebuild_agent=None,
+        edited=set(),
+    )
+    assert "unknown subcommand" in capsys.readouterr().err

@@ -8,6 +8,7 @@ agent (agent), all around a SqliteSaver checkpointer keyed by --thread-id.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import os
 import subprocess
 import sys
@@ -31,7 +32,16 @@ from harness import (
     refresh,
     resilience,
 )
-from harness.config import resolve_settings
+from harness.config import (
+    AUTONOMY_LEVELS,
+    INTERRUPTION_POLICIES,
+    LIVE_FIELDS,
+    ON_DENY_MODES,
+    PROFILE_NAME,
+    Settings,
+    resolve_settings,
+    save_profile,
+)
 from harness.agent import (
     DEFAULT_TASK,
     build_agent,
@@ -165,6 +175,7 @@ EXIT_TOKENS = {"/exit", "/quit"}
 _SLASH_META_BASE = {
     "/exit": "end the session",
     "/quit": "end the session",
+    "/config": "view or edit live config ( /config | /config set <field> <value> | /config save )",
 }
 _SLASH_META_ARCHIVE = {
     "/recall": "stage prior-session context for the next turn ( /recall [query] [--all] )",
@@ -657,6 +668,225 @@ def _handle_refresh(workspace: Path | None, line: str) -> None:
     _stage(f"refresh: updated {len(written)} file(s) from the host{scope}")
 
 
+# --- Milestone 5, C5: /config REPL command ------------------------------------
+#
+# Live subset only (config.LIVE_FIELDS + the three hitl.* sub-fields) -- the
+# pre-spinup half (mask/jail/caps/...) is fixed for this container's lifetime
+# and shown read-only; edit it via `harness config` before the *next* launch.
+
+_CONFIG_SETTABLE_FIELDS = (
+    "model", "thread_id", "topic", "max_cost", "max_tokens",
+    "hitl.autonomy_level", "hitl.on_deny", "hitl.interruption_policy",
+)
+# Derived from LIVE_FIELDS + the Settings dataclass, not hand-duplicated, so the
+# pre-spinup/in-session split (milestone5.md §3's table) can't drift out of sync
+# with config.py's own single source of truth (milestone5_invariants.md #4).
+_CONFIG_PRESPINUP_FIELDS = tuple(
+    f.name for f in dataclasses.fields(Settings) if f.name not in LIVE_FIELDS
+)
+_CONFIG_HITL_VALIDATORS = {
+    "hitl.autonomy_level": AUTONOMY_LEVELS,
+    "hitl.on_deny": ON_DENY_MODES,
+    "hitl.interruption_policy": INTERRUPTION_POLICIES,
+}
+
+
+def _parse_config_command(line: str) -> tuple[str, list[str]]:
+    """Split '/config [subcommand] [args...]' into (subcommand, args); subcommand
+    is '' for a bare '/config' (display). Pure -- no I/O -- so it's host-testable
+    without a terminal."""
+    tokens = line.split()[1:]  # drop the leading '/config' token
+    if not tokens:
+        return "", []
+    return tokens[0], tokens[1:]
+
+
+def _parse_config_set_args(args: list[str]) -> tuple[str, str]:
+    """`<field> <value...>` -> (field, value), or raises ValueError with a
+    human-readable message ('/config set' with too few args, or a field
+    outside _CONFIG_SETTABLE_FIELDS -- the pre-spinup half is never settable
+    here). Pure -- host-testable."""
+    if len(args) < 2:
+        raise ValueError("usage: /config set <field> <value>")
+    field, value = args[0], " ".join(args[1:])
+    if field not in _CONFIG_SETTABLE_FIELDS:
+        if field in _CONFIG_PRESPINUP_FIELDS:
+            raise ValueError(
+                f"{field!r} is fixed for this container -- edit via `harness config` "
+                "before the next launch, not /config set"
+            )
+        raise ValueError(f"unknown field {field!r} (settable: {', '.join(_CONFIG_SETTABLE_FIELDS)})")
+    return field, value
+
+
+def _config_display_lines(
+    *,
+    settings,
+    sources,
+    current_model: str,
+    thread_id: str,
+    topic: str | None,
+    max_cost: float | None,
+    max_tokens: int | None,
+    hitl_conf,
+    edited: set[str],
+) -> list[str]:
+    """The lines a bare `/config` prints: live fields first (source-tagged --
+    "session" once `/config set` has touched a field this run, else whatever
+    parse_args originally resolved it from), then the pre-spinup half
+    read-only. Pure given plain values -- no I/O -- so it's host-testable
+    without a terminal or a real running agent."""
+
+    def fmt(name: str, value, source: str) -> str:
+        shown = "(unset)" if value in (None, "") else value
+        return f"[harness] {name:<24} = {str(shown):<28} ({source})"
+
+    lines = [
+        fmt("model", current_model, "session" if "model" in edited else sources.model),
+        fmt("thread_id", thread_id, "session" if "thread_id" in edited else sources.thread_id),
+        fmt("topic", topic, "session" if "topic" in edited else sources.topic),
+        fmt("max_cost", max_cost, "session" if "max_cost" in edited else sources.max_cost),
+        fmt("max_tokens", max_tokens, "session" if "max_tokens" in edited else sources.max_tokens),
+    ]
+    if hitl_conf is None:
+        lines.append(fmt("hitl", "off", sources.hitl))
+    else:
+        for field in ("autonomy_level", "on_deny", "interruption_policy"):
+            key = f"hitl.{field}"
+            lines.append(fmt(key, getattr(hitl_conf, field), "session" if key in edited else sources.hitl))
+    lines.append(
+        "[harness] --- pre-spinup (fixed for this container; edit via `harness config` before next launch) ---"
+    )
+    for field in _CONFIG_PRESPINUP_FIELDS:
+        lines.append(fmt(field, getattr(settings, field), getattr(sources, field)))
+    return lines
+
+
+def _handle_config(
+    line: str,
+    *,
+    config: dict,
+    current_model: str,
+    topic: str | None,
+    tracker: CostTrackerMiddleware | None,
+    hitl_conf,
+    rebuild_agent,
+    edited: set[str],
+) -> tuple[str, object | None, str | None]:
+    """Handle one `/config`, `/config set <field> <value>`, or `/config save`
+    line. Returns `(current_model, new_agent_or_None, current_topic)` --
+    `new_agent_or_None` is the rebuilt agent when a model switch succeeded,
+    else None (caller keeps its existing agent). Every other live field is
+    mutated in place on the objects the caller already holds (`config` dict,
+    `tracker`, `hitl_conf`), so only model/topic need to flow back out.
+    """
+    subcommand, args = _parse_config_command(line)
+
+    if subcommand == "":
+        # Pre-spinup half is fixed for this container's lifetime, so a fresh
+        # resolve is as good as a cached one and needs nothing threaded in
+        # from main() beyond what this function already takes.
+        settings, sources = resolve_settings()
+        for out in _config_display_lines(
+            settings=settings,
+            sources=sources,
+            current_model=current_model,
+            thread_id=config["configurable"]["thread_id"],
+            topic=topic,
+            max_cost=getattr(tracker, "_max_cost", None) if tracker else None,
+            max_tokens=getattr(tracker, "_max_tokens", None) if tracker else None,
+            hitl_conf=hitl_conf,
+            edited=edited,
+        ):
+            print(out, file=sys.stderr)
+        return current_model, None, topic
+
+    if subcommand == "save":
+        values: dict = {}
+        if "model" in edited:
+            values["model"] = current_model
+        if "topic" in edited:
+            values["topic"] = topic
+        if "max_cost" in edited and tracker is not None:
+            values["max_cost"] = tracker._max_cost
+        if "max_tokens" in edited and tracker is not None:
+            values["max_tokens"] = tracker._max_tokens
+        if not values:
+            _stage("config: nothing session-edited to save (pre-spinup fields aren't touched by /config)")
+            return current_model, None, topic
+        profile_path = Path.cwd() / PROFILE_NAME
+        save_profile(profile_path, values)
+        _stage(f"config: wrote {PROFILE_NAME}: {', '.join(f'{k}={v}' for k, v in values.items())}")
+        return current_model, None, topic
+
+    if subcommand != "set":
+        _stage(f"config: unknown subcommand {subcommand!r} (use /config, /config set, or /config save)")
+        return current_model, None, topic
+
+    try:
+        field, value = _parse_config_set_args(args)
+    except ValueError as exc:
+        _stage(f"config: {exc}")
+        return current_model, None, topic
+
+    if field == "model":
+        if rebuild_agent is None:
+            _stage("config: model switch unavailable in this context")
+            return current_model, None, topic
+        try:
+            new_agent = rebuild_agent(value)
+        except SystemExit as exc:
+            _stage(f"config: model switch to {value!r} failed: {exc}")
+            return current_model, None, topic
+        edited.add("model")
+        _stage(f"config: model {current_model} -> {value} (this session only; /config save to persist)")
+        return value, new_agent, topic
+
+    if field == "thread_id":
+        old = config["configurable"]["thread_id"]
+        config["configurable"]["thread_id"] = value
+        edited.add("thread_id")
+        _stage(f"config: thread_id {old} -> {value} (takes effect on the next turn)")
+        return current_model, None, topic
+
+    if field == "topic":
+        old = topic
+        edited.add("topic")
+        _stage(f"config: topic {old} -> {value} (this session only; /config save to persist)")
+        return current_model, None, value
+
+    if field in ("max_cost", "max_tokens"):
+        if tracker is None:
+            _stage("config: no cost tracker active this session -- restart with a budget or a priced model to enable one")
+            return current_model, None, topic
+        try:
+            cast = float if field == "max_cost" else int
+            parsed = cast(value)
+        except ValueError:
+            _stage(f"config: {field} must be a number, got {value!r}")
+            return current_model, None, topic
+        setattr(tracker, f"_{field}", parsed)
+        edited.add(field)
+        _stage(f"config: {field} -> {parsed} (this session only; /config save to persist)")
+        return current_model, None, topic
+
+    # hitl.* -- mutate the live (frozen) HitlSection PauseMiddleware already
+    # holds a reference to, so it applies to the next gated call, no rebuild.
+    if hitl_conf is None:
+        _stage("config: HITL is off this run (no .harness-config.yaml) -- nothing to edit")
+        return current_model, None, topic
+    valid = _CONFIG_HITL_VALIDATORS[field]
+    if value not in valid:
+        _stage(f"config: {field} must be one of {valid}, got {value!r}")
+        return current_model, None, topic
+    attr = field.split(".", 1)[1]
+    old = getattr(hitl_conf, attr)
+    object.__setattr__(hitl_conf, attr, value)
+    edited.add(field)
+    _stage(f"config: {field} {old} -> {value} (this session only; /config save to persist)")
+    return current_model, None, topic
+
+
 def _cost_totals_for_row(tracker: CostTrackerMiddleware | None):
     """(input_tokens, output_tokens, cost_usd, cost_provenance) for the ledger row.
 
@@ -797,6 +1027,8 @@ def run_repl(
     history_path: Path | None = None,
     hitl_conf=None,
     workspace: Path | None = None,
+    current_model: str | None = None,
+    rebuild_agent=None,
 ) -> int:
     """Container-lifetime loop: build once (by the caller), then prompt -> invoke
     -> answer until /exit, /quit, or EOF. A non-TTY stdin collapses to the single
@@ -815,9 +1047,17 @@ def run_repl(
     When `archive_conn` is set, the `/recall` and `/topic` REPL commands operate
     on the past archive; `/recall <query>` stages a marked context slice consumed
     by the next turn. When it is None (archive off) both commands are inert.
+
+    Milestone 5, C5: `/config` (view), `/config set <field> <value>` (edit one
+    live field), `/config save` (persist session edits to the profile) --
+    always available (unlike /recall/topic, which gate on features).
+    `current_model`/`rebuild_agent` are the pieces `main()` already has that
+    `_handle_config` needs; both optional so this stays host-testable with a
+    bare-minimum call (matching the rest of run_repl).
     """
     interactive = sys.stdin.isatty()
     current_topic = topic
+    config_edited: set[str] = set()
     pending: list = []  # recall slices staged for the next turn (marked)
     # Rich line editing only for an interactive TTY; a non-TTY run never reaches
     # the loop below. None => plain input() (prompt_toolkit missing / non-TTY).
@@ -891,6 +1131,23 @@ def run_repl(
             # Available whenever the ephemeral source mount is present, independent
             # of the archive; inert (prints "unavailable") on a normal run.
             _handle_refresh(workspace, line)
+            continue
+        if command == "/config":
+            # Always available (unlike /recall/topic above), since every field it
+            # touches -- model, budgets, HITL posture, topic -- makes sense even
+            # without the archive on.
+            current_model, new_agent, current_topic = _handle_config(
+                line,
+                config=config,
+                current_model=current_model,
+                topic=current_topic,
+                tracker=tracker,
+                hitl_conf=hitl_conf,
+                rebuild_agent=rebuild_agent,
+                edited=config_edited,
+            )
+            if new_agent is not None:
+                agent = new_agent
             continue
 
         try:
@@ -1296,6 +1553,26 @@ def main() -> int:
                 on_path_denied=on_path_denied,
                 on_command_denied=on_command_denied,
             )
+
+            def _rebuild_agent(new_model: str):
+                """Milestone 5, C5: `/config set model <spec>` rebuilds through
+                this exact path -- same validate_credentials + build_agent call
+                main() makes at startup, so a bad model fails the same way live
+                as it would at launch, not mid-turn. Everything else (tools,
+                middleware, checkpointer, path/command-denied handlers) stays
+                fixed for the container's lifetime; only the chat model swaps."""
+                validate_credentials(new_model)
+                new_chat_model = resolve_chat_model(new_model)
+                return build_agent(
+                    new_chat_model,
+                    workspace,
+                    tools=tools,
+                    middleware=middleware,
+                    checkpointer=checkpointer,
+                    on_path_denied=on_path_denied,
+                    on_command_denied=on_command_denied,
+                )
+
             if args.headless:
                 # P2: one-shot batch — run the task(s), emit one JSON result on
                 # stdout, exit. No interactive prompt; interrupts resolve by the
@@ -1322,6 +1599,8 @@ def main() -> int:
                     history_path=checkpoint_db.parent / "repl_history",
                     hitl_conf=hitl_conf,
                     workspace=workspace,
+                    current_model=model,
+                    rebuild_agent=_rebuild_agent,
                 )
             if archive_conn is not None:
                 # After the M1 session-total line printed (inside run_repl), so the
