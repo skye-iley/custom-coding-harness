@@ -15,6 +15,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=lib/hostmap.sh
 source "$ROOT/scripts/lib/hostmap.sh"   # _should_map_host_user / _detect_is_wsl
 ENV_FILE="$ROOT/project/.env"
+PROFILE_FILE="$ROOT/project/.harness-profile.yaml"
+# shellcheck source=lib/config.sh
+source "$ROOT/scripts/lib/config.sh"    # _resolve_host_setting (Milestone 5, C3/§7c)
 WORKSPACE="${WORKSPACE:-$ROOT/project/workspace}"
 SEED_SOURCE="$ROOT/project/workspace"
 NETJAIL_DIR="$ROOT/netjail"
@@ -287,26 +290,23 @@ fi
 MASK_ARGS=()
 EMPTY_FILE=""
 EMPTY_DIR=""
-# Read a var from project/.env so launcher-side decisions honour the SAME config
-# the container sees (DEEPAGENTS_MASK is a container env per §13; the launcher
-# gates the host-side scan/overlay on it too). Host/launcher env still wins when
-# set — this is only the fallback. Last matching KEY=VALUE line, quotes stripped.
-_env_file_get() {
-  local key="$1"
-  [[ -f "$ENV_FILE" ]] || return 0
-  sed -n "s/^[[:space:]]*${key}=//p" "$ENV_FILE" | tail -1 \
-    | sed 's/[[:space:]]*$//; s/^"//; s/"$//; s/^'"'"'//; s/'"'"'$//'
-}
 
 mask_scan() {
-  # Launcher env wins; else fall back to project/.env; else default on ("1").
+  # Enable/disable (DEEPAGENTS_MASK) deliberately gets NO profile-file tier --
+  # it's a debugging escape hatch (config.py's Settings.mask_enabled is excluded
+  # from the profile on purpose), not something to casually flip via a saved
+  # default. Host/launcher env wins, else project/.env, else default on ("1") --
+  # unchanged from pre-M5, honouring the SAME config the container sees (§13).
   local mask_mode="${DEEPAGENTS_MASK:-$(_env_file_get DEEPAGENTS_MASK)}"
   mask_mode="${mask_mode:-1}"
   [[ "$mask_mode" == "0" ]] && return 0
   # Forward DEEPAGENTS_MASK_MODE (deny/allow, §13) into the scan container so the
   # resolver honours it — the scan gets no --env-file, so without this the env
   # knob is silently ignored and `allow` degrades to `deny` (under-masking).
-  local scan_mode="${DEEPAGENTS_MASK_MODE:-$(_env_file_get DEEPAGENTS_MASK_MODE)}"
+  # Milestone 5, C3: .harness-profile.yaml's mask_mode now layers on top of the
+  # same host-env / .env fallback this always had.
+  local scan_mode
+  scan_mode="$(_resolve_host_setting "${DEEPAGENTS_MASK_MODE:-}" DEEPAGENTS_MASK_MODE mask_mode "")"
   local mode_env=()
   [[ -n "$scan_mode" ]] && mode_env=(-e "DEEPAGENTS_MASK_MODE=$scan_mode")
   local scan_output scan_err
@@ -350,7 +350,10 @@ mask_cleanup() {
 # unjailed while the operator believes otherwise.
 JAIL_ARGS=()
 jail_setup() {
-  local jail_mode="${DEEPAGENTS_JAIL:-$(_env_file_get DEEPAGENTS_JAIL)}"
+  # Milestone 5, C3: .harness-profile.yaml's jail now layers on top of the same
+  # host-env / .env fallback this always had.
+  local jail_mode
+  jail_mode="$(_resolve_host_setting "${DEEPAGENTS_JAIL:-}" DEEPAGENTS_JAIL jail "0")"
   case "${jail_mode:-0}" in
     0 | false | no | off | "") return 0 ;;
   esac
@@ -371,7 +374,10 @@ jail_setup() {
   #
   # Unset (default): select the narrowed profile and PROBE that the daemon will
   # accept it, before launching anything real. Mirror of run-docker.ps1.
-  local apparmor="${DEEPAGENTS_JAIL_APPARMOR:-$(_env_file_get DEEPAGENTS_JAIL_APPARMOR)}"
+  # Milestone 5, C3: .harness-profile.yaml's jail_apparmor now layers on top of
+  # the same host-env / .env fallback this always had.
+  local apparmor
+  apparmor="$(_resolve_host_setting "${DEEPAGENTS_JAIL_APPARMOR:-}" DEEPAGENTS_JAIL_APPARMOR jail_apparmor "")"
   if [[ -z "$apparmor" ]]; then
     # NOT `$(...)`: the autoselect fails closed with `exit 1`, which inside a
     # command substitution would only kill the subshell and let the launch proceed.
@@ -448,6 +454,14 @@ _apparmor_autoselect() {
 }
 jail_setup
 
+# Milestone 5, C3: DEEPAGENTS_MODEL / .harness-profile.yaml's model, forwarded
+# as an explicit -e so it reaches the container even when it's not in
+# project/.env (docker prefers an explicit -e over the same var in
+# --env-file, so this wins regardless of what .env also says).
+MODEL_ARGS=()
+RESOLVED_MODEL="$(_resolve_host_setting "${DEEPAGENTS_MODEL:-}" DEEPAGENTS_MODEL model "")"
+[[ -n "$RESOLVED_MODEL" ]] && MODEL_ARGS=(-e "DEEPAGENTS_MODEL=$RESOLVED_MODEL")
+
 # Assemble the agent `docker run` invocation into an array. NET_ARGS / PROXY_ENV
 # are set either by netjail_up (jail mode) or to the bridge defaults below.
 build_agent_run() {
@@ -466,6 +480,7 @@ build_agent_run() {
     ${GIT_MOUNT[@]+"${GIT_MOUNT[@]}"}
     ${HITL_MOUNT[@]+"${HITL_MOUNT[@]}"}
     ${MASK_ARGS[@]+"${MASK_ARGS[@]}"}
+    ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}
     deepagent-harness)
   if [[ $# -gt 0 ]]; then
     AGENT_RUN+=(python3 main.py "$@")

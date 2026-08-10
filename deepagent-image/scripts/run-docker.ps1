@@ -22,6 +22,13 @@ param(
     [string]$Cpus = "2",
     [string]$Memory = "4g",
     [string]$PidsLimit = "512",
+    # Milestone 5, C3: CLI parity for knobs that previously only had env/.env
+    # coverage. All four resolve CLI flag > host env > project\.env >
+    # .harness-profile.yaml > default via Resolve-HostSetting (lib\config.ps1).
+    [string]$Model = "",
+    [string]$MaskMode = "",
+    [string]$Jail = "",
+    [string]$JailApparmor = "",
     # NetJail (see netjail\README.md): run the agent on an --internal docker
     # network with no route to host or internet, punching only the holes declared
     # in netjail\host-services.txt (host ports) and netjail\allowed-domains.txt
@@ -42,7 +49,9 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $EnvFile = Join-Path $Root "project\.env"
+$ProfileFile = Join-Path $Root "project\.harness-profile.yaml"
 $NetjailDir = Join-Path $Root "netjail"
+. (Join-Path $PSScriptRoot "lib\config.ps1")
 if (-not (Test-Path $EnvFile)) {
     throw "Missing $EnvFile - copy project\.env.example to project\.env and set API keys."
 }
@@ -279,29 +288,30 @@ if ($NetJail) {
 # to resolve the mask set, then emit empty overlay mounts for each masked path.
 # Scan output lines: <mode> <type> <tier> <relpath>
 $MaskArgs = @()
-$MaskMode = $env:DEEPAGENTS_MASK
-if ([string]::IsNullOrEmpty($MaskMode)) {
+# Enable/disable (DEEPAGENTS_MASK) deliberately gets NO -Flag or profile-file
+# tier -- it's a debugging escape hatch (config.py's Settings.mask_enabled is
+# excluded from the profile on purpose), not something to casually flip via a
+# saved default. Host env > project\.env only, unchanged from pre-M5.
+$MaskEnabled = $env:DEEPAGENTS_MASK
+if ([string]::IsNullOrEmpty($MaskEnabled)) {
     # Launcher env unset — fall back to project\.env so the host-side scan/overlay
     # gate honours the SAME DEEPAGENTS_MASK the container sees (§13). Host env wins.
     $envLine = Select-String -Path $EnvFile -Pattern '^\s*DEEPAGENTS_MASK\s*=' -ErrorAction SilentlyContinue | Select-Object -Last 1
     if ($envLine) {
-        $MaskMode = ($envLine.Line -replace '^\s*DEEPAGENTS_MASK\s*=', '').Trim().Trim('"').Trim("'")
+        $MaskEnabled = ($envLine.Line -replace '^\s*DEEPAGENTS_MASK\s*=', '').Trim().Trim('"').Trim("'")
     }
 }
-if ($MaskMode -eq "" -or $MaskMode -eq "1") {
+if ($MaskEnabled -eq "" -or $MaskEnabled -eq "1") {
     # Surface mask-scan diagnostics (protection-reduction / symlink warnings) instead
     # of dropping stderr; stdout stays the parseable grammar.
     $scanErr = New-TemporaryFile
     # Forward DEEPAGENTS_MASK_MODE (deny/allow, §13) into the scan container so the
     # resolver honours it — the scan gets no --env-file, so without this the env
     # knob is silently ignored and `allow` degrades to `deny` (under-masking).
-    $ScanMode = $env:DEEPAGENTS_MASK_MODE
-    if ([string]::IsNullOrEmpty($ScanMode)) {
-        $modeLine = Select-String -Path $EnvFile -Pattern '^\s*DEEPAGENTS_MASK_MODE\s*=' -ErrorAction SilentlyContinue | Select-Object -Last 1
-        if ($modeLine) {
-            $ScanMode = ($modeLine.Line -replace '^\s*DEEPAGENTS_MASK_MODE\s*=', '').Trim().Trim('"').Trim("'")
-        }
-    }
+    # Milestone 5, C3: -MaskMode / .harness-profile.yaml's mask_mode now layer on
+    # top of the same host-env / .env fallback this always had.
+    $ScanMode = Resolve-HostSetting -Value $MaskMode -EnvVarName "DEEPAGENTS_MASK_MODE" `
+        -ProfileKey "mask_mode" -Default "" -EnvFile $EnvFile -ProfileFile $ProfileFile
     $ScanModeArgs = @()
     if (-not [string]::IsNullOrEmpty($ScanMode)) {
         $ScanModeArgs = @("-e", "DEEPAGENTS_MASK_MODE=$ScanMode")
@@ -356,13 +366,10 @@ if ($MaskMode -eq "" -or $MaskMode -eq "1") {
 # the jail is asked for and the profile is missing, refuse to launch rather than run
 # unjailed while the operator believes otherwise.
 $JailArgs = @()
-$JailMode = $env:DEEPAGENTS_JAIL
-if (-not $JailMode) {
-    $jailLine = Select-String -Path $EnvFile -Pattern '^\s*DEEPAGENTS_JAIL\s*=' -ErrorAction SilentlyContinue | Select-Object -Last 1
-    if ($jailLine) {
-        $JailMode = ($jailLine.Line -replace '^\s*DEEPAGENTS_JAIL\s*=', '').Trim().Trim('"').Trim("'")
-    }
-}
+# Milestone 5, C3: -Jail / .harness-profile.yaml's jail now layer on top of the
+# same host-env / .env fallback this always had.
+$JailMode = Resolve-HostSetting -Value $Jail -EnvVarName "DEEPAGENTS_JAIL" `
+    -ProfileKey "jail" -Default "" -EnvFile $EnvFile -ProfileFile $ProfileFile
 if ($JailMode -and $JailMode -notin @("0", "false", "no", "off")) {
     $SeccompProfile = Join-Path $PSScriptRoot "..\seccomp\userns.json"
     if (-not (Test-Path $SeccompProfile)) {
@@ -381,13 +388,10 @@ if ($JailMode -and $JailMode -notin @("0", "false", "no", "off")) {
     #
     # Unset (default): select the narrowed profile and PROBE that the daemon will
     # accept it, before launching anything real. Mirror of run-docker.sh.
-    $Apparmor = $env:DEEPAGENTS_JAIL_APPARMOR
-    if (-not $Apparmor) {
-        $aaLine = Select-String -Path $EnvFile -Pattern '^\s*DEEPAGENTS_JAIL_APPARMOR\s*=' -ErrorAction SilentlyContinue | Select-Object -Last 1
-        if ($aaLine) {
-            $Apparmor = ($aaLine.Line -replace '^\s*DEEPAGENTS_JAIL_APPARMOR\s*=', '').Trim().Trim('"').Trim("'")
-        }
-    }
+    # Milestone 5, C3: -JailApparmor / .harness-profile.yaml's jail_apparmor now
+    # layer on top of the same host-env / .env fallback this always had.
+    $Apparmor = Resolve-HostSetting -Value $JailApparmor -EnvVarName "DEEPAGENTS_JAIL_APPARMOR" `
+        -ProfileKey "jail_apparmor" -Default "" -EnvFile $EnvFile -ProfileFile $ProfileFile
     if (-not $Apparmor) {
         # Ask the DAEMON, not this machine: the profile must be loaded on the host
         # running dockerd, which for a remote daemon / Colima-Lima VM / WSL distro is
@@ -427,6 +431,17 @@ if ($JailMode -and $JailMode -notin @("0", "false", "no", "off")) {
     }
 }
 
+# Milestone 5, C3: -Model / .harness-profile.yaml's model, forwarded as an
+# explicit -e so it reaches the container even when it's not in project\.env
+# (docker prefers an explicit -e over the same var in --env-file, so this wins
+# regardless of what .env also says once cli/env/profile resolved a value).
+$ResolvedModel = Resolve-HostSetting -Value $Model -EnvVarName "DEEPAGENTS_MODEL" `
+    -ProfileKey "model" -Default "" -EnvFile $EnvFile -ProfileFile $ProfileFile
+$ModelArgs = @()
+if (-not [string]::IsNullOrEmpty($ResolvedModel)) {
+    $ModelArgs = @("-e", "DEEPAGENTS_MODEL=$ResolvedModel")
+}
+
 $dockerArgs = @(
     "run", "--rm"
 ) + $TtyFlags + $JailArgs + @(
@@ -439,7 +454,7 @@ $dockerArgs = @(
     "-e", "DEEPAGENTS_STATE_DIR=/project/state",
     "-v", "${MountWorkspace}:/project/workspace",
     "-v", "${StateHostDir}:/project/state"
-) + $SrcMountArgs + $MaskArgs
+) + $SrcMountArgs + $MaskArgs + $ModelArgs
 
 # Git identity: mount host .gitconfig read-only into the agent user's home (uid 10001 -> /home/agent),
 # not /root (container runs USER agent). Never mount ~/.ssh into an autonomous-agent container -
