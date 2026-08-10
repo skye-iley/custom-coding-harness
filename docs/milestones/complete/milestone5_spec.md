@@ -1,12 +1,15 @@
 # Milestone 5 — Unified Config Surface: Full Spec
 
-Companion to `milestone5.md` (scope/DoD/rationale — read that first). This file is the
-implementation-level spec: exact module layout, data shapes, precedence algorithm, file formats,
-CLI/REPL surfaces, and the concrete diff to existing modules. Written during planning (no code
-yet) so slice work in `milestone5.md` §4 has a fixed target instead of drifting per-PR.
+Companion to `milestone5.md` (scope/DoD/rationale, including §4's per-slice **as-built** notes and
+§8's invariants — read that first). This file is the implementation-level spec this milestone was
+built from: module layout, data shapes, precedence algorithm, file formats, CLI/REPL surfaces, and
+the concrete diff to existing modules.
 
-Grounded against the current code as of this doc (paths/line refs may drift as code moves; treat
-mismatches as the code winning per `docs/README.md`).
+Written during planning, before code existed, so it reads in the past-planning tense throughout
+("will", "gets", proposed line numbers). Three details it describes did not ship as written —
+`milestone5.md` §4 (C3, C5, C7) has the as-built account and why; treat this file as the design
+rationale and everything else as accurate. Line-number references below may also have drifted as
+code moved; per `docs/README.md`, the code wins on any mismatch.
 
 ## 1. Resolved forks
 

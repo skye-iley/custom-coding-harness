@@ -9,8 +9,8 @@ secret-safe containers.
   **milestone lifecycle** (`planned/` docs-only → `in-progress/` doc + separate `_invariants.md` +
   code → `complete/` doc-only with invariants folded in). In short:
   - `docs/milestones/complete/` — **built + merged** milestones (`mvp.md`, `milestone1.md`,
-    `milestone2.md`, `milestone3.md`). These record shipped scope; the code is authoritative where
-    they drift.
+    `milestone2.md`, `milestone3.md`, `milestone5.md`). These record shipped scope; the code is
+    authoritative where they drift.
     - `mvp.md` — the shipped baseline: one-command containerized Deep Agents coding agent.
     - `milestone1.md` — cost/token visibility + resource caps.
     - `milestone2.md` — present/past memory (fresh-by-default thread + separate on-demand archive).
@@ -18,6 +18,15 @@ secret-safe containers.
     - `milestone3.md` — human-in-the-loop (one `interrupt()` spine, three trigger sources) + the §12
       resilience/headless prereqs it rides on. **Built** — see §0 build status for what shipped vs.
       deferred, and the "Human-in-the-loop" section in `deepagent-image/CLAUDE.md`.
+    - `milestone5.md` (+ `milestone5_spec.md`) — **Unified Config Surface**: CLI flags + an
+      in-session `/config` command for live knobs (model, budgets, HITL preset) and a pre-spinup
+      wizard (`harness config` / `harness config security`) for knobs fixed at container start
+      (mask mode, jail/AppArmor, resource caps, NetJail), resolved through one `harness/config.py`
+      precedence chain (CLI flag > env > profile file > default). **Built** — §4 records three
+      deliberate scope-downs from the original plan (no `-Autonomy` host flag, no arrow-key
+      `/config` menu, no NetJail list editor in `harness config security`) and a real
+      `PauseMiddleware` caching bug the build surfaced and fixed along the way. See the "Unified
+      config" section in `deepagent-image/CLAUDE.md`.
   - `docs/milestones/in-progress/` — **being built** milestones (doc + separate invariants doc + code
     on a feature branch). *(`milestone4.md` — **Real Trust Boundary**, merged to `main`,
     slices **A–J all landed** (workspace visibility — `.agentignore`, 3-tier policy,
@@ -63,11 +72,7 @@ secret-safe containers.
     `PathGuardDenied` is still a true escape and still never approvable. Folds into `milestone4.md` on
     completion.)*
   - `docs/milestones/planned/` — **not-yet-built** milestones (docs only). Wins over `design_doc.md`
-    for "what we build next." *(`milestone5.md` — **Unified Config Surface**: CLI flags + in-session
-    `/config` menu for live knobs (model, budgets, HITL preset) and a pre-spinup wizard
-    (`harness config` / `harness config security`) for knobs fixed at container start (mask mode,
-    jail/AppArmor, resource caps, NetJail), resolved through one `harness/config.py` precedence
-    chain instead of scattered env-var/`.env` edits.)*
+    for "what we build next." Currently empty.
   - `docs/features/workspace_visibility.md` — **named feature plan** (not a numbered milestone): restrict
     which workspace paths an agent can see (`.agentignore` policy, designated-secret floor, docker-mask
     → bwrap fs-tool jail → optional overlayfs). **Planned** — summarized in `design_doc.md` §2.
