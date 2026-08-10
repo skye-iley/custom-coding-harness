@@ -35,7 +35,12 @@ A milestone moves through three folders. What each stage carries is deliberate:
 
 ## Planned milestones — `milestones/planned/`
 
-*(Empty — nothing is currently queued. New forward plans land here as docs only.)*
+- **`milestone5.md`** (+ **`milestone5_spec.md`**, full implementation spec) — **Unified Config
+  Surface**: CLI flags + an in-session `/config` menu for live knobs (model, budgets, HITL preset)
+  and a pre-spinup wizard (`harness config` / `harness config security`) for knobs fixed at
+  container start (mask mode, jail/AppArmor, resource caps, NetJail), all resolved through one
+  `harness/config.py` precedence chain (CLI flag > env > profile file > default) instead of
+  scattered env-var/`.env` edits.
 
 ## In-progress milestones — `milestones/in-progress/`
 

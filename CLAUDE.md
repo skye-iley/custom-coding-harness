@@ -63,7 +63,11 @@ secret-safe containers.
     `PathGuardDenied` is still a true escape and still never approvable. Folds into `milestone4.md` on
     completion.)*
   - `docs/milestones/planned/` — **not-yet-built** milestones (docs only). Wins over `design_doc.md`
-    for "what we build next." *(Currently empty.)*
+    for "what we build next." *(`milestone5.md` — **Unified Config Surface**: CLI flags + in-session
+    `/config` menu for live knobs (model, budgets, HITL preset) and a pre-spinup wizard
+    (`harness config` / `harness config security`) for knobs fixed at container start (mask mode,
+    jail/AppArmor, resource caps, NetJail), resolved through one `harness/config.py` precedence
+    chain instead of scattered env-var/`.env` edits.)*
   - `docs/features/workspace_visibility.md` — **named feature plan** (not a numbered milestone): restrict
     which workspace paths an agent can see (`.agentignore` policy, designated-secret floor, docker-mask
     → bwrap fs-tool jail → optional overlayfs). **Planned** — summarized in `design_doc.md` §2.
