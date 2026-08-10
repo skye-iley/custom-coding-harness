@@ -25,13 +25,13 @@ import json
 from harness import (
     archive,
     audit,
-    config as hitl_config,
     hitl,
     interrupt,
     jail,
     refresh,
     resilience,
 )
+from harness.config import resolve_settings
 from harness.agent import (
     DEFAULT_TASK,
     build_agent,
@@ -66,20 +66,19 @@ from harness.workflows import (
 )
 
 
-def _env_defaults() -> dict:
-    """Build argparse defaults from environment variables."""
-    return {
-        "thread_id": os.getenv("DEEPAGENTS_THREAD_ID")
-                     or f"session-{datetime.now():%Y%m%d-%H%M%S}",
-        "topic": os.getenv("DEEPAGENTS_TOPIC") or None,
-        "headless": os.getenv("DEEPAGENTS_HEADLESS", "").strip().lower() in _TRUTHY,
-        "max_cost": _env_float("DEEPAGENTS_MAX_COST"),
-        "max_tokens": _env_int("DEEPAGENTS_MAX_TOKENS"),
-        "workspace": os.getenv("AGENT_WORKSPACE", str(Path.cwd() / "workspace")),
-    }
-
-
 def parse_args() -> argparse.Namespace:
+    """Parse CLI args, then route the Settings-covered fields (model, thread_id,
+    topic, headless, max_cost, max_tokens) through ``resolve_settings()``
+    instead of a bespoke env-default dict, so CLI/env/profile precedence lives in
+    one place (Milestone 5, C2). Behavior is unchanged for anyone not using a
+    profile file: unset flags still fall through to the same env vars they did
+    before this re-plumb.
+
+    Each Settings-covered flag defaults to ``None`` here (rather than argparse's
+    normal implicit default) so "not passed on the CLI" is distinguishable from
+    "passed as falsy" -- that's what lets ``resolve_settings`` tell a bare
+    ``--headless`` apart from an unset flag that should fall through to env/profile.
+    """
     parser = argparse.ArgumentParser(description="Run a LangChain Deep Agents coding harness.")
     parser.add_argument("task", nargs="*", help="Task for the agent. Defaults to a workspace inspection.")
     parser.add_argument(
@@ -87,25 +86,26 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Model spec, for example 'openai:gpt-5.5' or 'google_genai:gemini-3.5-flash'.",
     )
-    defaults = _env_defaults()
-    parser.set_defaults(**defaults)
-
     parser.add_argument(
         "--workspace",
+        default=os.getenv("AGENT_WORKSPACE", str(Path.cwd() / "workspace")),
         help="Directory exposed to the coding agent.",
     )
     parser.add_argument(
         "--thread-id",
+        default=None,
         help="Present thread id. Fresh per run unless set; pass a prior id to resume it.",
     )
     parser.add_argument(
         "--topic",
+        default=None,
         help="Continual-topic label for this run; scopes recall by default (also DEEPAGENTS_TOPIC).",
     )
     parser.add_argument("--stream", action="store_true", help="Print raw LangGraph stream events.")
     parser.add_argument(
         "--headless",
         action="store_true",
+        default=None,
         help="One-shot batch mode: run the task(s) to completion, emit one JSON "
         "result on stdout, and exit (no interactive prompt). Interrupts resolve "
         "by the fail-closed headless policy (also DEEPAGENTS_HEADLESS).",
@@ -113,14 +113,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-cost",
         type=float,
+        default=None,
         help="End the session once cumulative USD cost crosses this (also DEEPAGENTS_MAX_COST).",
     )
     parser.add_argument(
         "--max-tokens",
         type=int,
+        default=None,
         help="End the session once cumulative tokens cross this (also DEEPAGENTS_MAX_TOKENS).",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    settings, sources = resolve_settings(cli=args)
+    args.model = settings.model
+    args.thread_id = settings.thread_id
+    args.topic = settings.topic
+    args.headless = settings.headless
+    args.max_cost = settings.max_cost
+    args.max_tokens = settings.max_tokens
+    args.settings = settings
+    args.settings_sources = sources
+    return args
 
 
 def _env_float(name: str) -> float | None:
@@ -1156,9 +1169,11 @@ def main() -> int:
 
     # HITL config (Milestone 3, §9). Presence of .harness-config.yaml turns HITL
     # on; absent => hitl_conf is None and every HITL seam below is skipped, so the
-    # harness is byte-for-byte Milestone 2 (removable contract). Read from the
-    # project CWD like AGENTS.md / .mcp.json (operator config, not workspace code).
-    hitl_conf = hitl_config.load_config(Path.cwd() / hitl_config.CONFIG_NAME)
+    # harness is byte-for-byte Milestone 2 (removable contract). Resolved once in
+    # parse_args() (Milestone 5, C2) alongside every other Settings field, from
+    # the same project CWD like AGENTS.md / .mcp.json (operator config, not
+    # workspace code).
+    hitl_conf = args.settings.hitl
     if hitl_conf is not None:
         _stage(
             f"HITL on (autonomy={hitl_conf.autonomy_level}, "
