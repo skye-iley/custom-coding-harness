@@ -42,6 +42,7 @@ you want to persist across runs. See "Unified config" in `CLAUDE.md` for the ful
 | `DEEPAGENTS_MODEL` | Explicit model spec (overrides auto-selection) | string | unset → auto-selects `ollama:gemma4` | `openai:gpt-4o`, `google_genai:gemini-2-flash` |
 | `DEEPAGENTS_PROVIDER_TIER` | Rate-limit tier (e.g., "free", "tier1") | string | unset | See `providers/<provider>/provider.toml` |
 | `DEEPAGENTS_LIVE_MODEL` | Enable the live-model test tier (real model in/out). Test-only — nothing in a normal run reads it. | `1` / unset | unset (tier skipped) | `1` |
+| `DEEPAGENTS_MODEL_OPTIONS` | Client kwargs passed verbatim to the chat model constructor; overrides the registry's `[options]`. Comma-separated `key=value`; values coerced to bool/int/float when they look like one. | string | unset | `num_ctx=131072,temperature=0.2` |
 
 Auto-selection picks the first provider by ascending `priority` that has a `default_model` **and**
 is available (keyed providers need their `api_key_env`; keyless ones always are). `ollama` ships at

@@ -17,6 +17,20 @@ name = "gemma4"
 # Local/self-hosted: no API charge. provider.toml declares pricing = "free", so
 # no [pricing] table applies here — cost is 0 by strategy, not by empty rates.
 
+# Client kwargs passed verbatim to the chat model constructor. For Ollama these
+# override the tag's Modelfile PARAMETER block per request, so ONE tag serves every
+# context size -- no `ollama create` per variant.
+#
+# num_ctx is the real ceiling on a turn (system prompt + AGENTS.md + history + tool
+# schemas + tool results). Ollama's own default is far below what a coding agent
+# needs. 65536 measured at ~5.4 GB VRAM for this model on an 8 GB card, fully on
+# GPU; 131072 measured ~6.4 GB, also fully on GPU. Cost is ~17 MiB per 1K tokens on
+# a ~4.3 GB base. Raise it if you have the VRAM -- but check `ollama ps` still says
+# `100% GPU`, because exceeding VRAM offloads layers to CPU and throughput falls off
+# a cliff rather than degrading smoothly.
+[options]
+num_ctx = 65536
+
 # Watt-hours per token (optional estimate; tracked even for free models).
 [energy]
 # per_input_token =

@@ -173,6 +173,23 @@ knowing:
   (`validate_credentials` passes unknown specs through to `init_chat_model`) but carries no rates or
   metadata.
 
+**`[options]` — client kwargs from the registry.** `provider.toml` and
+`models/<model>.toml` can each carry an `[options]` table whose keys are passed verbatim to the
+chat-model constructor; `DEEPAGENTS_MODEL_OPTIONS="num_ctx=131072,temperature=0.2"` overrides both
+(`providers.resolve_model_options`). This is what lets **one Ollama tag serve every context size** —
+per-request options beat the tag's Modelfile `PARAMETER` block, so no `ollama create` per variant.
+`providers/ollama/models/gemma4.toml` ships `num_ctx = 65536` because Ollama's own default is well
+below what a coding agent needs and the failure mode is silent truncation, not an error.
+
+Deliberately a generic key=value bag, **not** a typed `--num-ctx` flag: these are provider-specific
+client kwargs (`num_ctx` is Ollama's; OpenAI has no such thing), so they are registry data rather
+than `Settings` fields — adding a flag per option is the sprawl Milestone 5.1's field registry
+exists to remove. Two behaviours: **options fail loudly** where the rate limiter degrades quietly
+(a dropped `num_ctx` changes answers; a missing limiter only costs speed), and options are resolved
+**once at agent build**, never per call — changing `num_ctx` makes Ollama reload the model (~15–20s,
+KV cache reallocation), so varying it per turn would thrash the GPU. Full detail:
+`providers/README.md` → "`[options]` — client kwargs".
+
 `scripts/sync-models.{sh,ps1}` (= `python3 -m harness sync-models`, code in `harness/sync_models.py`)
 regenerates `models/*.toml` from each provider's live list-models endpoint. **Dev-time only** — it
 needs API keys + network (the sealed runtime has neither) and writes registry files you then commit.

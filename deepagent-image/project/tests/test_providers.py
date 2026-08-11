@@ -38,6 +38,7 @@ def _write_provider(
     pricing=None,
     omit_field=None,
     models=(),
+    extra_toml="",
 ):
     """Write a <name>/provider.toml (+ models/*.toml) under `root`.
 
@@ -62,7 +63,8 @@ def _write_provider(
         fields["pricing"] = f'"{pricing}"'
     fields.pop(omit_field, None)
     (pdir / "provider.toml").write_text(
-        "".join(f"{k} = {v}\n" for k, v in fields.items()), encoding="utf-8"
+        "".join(f"{k} = {v}\n" for k, v in fields.items()) + extra_toml,
+        encoding="utf-8",
     )
     for stem, body in models:
         (pdir / "models" / f"{stem}.toml").write_text(
@@ -269,6 +271,96 @@ def test_choose_model_keyless_still_skipped_without_default_model(tmp_path, monk
     monkeypatch.delenv("DEEPAGENTS_MODEL", raising=False)
     monkeypatch.setenv("CLOUD_API_KEY", "k")
     assert providers.choose_model(None) == "cloud:c1"
+
+
+# --- [options] passthrough (client kwargs, e.g. ollama num_ctx) -------------
+#
+# One Ollama tag can serve every context size, because per-request options
+# override the Modelfile PARAMETER block. These cases pin the resolution order
+# (provider [options] < model [options] < DEEPAGENTS_MODEL_OPTIONS) and the env
+# parser; actually applying them to a client is image-only.
+
+def test_options_absent_resolves_empty(tmp_path, monkeypatch):
+    _write_provider(tmp_path, "acme", api_key_env="ACME_API_KEY", models=[("m1", "")])
+    monkeypatch.setattr(providers, "PROVIDERS", providers._load_providers(tmp_path))
+    monkeypatch.delenv(providers.MODEL_OPTIONS_ENV, raising=False)
+    # Removable contract: no [options] anywhere => nothing to apply.
+    assert providers.resolve_model_options("acme:m1") == {}
+
+
+def test_model_options_override_provider_options(tmp_path, monkeypatch):
+    _write_provider(
+        tmp_path, "acme", api_key_env="ACME_API_KEY",
+        extra_toml="[options]\nnum_ctx = 4096\ntemperature = 0.5\n",
+        models=[("m1", "[options]\nnum_ctx = 32768\n")],
+    )
+    monkeypatch.setattr(providers, "PROVIDERS", providers._load_providers(tmp_path))
+    monkeypatch.delenv(providers.MODEL_OPTIONS_ENV, raising=False)
+    # Model wins on the key it sets; the provider-wide key it doesn't set survives.
+    assert providers.resolve_model_options("acme:m1") == {
+        "num_ctx": 32768, "temperature": 0.5,
+    }
+
+
+def test_env_options_override_the_registry(tmp_path, monkeypatch):
+    _write_provider(tmp_path, "acme", api_key_env="ACME_API_KEY",
+                    models=[("m1", "[options]\nnum_ctx = 4096\n")])
+    monkeypatch.setattr(providers, "PROVIDERS", providers._load_providers(tmp_path))
+    monkeypatch.setenv(providers.MODEL_OPTIONS_ENV, "num_ctx=131072")
+    assert providers.resolve_model_options("acme:m1")["num_ctx"] == 131072
+
+
+def test_parse_options_env_coerces_scalars():
+    parsed = providers.parse_options_env(
+        "num_ctx=65536, temperature=0.2 , think=true, stop=END"
+    )
+    # Types matter: a client that validates kwargs rejects the string "65536".
+    assert parsed == {
+        "num_ctx": 65536, "temperature": 0.2, "think": True, "stop": "END",
+    }
+    assert isinstance(parsed["num_ctx"], int)
+    assert isinstance(parsed["temperature"], float)
+
+
+def test_parse_options_env_empty_is_empty():
+    assert providers.parse_options_env(None) == {}
+    assert providers.parse_options_env("") == {}
+    assert providers.parse_options_env("   ") == {}
+
+
+def test_parse_options_env_rejects_malformed():
+    with pytest.raises(SystemExit):
+        providers.parse_options_env("num_ctx")       # no '='
+    with pytest.raises(SystemExit):
+        providers.parse_options_env("=65536")        # no key
+
+
+def test_options_table_must_be_a_table(tmp_path):
+    _write_provider(tmp_path, "acme", api_key_env="ACME_API_KEY",
+                    extra_toml='options = "nope"\n', models=[("m1", "")])
+    with pytest.raises(SystemExit) as exc:
+        providers._load_providers(tmp_path)
+    assert "[options]" in str(exc.value)
+
+
+def test_unknown_prefix_has_no_options(tmp_path, monkeypatch):
+    _write_provider(tmp_path, "acme", api_key_env="ACME_API_KEY", models=[("m1", "")])
+    monkeypatch.setattr(providers, "PROVIDERS", providers._load_providers(tmp_path))
+    monkeypatch.setenv(providers.MODEL_OPTIONS_ENV, "num_ctx=4096")
+    # No provider matches, but the env tier still applies -- an unregistered spec
+    # is passed through to init_chat_model, and it should be configurable too.
+    assert providers.resolve_model_options("mystery:x") == {"num_ctx": 4096}
+
+
+def test_shipped_ollama_model_declares_num_ctx():
+    """The shipped default carries an explicit num_ctx.
+
+    Ollama's own default context is far below what a coding agent needs, and the
+    failure is silent truncation rather than an error -- so the registry pins it
+    instead of inheriting whatever the tag's Modelfile happens to say.
+    """
+    provider = providers.provider_for("ollama:gemma4")
+    assert provider.options_for("ollama:gemma4")["num_ctx"] >= 32768
 
 
 def test_shipped_registry_autoselects_ollama(monkeypatch):

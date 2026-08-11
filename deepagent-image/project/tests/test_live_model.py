@@ -49,6 +49,27 @@ def test_model_reports_usage_metadata(live_model):
     assert int(usage.get("output_tokens") or 0) > 0
 
 
+def test_registry_options_reach_the_client(live_model):
+    """The registry's `[options]` land on the constructed client.
+
+    This is the payoff for the `[options]` table: one Ollama tag serves every
+    context size, because per-request options override the tag's Modelfile
+    PARAMETER block. Worth a live case because the failure is silent — a dropped
+    `num_ctx` doesn't error, it just quietly truncates context, and the model
+    forgets the top of the conversation instead of saying anything.
+    """
+    _load_providers = __import__("_bootstrap", fromlist=["_load"])._load
+    providers = _load_providers("harness.providers")
+    spec = providers.choose_model(None)
+    expected = providers.resolve_model_options(spec)
+    if "num_ctx" not in expected:
+        pytest.skip(f"no num_ctx declared for {spec!r}")
+    assert getattr(live_model, "num_ctx", None) == expected["num_ctx"], (
+        "num_ctx did not reach the client — the model would silently run at the "
+        "Modelfile default and truncate context"
+    )
+
+
 def test_model_can_emit_tool_calls(live_model):
     """The model can actually call a bound tool.
 
