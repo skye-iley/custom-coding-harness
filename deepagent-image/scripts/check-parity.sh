@@ -10,6 +10,7 @@ pairs=(
   "smoke.ps1 smoke.sh"
   "verify.ps1 verify.sh"
   "sync-models.ps1 sync-models.sh"
+  "lib/config.ps1 lib/config.sh"
 )
 
 for pair in "${pairs[@]}"; do
@@ -52,6 +53,25 @@ markers=(
   "deepagent-userns"
   "install-apparmor-profile"
   "DEEPAGENTS_JAIL_APPARMOR"
+  # M5: the profile file must be MOUNTED (it is gitignored, so it is not in the
+  # image's COPY list -- without the mount the container's resolve_settings()
+  # never sees a profile tier and `/config save` writes to a throwaway layer),
+  # and the resource caps / NetJail must resolve THROUGH the profile (they were
+  # written by `harness config security` and read by nothing).
+  "/project/.harness-profile.yaml"
+  "pids_limit"
+  "net_jail"
+  # The caps are docker flags, not env vars, so the container can only report
+  # them truthfully in `/config` if they are forwarded explicitly.
+  "PIDS_LIMIT="
+  # The seccomp relaxation and the in-container jail must be turned on by the same
+  # decision: jail.jail_enabled() reads the env, not Settings, so dropping this -e
+  # on one platform relaxes five syscalls container-wide, starts no jail, and turns
+  # nsguard off. Strictly worse than jail-off, and silent. The real property
+  # (relaxation ⇒ jail) is only observable in a live container; this is the cheap
+  # guard against a one-sided removal.
+  "DEEPAGENTS_JAIL=1"
+  "DEEPAGENTS_MASK_MODE="
 )
 rd_ps1="$ROOT/scripts/run-docker.ps1"
 rd_sh="$ROOT/scripts/run-docker.sh"
@@ -61,6 +81,39 @@ for m in "${markers[@]}"; do
     FAILED=1
   fi
 done
+
+
+# Milestone 5, C3/§7c: lib/config.{ps1,sh} resolution parity. True cross-language
+# execution isn't attempted here (pwsh availability on a bash CI runner is not
+# guaranteed) — instead each script asserts its OWN resolver against the same
+# fixture + the same expected literal, so a precedence change in either
+# resolver breaks its own CI run instead of silently drifting from the other.
+# Mirror block in check-parity.ps1.
+CONFIG_LIB_SH="$ROOT/scripts/lib/config.sh"
+if [[ -f "$CONFIG_LIB_SH" ]]; then
+  FIXTURE_DIR="$(mktemp -d)"
+  printf 'DEEPAGENTS_MASK_MODE=allow\n' > "$FIXTURE_DIR/env"
+  printf 'jail: true\ncpus: "6"\njail_apparmor:   # unset -- comment-only value\n' > "$FIXTURE_DIR/profile"
+
+  ENV_FILE="$FIXTURE_DIR/env"
+  PROFILE_FILE="$FIXTURE_DIR/profile"
+  # shellcheck source=lib/config.sh
+  source "$CONFIG_LIB_SH"
+
+  got_mask_mode="$(_resolve_host_setting "" DEEPAGENTS_MASK_MODE mask_mode "")"      # .env fixture wins
+  got_jail="$(_resolve_host_setting "" DEEPAGENTS_JAIL jail "0")"                     # profile fixture wins
+  got_cpus="$(_resolve_host_setting "" CPUS cpus "2")"                                # profile fixture wins
+  got_apparmor="$(_resolve_host_setting "" DEEPAGENTS_JAIL_APPARMOR jail_apparmor "")" # comment-only => default
+  got_cli_wins="$(_resolve_host_setting "explicit" DEEPAGENTS_JAIL jail "0")"          # value arg always wins
+
+  [[ "$got_mask_mode" == "allow" ]]    || { echo "PARITY: lib/config.sh mask_mode got '$got_mask_mode' want 'allow'" >&2; FAILED=1; }
+  [[ "$got_jail" == "true" ]]          || { echo "PARITY: lib/config.sh jail got '$got_jail' want 'true'" >&2; FAILED=1; }
+  [[ "$got_cpus" == "6" ]]             || { echo "PARITY: lib/config.sh cpus got '$got_cpus' want '6'" >&2; FAILED=1; }
+  [[ "$got_apparmor" == "" ]]          || { echo "PARITY: lib/config.sh jail_apparmor got '$got_apparmor' want '' (comment-only)" >&2; FAILED=1; }
+  [[ "$got_cli_wins" == "explicit" ]]  || { echo "PARITY: lib/config.sh explicit value did not win, got '$got_cli_wins'" >&2; FAILED=1; }
+
+  rm -rf "$FIXTURE_DIR"
+fi
 
 if [[ $FAILED -ne 0 ]]; then
   echo "PARITY CHECK FAILED" >&2

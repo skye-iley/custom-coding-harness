@@ -22,6 +22,7 @@ import os
 import sys
 from pathlib import Path
 
+from harness.config import resolve_settings
 from harness.mask import PATTERN_DEFAULTS, resolve
 
 
@@ -55,6 +56,23 @@ def state_dir_inside_workspace(state_dir: str | Path, workspace: str | Path) -> 
 def doctor_main(argv: list[str]) -> int:
     """Run all doctor checks and return exit code (0 = all pass)."""
     records: list[tuple[str, str]] = []  # (level, message)
+
+    # --- Milestone 5, C8: resolved config summary -------------------------------
+    # No cli= override: this reflects what an *unflagged* run would actually do
+    # (CLI flag > env > profile > default), not this doctor invocation's own argv.
+    try:
+        settings, sources = resolve_settings()
+        hitl_desc = f"{settings.hitl.autonomy_level} ({sources.hitl})" if settings.hitl else "off"
+        records.append((
+            "info",
+            "resolved config: "
+            f"model={settings.model or '(auto)'} ({sources.model}), "
+            f"mask_mode={settings.mask_mode} ({sources.mask_mode}), "
+            f"jail={'on' if settings.jail else 'off'} ({sources.jail}), "
+            f"hitl={hitl_desc}",
+        ))
+    except SystemExit as exc:
+        records.append(("error", f"resolved config: {exc}"))
 
     cwd = Path.cwd()
     providers_dir = Path(os.environ.get("DEEPAGENTS_PROVIDERS_DIR", str(cwd / "providers")))

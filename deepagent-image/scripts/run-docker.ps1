@@ -19,9 +19,24 @@ param(
     # agent can't exhaust the host CPU/RAM or fork-bomb it. NOT a sandbox (trust
     # boundary is still the container; docs/milestones/mvp.md §5). Override e.g.
     #   .\run-docker.ps1 -Cpus 4 -Memory 8g -PidsLimit 1024 "task"
-    [string]$Cpus = "2",
-    [string]$Memory = "4g",
-    [string]$PidsLimit = "512",
+    # Milestone 5, C3: defaults live in Resolve-HostSetting, not here, so an
+    # unpassed flag can fall through to env / .env / .harness-profile.yaml --
+    # a literal "2" here would shadow a saved `cpus: 6` in the profile.
+    [string]$Cpus = "",
+    [string]$Memory = "",
+    [string]$PidsLimit = "",
+    # Milestone 5, C3: CLI parity for knobs that previously only had env/.env
+    # coverage. All four resolve CLI flag > host env > project\.env >
+    # .harness-profile.yaml > default via Resolve-HostSetting (lib\config.ps1).
+    [string]$Model = "",
+    [string]$MaskMode = "",
+    [string]$Jail = "",
+    [string]$JailApparmor = "",
+    # Write/update .harness-config.yaml's autonomy_level before launch (strict|
+    # guided|autonomous). An imperative action, not a resolved Settings field --
+    # HITL's presence-of-file-turns-it-on design (M3) means this necessarily
+    # turns HITL on if it wasn't already; that's the point, not a side effect.
+    [string]$Autonomy = "",
     # NetJail (see netjail\README.md): run the agent on an --internal docker
     # network with no route to host or internet, punching only the holes declared
     # in netjail\host-services.txt (host ports) and netjail\allowed-domains.txt
@@ -42,9 +57,36 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $EnvFile = Join-Path $Root "project\.env"
+$ProfileFile = Join-Path $Root "project\.harness-profile.yaml"
 $NetjailDir = Join-Path $Root "netjail"
+. (Join-Path $PSScriptRoot "lib\config.ps1")
 if (-not (Test-Path $EnvFile)) {
     throw "Missing $EnvFile - copy project\.env.example to project\.env and set API keys."
+}
+
+# Milestone 5, C3: resource caps resolve through the same four-tier chain as every
+# other pre-spinup knob, so `harness config security`'s saved caps actually take
+# effect instead of being written and ignored. Mirror of run-docker.sh.
+$Cpus = Resolve-HostSetting -Value $Cpus -EnvVarName "CPUS" -ProfileKey "cpus" `
+    -Default "2" -EnvFile $EnvFile -ProfileFile $ProfileFile
+$Memory = Resolve-HostSetting -Value $Memory -EnvVarName "MEMORY" -ProfileKey "memory" `
+    -Default "4g" -EnvFile $EnvFile -ProfileFile $ProfileFile
+$PidsLimit = Resolve-HostSetting -Value $PidsLimit -EnvVarName "PIDS_LIMIT" -ProfileKey "pids_limit" `
+    -Default "512" -EnvFile $EnvFile -ProfileFile $ProfileFile
+
+# Mask mode resolves ONCE here, not inside the mask-scan block, because it has two
+# consumers: the scan container (which computes the overlay set) and the agent
+# container (whose in-container `harness doctor` / mask.resolve re-read the env).
+# One resolution, two consumers -- the point of lib\config. Mirror of run-docker.sh.
+$ScanMode = Resolve-HostSetting -Value $MaskMode -EnvVarName "DEEPAGENTS_MASK_MODE" `
+    -ProfileKey "mask_mode" -Default "" -EnvFile $EnvFile -ProfileFile $ProfileFile
+
+# NetJail is a [switch], so "not passed" is indistinguishable from "-NetJail:$false"
+# by value alone -- only consult the lower tiers when the flag is genuinely absent.
+if (-not $PSBoundParameters.ContainsKey('NetJail')) {
+    $NetJailResolved = Resolve-HostSetting -Value "" -EnvVarName "NET_JAIL" -ProfileKey "net_jail" `
+        -Default "0" -EnvFile $EnvFile -ProfileFile $ProfileFile
+    if ($NetJailResolved -in @("1", "true", "yes", "on")) { $NetJail = [switch]$true }
 }
 
 $DefaultWorkspace = Join-Path $Root "project\workspace"
@@ -279,29 +321,29 @@ if ($NetJail) {
 # to resolve the mask set, then emit empty overlay mounts for each masked path.
 # Scan output lines: <mode> <type> <tier> <relpath>
 $MaskArgs = @()
-$MaskMode = $env:DEEPAGENTS_MASK
-if ([string]::IsNullOrEmpty($MaskMode)) {
+# Enable/disable (DEEPAGENTS_MASK) deliberately gets NO -Flag or profile-file
+# tier -- it's a debugging escape hatch (config.py's Settings.mask_enabled is
+# excluded from the profile on purpose), not something to casually flip via a
+# saved default. Host env > project\.env only, unchanged from pre-M5.
+$MaskEnabled = $env:DEEPAGENTS_MASK
+if ([string]::IsNullOrEmpty($MaskEnabled)) {
     # Launcher env unset — fall back to project\.env so the host-side scan/overlay
     # gate honours the SAME DEEPAGENTS_MASK the container sees (§13). Host env wins.
     $envLine = Select-String -Path $EnvFile -Pattern '^\s*DEEPAGENTS_MASK\s*=' -ErrorAction SilentlyContinue | Select-Object -Last 1
     if ($envLine) {
-        $MaskMode = ($envLine.Line -replace '^\s*DEEPAGENTS_MASK\s*=', '').Trim().Trim('"').Trim("'")
+        $MaskEnabled = ($envLine.Line -replace '^\s*DEEPAGENTS_MASK\s*=', '').Trim().Trim('"').Trim("'")
     }
 }
-if ($MaskMode -eq "" -or $MaskMode -eq "1") {
+if ($MaskEnabled -eq "" -or $MaskEnabled -eq "1") {
     # Surface mask-scan diagnostics (protection-reduction / symlink warnings) instead
     # of dropping stderr; stdout stays the parseable grammar.
     $scanErr = New-TemporaryFile
     # Forward DEEPAGENTS_MASK_MODE (deny/allow, §13) into the scan container so the
     # resolver honours it — the scan gets no --env-file, so without this the env
     # knob is silently ignored and `allow` degrades to `deny` (under-masking).
-    $ScanMode = $env:DEEPAGENTS_MASK_MODE
-    if ([string]::IsNullOrEmpty($ScanMode)) {
-        $modeLine = Select-String -Path $EnvFile -Pattern '^\s*DEEPAGENTS_MASK_MODE\s*=' -ErrorAction SilentlyContinue | Select-Object -Last 1
-        if ($modeLine) {
-            $ScanMode = ($modeLine.Line -replace '^\s*DEEPAGENTS_MASK_MODE\s*=', '').Trim().Trim('"').Trim("'")
-        }
-    }
+    # Milestone 5, C3: -MaskMode / .harness-profile.yaml's mask_mode now layer on
+    # top of the same host-env / .env fallback this always had. $ScanMode is
+    # resolved once at the top of the script (shared with the agent container).
     $ScanModeArgs = @()
     if (-not [string]::IsNullOrEmpty($ScanMode)) {
         $ScanModeArgs = @("-e", "DEEPAGENTS_MASK_MODE=$ScanMode")
@@ -356,13 +398,10 @@ if ($MaskMode -eq "" -or $MaskMode -eq "1") {
 # the jail is asked for and the profile is missing, refuse to launch rather than run
 # unjailed while the operator believes otherwise.
 $JailArgs = @()
-$JailMode = $env:DEEPAGENTS_JAIL
-if (-not $JailMode) {
-    $jailLine = Select-String -Path $EnvFile -Pattern '^\s*DEEPAGENTS_JAIL\s*=' -ErrorAction SilentlyContinue | Select-Object -Last 1
-    if ($jailLine) {
-        $JailMode = ($jailLine.Line -replace '^\s*DEEPAGENTS_JAIL\s*=', '').Trim().Trim('"').Trim("'")
-    }
-}
+# Milestone 5, C3: -Jail / .harness-profile.yaml's jail now layer on top of the
+# same host-env / .env fallback this always had.
+$JailMode = Resolve-HostSetting -Value $Jail -EnvVarName "DEEPAGENTS_JAIL" `
+    -ProfileKey "jail" -Default "" -EnvFile $EnvFile -ProfileFile $ProfileFile
 if ($JailMode -and $JailMode -notin @("0", "false", "no", "off")) {
     $SeccompProfile = Join-Path $PSScriptRoot "..\seccomp\userns.json"
     if (-not (Test-Path $SeccompProfile)) {
@@ -370,6 +409,13 @@ if ($JailMode -and $JailMode -notin @("0", "false", "no", "off")) {
         exit 1
     }
     $JailArgs = @("--security-opt", "seccomp=$((Resolve-Path $SeccompProfile).Path)")
+    # The seccomp relaxation and the in-container jail must be turned on by the SAME
+    # decision. jail.jail_enabled() reads DEEPAGENTS_JAIL from the environment and does
+    # not consult Settings, so a value resolved from the -Jail flag / host env / profile
+    # tier would apply the relaxation here and never start the jail inside - relaxed
+    # syscalls, no containment, and nsguard (which defaults to tracking DEEPAGENTS_JAIL)
+    # off too. Normalized to "1": the container only tests truthiness.
+    $JailArgs += "-e", "DEEPAGENTS_JAIL=1"
     Write-Host "Jail: bwrap fs jail ON (narrow seccomp profile)"
 
     # M4 slice J (11.6): seccomp is only ONE of the two gates. On an AppArmor host
@@ -381,13 +427,10 @@ if ($JailMode -and $JailMode -notin @("0", "false", "no", "off")) {
     #
     # Unset (default): select the narrowed profile and PROBE that the daemon will
     # accept it, before launching anything real. Mirror of run-docker.sh.
-    $Apparmor = $env:DEEPAGENTS_JAIL_APPARMOR
-    if (-not $Apparmor) {
-        $aaLine = Select-String -Path $EnvFile -Pattern '^\s*DEEPAGENTS_JAIL_APPARMOR\s*=' -ErrorAction SilentlyContinue | Select-Object -Last 1
-        if ($aaLine) {
-            $Apparmor = ($aaLine.Line -replace '^\s*DEEPAGENTS_JAIL_APPARMOR\s*=', '').Trim().Trim('"').Trim("'")
-        }
-    }
+    # Milestone 5, C3: -JailApparmor / .harness-profile.yaml's jail_apparmor now
+    # layer on top of the same host-env / .env fallback this always had.
+    $Apparmor = Resolve-HostSetting -Value $JailApparmor -EnvVarName "DEEPAGENTS_JAIL_APPARMOR" `
+        -ProfileKey "jail_apparmor" -Default "" -EnvFile $EnvFile -ProfileFile $ProfileFile
     if (-not $Apparmor) {
         # Ask the DAEMON, not this machine: the profile must be loaded on the host
         # running dockerd, which for a remote daemon / Colima-Lima VM / WSL distro is
@@ -427,6 +470,41 @@ if ($JailMode -and $JailMode -notin @("0", "false", "no", "off")) {
     }
 }
 
+# Milestone 5, C3: -Model / .harness-profile.yaml's model, forwarded as an
+# explicit -e so it reaches the container even when it's not in project\.env
+# (docker prefers an explicit -e over the same var in --env-file, so this wins
+# regardless of what .env also says once cli/env/profile resolved a value).
+$ResolvedModel = Resolve-HostSetting -Value $Model -EnvVarName "DEEPAGENTS_MODEL" `
+    -ProfileKey "model" -Default "" -EnvFile $EnvFile -ProfileFile $ProfileFile
+$ModelArgs = @()
+if (-not [string]::IsNullOrEmpty($ResolvedModel)) {
+    $ModelArgs = @("-e", "DEEPAGENTS_MODEL=$ResolvedModel")
+}
+
+# Same for the resolved mask mode: the scan container already gets it (it computes
+# the overlay set), but the AGENT container never did, so an in-container
+# `harness doctor` re-ran mask.resolve against an unset env and reported `deny` on
+# an `allow` launch. Enforcement is unaffected either way -- the jail's overmounts
+# read the frozen mask-snapshot.txt, not a fresh resolve -- this is about the two
+# halves reporting the same mode.
+$MaskModeArgs = @()
+if (-not [string]::IsNullOrEmpty($ScanMode)) {
+    $MaskModeArgs = @("-e", "DEEPAGENTS_MASK_MODE=$ScanMode")
+}
+
+# Host-only knobs the container cannot otherwise observe: --cpus/--memory/
+# --pids-limit/NetJail are `docker run` flags, never env vars, so without these
+# the in-session `/config` read-only view and `harness doctor` would report the
+# built-in defaults no matter what this launch actually applied. Informational
+# only -- nothing in the container acts on them.
+$NetJailValue = if ($NetJail) { "1" } else { "0" }
+$CapEnvArgs = @(
+    "-e", "CPUS=$Cpus",
+    "-e", "MEMORY=$Memory",
+    "-e", "PIDS_LIMIT=$PidsLimit",
+    "-e", "NET_JAIL=$NetJailValue"
+)
+
 $dockerArgs = @(
     "run", "--rm"
 ) + $TtyFlags + $JailArgs + @(
@@ -439,7 +517,7 @@ $dockerArgs = @(
     "-e", "DEEPAGENTS_STATE_DIR=/project/state",
     "-v", "${MountWorkspace}:/project/workspace",
     "-v", "${StateHostDir}:/project/state"
-) + $SrcMountArgs + $MaskArgs
+) + $SrcMountArgs + $MaskArgs + $ModelArgs + $MaskModeArgs + $CapEnvArgs
 
 # Git identity: mount host .gitconfig read-only into the agent user's home (uid 10001 -> /home/agent),
 # not /root (container runs USER agent). Never mount ~/.ssh into an autonomous-agent container -
@@ -447,6 +525,39 @@ $dockerArgs = @(
 $GitConfig = Join-Path $env:USERPROFILE ".gitconfig"
 if (Test-Path $GitConfig) {
     $dockerArgs += "-v", "${GitConfig}:/home/agent/.gitconfig:ro"
+}
+
+# -Autonomy: write/update autonomy_level in .harness-config.yaml before the
+# mount check below sees it. Plain text edit (no YAML parser, matching every
+# other host-side scrape/write in this script) -- replace the existing
+# `autonomy_level:` line if present, else prepend one (creating the file if it
+# doesn't exist yet).
+if ($Autonomy) {
+    if ($Autonomy -notin @("strict", "guided", "autonomous")) {
+        Write-Error "[harness] FATAL: -Autonomy must be one of strict|guided|autonomous, got '$Autonomy'"
+        exit 1
+    }
+    $HitlConfigPath = Join-Path $Root "project\.harness-config.yaml"
+    # NOT Set-Content -Encoding utf8: on Windows PowerShell 5.1 (this repo's primary
+    # shell) that writes a BOM. config.parse_config used to read with plain "utf-8",
+    # so the first key parsed as "<BOM>autonomy_level" and the harness SystemExit'd on
+    # the unknown-key branch -- i.e. -Autonomy bricked the run it was asked to
+    # configure. The readers are BOM-tolerant now (utf-8-sig); this side simply must
+    # not emit one. `n line endings for parity with run-docker.sh and config.py's
+    # own writers.
+    $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    if (Test-Path $HitlConfigPath) {
+        $existing = Get-Content $HitlConfigPath
+        if ($existing -match '^\s*autonomy_level\s*:') {
+            $updated = $existing -replace '^\s*autonomy_level\s*:.*', "autonomy_level: $Autonomy"
+        } else {
+            $updated = @("autonomy_level: $Autonomy") + $existing
+        }
+        [System.IO.File]::WriteAllText($HitlConfigPath, (($updated -join "`n") + "`n"), $Utf8NoBom)
+    } else {
+        [System.IO.File]::WriteAllText($HitlConfigPath, "autonomy_level: $Autonomy`n", $Utf8NoBom)
+    }
+    Write-Host "HITL: autonomy_level set to '$Autonomy' in .harness-config.yaml (turns HITL on for this run if it wasn't already)"
 }
 
 # HITL config: .harness-config.yaml is host-local + gitignored (like .env), so it
@@ -457,6 +568,22 @@ $HitlConfig = Join-Path $Root "project\.harness-config.yaml"
 if (Test-Path $HitlConfig) {
     $dockerArgs += "-v", "${HitlConfig}:/project/.harness-config.yaml:ro"
     Write-Host "HITL config: mounted (.harness-config.yaml present)"
+}
+
+# Unified config profile (Milestone 5, C4): same story as .harness-config.yaml --
+# gitignored, so NOT baked into the image; mount it into /project (the harness
+# CWD) so the container's resolve_settings() sees the same profile tier the host
+# side just resolved against. Without this the profile's in-session fields
+# (topic/max_cost/max_tokens) are silently ignored on every containerized run and
+# `/config save` writes into the throwaway container layer.
+#
+# Read-WRITE, unlike the HITL mount: `/config save` is a documented in-session
+# action that must land on the host. The agent can't reach it -- its file tools
+# are rooted at /project/workspace and the bwrap jail (slice H) binds /project
+# read-only.
+if (Test-Path $ProfileFile) {
+    $dockerArgs += "-v", "${ProfileFile}:/project/.harness-profile.yaml"
+    Write-Host "Config profile: mounted (.harness-profile.yaml present)"
 }
 
 $dockerArgs += "deepagent-harness"

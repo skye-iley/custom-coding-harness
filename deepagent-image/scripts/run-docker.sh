@@ -15,6 +15,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=lib/hostmap.sh
 source "$ROOT/scripts/lib/hostmap.sh"   # _should_map_host_user / _detect_is_wsl
 ENV_FILE="$ROOT/project/.env"
+PROFILE_FILE="$ROOT/project/.harness-profile.yaml"
+# shellcheck source=lib/config.sh
+source "$ROOT/scripts/lib/config.sh"    # _resolve_host_setting (Milestone 5, C3/§7c)
 WORKSPACE="${WORKSPACE:-$ROOT/project/workspace}"
 SEED_SOURCE="$ROOT/project/workspace"
 NETJAIL_DIR="$ROOT/netjail"
@@ -23,10 +26,27 @@ NETJAIL_DIR="$ROOT/netjail"
 # agent can't exhaust the host CPU/RAM or fork-bomb it. NOT a sandbox (the trust
 # boundary is still the container; see docs/milestones/mvp.md §5). Override via env:
 #   CPUS=4 MEMORY=8g PIDS_LIMIT=1024 ./run-docker.sh "task"
-CPUS="${CPUS:-2}"
-MEMORY="${MEMORY:-4g}"
-PIDS_LIMIT="${PIDS_LIMIT:-512}"
+# Milestone 5, C3: .harness-profile.yaml's cpus/memory/pids_limit layer under the
+# env var, so `harness config security`'s saved caps actually take effect.
+CPUS="$(_resolve_host_setting "${CPUS:-}" CPUS cpus "2")"
+MEMORY="$(_resolve_host_setting "${MEMORY:-}" MEMORY memory "4g")"
+PIDS_LIMIT="$(_resolve_host_setting "${PIDS_LIMIT:-}" PIDS_LIMIT pids_limit "512")"
 CAP_FLAGS=(--cpus "$CPUS" --memory "$MEMORY" --pids-limit "$PIDS_LIMIT")
+
+# Mask mode resolves ONCE here, not inside mask_scan(), because it has two
+# consumers: the scan container (which computes the overlay set) and the agent
+# container (whose in-container `harness doctor` / mask.resolve re-read the env).
+# One resolution, two consumers — the point of lib/config. Mirror of run-docker.ps1.
+RESOLVED_MASK_MODE="$(_resolve_host_setting "${DEEPAGENTS_MASK_MODE:-}" DEEPAGENTS_MASK_MODE mask_mode "")"
+
+# NetJail on/off resolves the same way, so a saved `net_jail: true` launches the
+# jail without re-typing NET_JAIL=1. Normalized to 1/"" here because everything
+# downstream tests `[[ "$NET_JAIL" == "1" ]]`.
+NET_JAIL="$(_resolve_host_setting "${NET_JAIL:-}" NET_JAIL net_jail "0")"
+case "$NET_JAIL" in
+  1 | true | yes | on) NET_JAIL=1 ;;
+  *) NET_JAIL="" ;;
+esac
 
 # Host reachability: make `host.docker.internal` resolve to the host on native
 # Linux (Docker Desktop/WSL2 provide it already; re-declaring host-gateway is a
@@ -264,15 +284,72 @@ if [[ -f "$HOME/.gitconfig" ]]; then
   GIT_MOUNT=(-v "$HOME/.gitconfig:$HOME_DIR/.gitconfig:ro")
 fi
 
+# AUTONOMY: write/update autonomy_level in .harness-config.yaml before the mount
+# check below sees it. Plain text edit (no YAML parser, matching every other
+# host-side scrape/write in this script) -- replace the existing
+# `autonomy_level:` line if present, else prepend one (creating the file if it
+# doesn't exist yet). An imperative action, not a resolved Settings field --
+# HITL's presence-of-file-turns-it-on design (M3) means this necessarily turns
+# HITL on if it wasn't already; that's the point, not a side effect.
+HITL_CONFIG_PATH="$ROOT/project/.harness-config.yaml"
+if [[ -n "${AUTONOMY:-}" ]]; then
+  case "$AUTONOMY" in
+    strict | guided | autonomous) ;;
+    *)
+      echo "[harness] FATAL: AUTONOMY must be one of strict|guided|autonomous, got '$AUTONOMY'" >&2
+      exit 1
+      ;;
+  esac
+  if [[ -f "$HITL_CONFIG_PATH" ]] && grep -q '^[[:space:]]*autonomy_level[[:space:]]*:' "$HITL_CONFIG_PATH"; then
+    sed -i.bak "s/^[[:space:]]*autonomy_level[[:space:]]*:.*/autonomy_level: $AUTONOMY/" "$HITL_CONFIG_PATH"
+    rm -f "$HITL_CONFIG_PATH.bak"
+  elif [[ -f "$HITL_CONFIG_PATH" ]]; then
+    { echo "autonomy_level: $AUTONOMY"; cat "$HITL_CONFIG_PATH"; } > "$HITL_CONFIG_PATH.tmp"
+    mv "$HITL_CONFIG_PATH.tmp" "$HITL_CONFIG_PATH"
+  else
+    echo "autonomy_level: $AUTONOMY" > "$HITL_CONFIG_PATH"
+  fi
+  echo "HITL: autonomy_level set to '$AUTONOMY' in .harness-config.yaml (turns HITL on for this run if it wasn't already)"
+fi
+
 # HITL config: .harness-config.yaml is host-local + gitignored (like .env), so it
 # is NOT baked into the image. Mount it into /project (the harness CWD) when
 # present so its mere presence turns HITL on (cli reads Path.cwd()/.harness-config.yaml).
 # Absent => not mounted => HITL stays off (byte-for-byte Milestone 2).
 HITL_MOUNT=()
-if [[ -f "$ROOT/project/.harness-config.yaml" ]]; then
-  HITL_MOUNT=(-v "$ROOT/project/.harness-config.yaml:/project/.harness-config.yaml:ro")
+if [[ -f "$HITL_CONFIG_PATH" ]]; then
+  HITL_MOUNT=(-v "$HITL_CONFIG_PATH:/project/.harness-config.yaml:ro")
   echo "HITL config: mounted (.harness-config.yaml present)"
 fi
+
+# Unified config profile (Milestone 5, C4): same story as .harness-config.yaml --
+# gitignored, so NOT baked into the image; mount it into /project (the harness
+# CWD) so the container's resolve_settings() sees the same profile tier the host
+# side just resolved against. Without this the profile's in-session fields
+# (topic/max_cost/max_tokens) are silently ignored on every containerized run and
+# `/config save` writes into the throwaway container layer.
+#
+# Read-WRITE, unlike the HITL mount: `/config save` is a documented in-session
+# action that must land on the host. The agent can't reach it -- its file tools
+# are rooted at /project/workspace and the bwrap jail (slice H) binds /project
+# read-only.
+PROFILE_MOUNT=()
+if [[ -f "$PROFILE_FILE" ]]; then
+  PROFILE_MOUNT=(-v "$PROFILE_FILE:/project/.harness-profile.yaml")
+  echo "Config profile: mounted (.harness-profile.yaml present)"
+fi
+
+# Host-only knobs the container cannot otherwise observe: --cpus/--memory/
+# --pids-limit/NetJail are `docker run` flags, never env vars, so without these
+# the in-session `/config` read-only view and `harness doctor` would report the
+# built-in defaults no matter what this launch actually applied. Informational
+# only -- nothing in the container acts on them.
+CAP_ENV=(
+  -e "CPUS=$CPUS"
+  -e "MEMORY=$MEMORY"
+  -e "PIDS_LIMIT=$PIDS_LIMIT"
+  -e "NET_JAIL=${NET_JAIL:-0}"
+)
 
 # -it gives the REPL prompt loop a TTY. If stdin isn't actually a terminal
 # (CI, piped smoke tests), -t fails to allocate and Docker falls back to a
@@ -287,28 +364,24 @@ fi
 MASK_ARGS=()
 EMPTY_FILE=""
 EMPTY_DIR=""
-# Read a var from project/.env so launcher-side decisions honour the SAME config
-# the container sees (DEEPAGENTS_MASK is a container env per §13; the launcher
-# gates the host-side scan/overlay on it too). Host/launcher env still wins when
-# set — this is only the fallback. Last matching KEY=VALUE line, quotes stripped.
-_env_file_get() {
-  local key="$1"
-  [[ -f "$ENV_FILE" ]] || return 0
-  sed -n "s/^[[:space:]]*${key}=//p" "$ENV_FILE" | tail -1 \
-    | sed 's/[[:space:]]*$//; s/^"//; s/"$//; s/^'"'"'//; s/'"'"'$//'
-}
 
 mask_scan() {
-  # Launcher env wins; else fall back to project/.env; else default on ("1").
+  # Enable/disable (DEEPAGENTS_MASK) deliberately gets NO profile-file tier --
+  # it's a debugging escape hatch (config.py's Settings.mask_enabled is excluded
+  # from the profile on purpose), not something to casually flip via a saved
+  # default. Host/launcher env wins, else project/.env, else default on ("1") --
+  # unchanged from pre-M5, honouring the SAME config the container sees (§13).
   local mask_mode="${DEEPAGENTS_MASK:-$(_env_file_get DEEPAGENTS_MASK)}"
   mask_mode="${mask_mode:-1}"
   [[ "$mask_mode" == "0" ]] && return 0
   # Forward DEEPAGENTS_MASK_MODE (deny/allow, §13) into the scan container so the
   # resolver honours it — the scan gets no --env-file, so without this the env
   # knob is silently ignored and `allow` degrades to `deny` (under-masking).
-  local scan_mode="${DEEPAGENTS_MASK_MODE:-$(_env_file_get DEEPAGENTS_MASK_MODE)}"
+  # Milestone 5, C3: .harness-profile.yaml's mask_mode now layers on top of the
+  # same host-env / .env fallback this always had. Resolved once at the top of the
+  # script (RESOLVED_MASK_MODE), shared with the agent container.
   local mode_env=()
-  [[ -n "$scan_mode" ]] && mode_env=(-e "DEEPAGENTS_MASK_MODE=$scan_mode")
+  [[ -n "${RESOLVED_MASK_MODE:-}" ]] && mode_env=(-e "DEEPAGENTS_MASK_MODE=$RESOLVED_MASK_MODE")
   local scan_output scan_err
   scan_err="$(mktemp)"
   scan_output="$(docker run --rm \
@@ -350,7 +423,10 @@ mask_cleanup() {
 # unjailed while the operator believes otherwise.
 JAIL_ARGS=()
 jail_setup() {
-  local jail_mode="${DEEPAGENTS_JAIL:-$(_env_file_get DEEPAGENTS_JAIL)}"
+  # Milestone 5, C3: .harness-profile.yaml's jail now layers on top of the same
+  # host-env / .env fallback this always had.
+  local jail_mode
+  jail_mode="$(_resolve_host_setting "${DEEPAGENTS_JAIL:-}" DEEPAGENTS_JAIL jail "0")"
   case "${jail_mode:-0}" in
     0 | false | no | off | "") return 0 ;;
   esac
@@ -360,6 +436,11 @@ jail_setup() {
     exit 1
   fi
   JAIL_ARGS=(--security-opt "seccomp=$profile")
+  # Same decision must turn on the relaxation AND the in-container jail — see the
+  # comment in run-docker.ps1. jail.jail_enabled() reads the env, not Settings, so
+  # without this a profile/env-resolved jail relaxes five syscalls container-wide,
+  # starts no bwrap re-exec, and leaves nsguard (which tracks DEEPAGENTS_JAIL) off.
+  JAIL_ARGS+=(-e "DEEPAGENTS_JAIL=1")
   echo "Jail: bwrap fs jail ON (narrow seccomp profile)" >&2
 
   # M4 slice J (§11.6): seccomp is only ONE of the two gates. On an AppArmor host
@@ -371,7 +452,10 @@ jail_setup() {
   #
   # Unset (default): select the narrowed profile and PROBE that the daemon will
   # accept it, before launching anything real. Mirror of run-docker.ps1.
-  local apparmor="${DEEPAGENTS_JAIL_APPARMOR:-$(_env_file_get DEEPAGENTS_JAIL_APPARMOR)}"
+  # Milestone 5, C3: .harness-profile.yaml's jail_apparmor now layers on top of
+  # the same host-env / .env fallback this always had.
+  local apparmor
+  apparmor="$(_resolve_host_setting "${DEEPAGENTS_JAIL_APPARMOR:-}" DEEPAGENTS_JAIL_APPARMOR jail_apparmor "")"
   if [[ -z "$apparmor" ]]; then
     # NOT `$(...)`: the autoselect fails closed with `exit 1`, which inside a
     # command substitution would only kill the subshell and let the launch proceed.
@@ -448,6 +532,23 @@ _apparmor_autoselect() {
 }
 jail_setup
 
+# Milestone 5, C3: DEEPAGENTS_MODEL / .harness-profile.yaml's model, forwarded
+# as an explicit -e so it reaches the container even when it's not in
+# project/.env (docker prefers an explicit -e over the same var in
+# --env-file, so this wins regardless of what .env also says).
+MODEL_ARGS=()
+RESOLVED_MODEL="$(_resolve_host_setting "${DEEPAGENTS_MODEL:-}" DEEPAGENTS_MODEL model "")"
+[[ -n "$RESOLVED_MODEL" ]] && MODEL_ARGS=(-e "DEEPAGENTS_MODEL=$RESOLVED_MODEL")
+
+# Same for the resolved mask mode: the scan container already gets it (it computes
+# the overlay set), but the AGENT container never did, so an in-container
+# `harness doctor` re-ran mask.resolve against an unset env and reported `deny` on
+# an `allow` launch. Enforcement is unaffected either way — the jail's overmounts
+# read the frozen mask-snapshot.txt, not a fresh resolve — this is about the two
+# halves reporting the same mode.
+MASK_MODE_ARGS=()
+[[ -n "${RESOLVED_MASK_MODE:-}" ]] && MASK_MODE_ARGS=(-e "DEEPAGENTS_MASK_MODE=$RESOLVED_MASK_MODE")
+
 # Assemble the agent `docker run` invocation into an array. NET_ARGS / PROXY_ENV
 # are set either by netjail_up (jail mode) or to the bridge defaults below.
 build_agent_run() {
@@ -465,7 +566,11 @@ build_agent_run() {
     ${SRC_MOUNT[@]+"${SRC_MOUNT[@]}"}
     ${GIT_MOUNT[@]+"${GIT_MOUNT[@]}"}
     ${HITL_MOUNT[@]+"${HITL_MOUNT[@]}"}
+    ${PROFILE_MOUNT[@]+"${PROFILE_MOUNT[@]}"}
     ${MASK_ARGS[@]+"${MASK_ARGS[@]}"}
+    ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}
+    ${MASK_MODE_ARGS[@]+"${MASK_MODE_ARGS[@]}"}
+    "${CAP_ENV[@]}"
     deepagent-harness)
   if [[ $# -gt 0 ]]; then
     AGENT_RUN+=(python3 main.py "$@")

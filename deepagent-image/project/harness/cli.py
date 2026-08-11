@@ -8,6 +8,7 @@ agent (agent), all around a SqliteSaver checkpointer keyed by --thread-id.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import os
 import subprocess
 import sys
@@ -25,12 +26,21 @@ import json
 from harness import (
     archive,
     audit,
-    config as hitl_config,
     hitl,
     interrupt,
     jail,
     refresh,
     resilience,
+)
+from harness.config import (
+    AUTONOMY_LEVELS,
+    INTERRUPTION_POLICIES,
+    LIVE_FIELDS,
+    ON_DENY_MODES,
+    PROFILE_NAME,
+    Settings,
+    resolve_settings,
+    save_profile,
 )
 from harness.agent import (
     DEFAULT_TASK,
@@ -66,20 +76,19 @@ from harness.workflows import (
 )
 
 
-def _env_defaults() -> dict:
-    """Build argparse defaults from environment variables."""
-    return {
-        "thread_id": os.getenv("DEEPAGENTS_THREAD_ID")
-                     or f"session-{datetime.now():%Y%m%d-%H%M%S}",
-        "topic": os.getenv("DEEPAGENTS_TOPIC") or None,
-        "headless": os.getenv("DEEPAGENTS_HEADLESS", "").strip().lower() in _TRUTHY,
-        "max_cost": _env_float("DEEPAGENTS_MAX_COST"),
-        "max_tokens": _env_int("DEEPAGENTS_MAX_TOKENS"),
-        "workspace": os.getenv("AGENT_WORKSPACE", str(Path.cwd() / "workspace")),
-    }
-
-
 def parse_args() -> argparse.Namespace:
+    """Parse CLI args, then route the Settings-covered fields (model, thread_id,
+    topic, headless, max_cost, max_tokens) through ``resolve_settings()``
+    instead of a bespoke env-default dict, so CLI/env/profile precedence lives in
+    one place (Milestone 5, C2). Behavior is unchanged for anyone not using a
+    profile file: unset flags still fall through to the same env vars they did
+    before this re-plumb.
+
+    Each Settings-covered flag defaults to ``None`` here (rather than argparse's
+    normal implicit default) so "not passed on the CLI" is distinguishable from
+    "passed as falsy" -- that's what lets ``resolve_settings`` tell a bare
+    ``--headless`` apart from an unset flag that should fall through to env/profile.
+    """
     parser = argparse.ArgumentParser(description="Run a LangChain Deep Agents coding harness.")
     parser.add_argument("task", nargs="*", help="Task for the agent. Defaults to a workspace inspection.")
     parser.add_argument(
@@ -87,25 +96,26 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Model spec, for example 'openai:gpt-5.5' or 'google_genai:gemini-3.5-flash'.",
     )
-    defaults = _env_defaults()
-    parser.set_defaults(**defaults)
-
     parser.add_argument(
         "--workspace",
+        default=os.getenv("AGENT_WORKSPACE", str(Path.cwd() / "workspace")),
         help="Directory exposed to the coding agent.",
     )
     parser.add_argument(
         "--thread-id",
+        default=None,
         help="Present thread id. Fresh per run unless set; pass a prior id to resume it.",
     )
     parser.add_argument(
         "--topic",
+        default=None,
         help="Continual-topic label for this run; scopes recall by default (also DEEPAGENTS_TOPIC).",
     )
     parser.add_argument("--stream", action="store_true", help="Print raw LangGraph stream events.")
     parser.add_argument(
         "--headless",
         action="store_true",
+        default=None,
         help="One-shot batch mode: run the task(s) to completion, emit one JSON "
         "result on stdout, and exit (no interactive prompt). Interrupts resolve "
         "by the fail-closed headless policy (also DEEPAGENTS_HEADLESS).",
@@ -113,14 +123,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-cost",
         type=float,
+        default=None,
         help="End the session once cumulative USD cost crosses this (also DEEPAGENTS_MAX_COST).",
     )
     parser.add_argument(
         "--max-tokens",
         type=int,
+        default=None,
         help="End the session once cumulative tokens cross this (also DEEPAGENTS_MAX_TOKENS).",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    settings, sources = resolve_settings(cli=args)
+    args.model = settings.model
+    args.thread_id = settings.thread_id
+    args.topic = settings.topic
+    args.headless = settings.headless
+    args.max_cost = settings.max_cost
+    args.max_tokens = settings.max_tokens
+    args.settings = settings
+    args.settings_sources = sources
+    return args
 
 
 def _env_float(name: str) -> float | None:
@@ -133,16 +156,6 @@ def _env_float(name: str) -> float | None:
         raise SystemExit(f"{name}={raw!r} is not a valid number.")
 
 
-def _env_int(name: str) -> int | None:
-    raw = os.getenv(name)
-    if not raw:
-        return None
-    try:
-        return int(raw)
-    except ValueError:
-        raise SystemExit(f"{name}={raw!r} is not a valid integer.")
-
-
 EXIT_TOKENS = {"/exit", "/quit"}
 
 # Slash commands offered in the interactive prompt's completion menu, each with a
@@ -152,6 +165,7 @@ EXIT_TOKENS = {"/exit", "/quit"}
 _SLASH_META_BASE = {
     "/exit": "end the session",
     "/quit": "end the session",
+    "/config": "view or edit live config ( /config | /config set <field> <value> | /config save )",
 }
 _SLASH_META_ARCHIVE = {
     "/recall": "stage prior-session context for the next turn ( /recall [query] [--all] )",
@@ -644,6 +658,319 @@ def _handle_refresh(workspace: Path | None, line: str) -> None:
     _stage(f"refresh: updated {len(written)} file(s) from the host{scope}")
 
 
+# --- Milestone 5, C5: /config REPL command ------------------------------------
+#
+# Live subset only (config.LIVE_FIELDS + the three hitl.* sub-fields) -- the
+# pre-spinup half (mask/jail/caps/...) is fixed for this container's lifetime
+# and shown read-only; edit it via `harness config` before the *next* launch.
+
+_CONFIG_SETTABLE_FIELDS = (
+    "model", "thread_id", "topic", "max_cost", "max_tokens",
+    "hitl.autonomy_level", "hitl.on_deny", "hitl.interruption_policy",
+)
+# Derived from LIVE_FIELDS + the Settings dataclass, not hand-duplicated, so the
+# pre-spinup/in-session split (milestone5.md §3's table) can't drift out of sync
+# with config.py's own single source of truth (milestone5_invariants.md #4).
+_CONFIG_PRESPINUP_FIELDS = tuple(
+    f.name for f in dataclasses.fields(Settings) if f.name not in LIVE_FIELDS
+)
+_CONFIG_HITL_VALIDATORS = {
+    "hitl.autonomy_level": AUTONOMY_LEVELS,
+    "hitl.on_deny": ON_DENY_MODES,
+    "hitl.interruption_policy": INTERRUPTION_POLICIES,
+}
+
+
+def _parse_config_command(line: str) -> tuple[str, list[str]]:
+    """Split '/config [subcommand] [args...]' into (subcommand, args); subcommand
+    is '' for a bare '/config' (display). Pure -- no I/O -- so it's host-testable
+    without a terminal."""
+    tokens = line.split()[1:]  # drop the leading '/config' token
+    if not tokens:
+        return "", []
+    return tokens[0], tokens[1:]
+
+
+# Live fields that are legitimately nullable, so a bare `/config set <field>`
+# means "clear it" rather than a usage error. `topic` is the only one: a session
+# could otherwise be tagged but never untagged.
+_CONFIG_UNSETTABLE_FIELDS = ("topic",)
+
+
+def _parse_config_set_args(args: list[str]) -> tuple[str, str | None]:
+    """`<field> <value...>` -> (field, value), or raises ValueError with a
+    human-readable message ('/config set' with too few args, or a field
+    outside _CONFIG_SETTABLE_FIELDS -- the pre-spinup half is never settable
+    here). A bare field in `_CONFIG_UNSETTABLE_FIELDS` yields `(field, None)`
+    = clear it. Pure -- host-testable."""
+    if len(args) == 1 and args[0] in _CONFIG_UNSETTABLE_FIELDS:
+        return args[0], None
+    if len(args) < 2:
+        raise ValueError("usage: /config set <field> <value>")
+    field, value = args[0], " ".join(args[1:])
+    if field not in _CONFIG_SETTABLE_FIELDS:
+        if field in _CONFIG_PRESPINUP_FIELDS:
+            raise ValueError(
+                f"{field!r} is fixed for this container -- edit via `harness config` "
+                "before the next launch, not /config set"
+            )
+        raise ValueError(f"unknown field {field!r} (settable: {', '.join(_CONFIG_SETTABLE_FIELDS)})")
+    return field, value
+
+
+def _config_display_lines(
+    *,
+    settings,
+    sources,
+    current_model: str,
+    thread_id: str,
+    topic: str | None,
+    max_cost: float | None,
+    max_tokens: int | None,
+    hitl_conf,
+    edited: set[str],
+) -> list[str]:
+    """The lines a bare `/config` prints: live fields first (source-tagged --
+    "session" once `/config set` has touched a field this run, else whatever
+    parse_args originally resolved it from), then the pre-spinup half
+    read-only. Pure given plain values -- no I/O -- so it's host-testable
+    without a terminal or a real running agent."""
+
+    def fmt(name: str, value, source: str) -> str:
+        shown = "(unset)" if value in (None, "") else value
+        return f"[harness] {name:<24} = {str(shown):<28} ({source})"
+
+    lines = [
+        fmt("model", current_model, "session" if "model" in edited else sources.model),
+        fmt("thread_id", thread_id, "session" if "thread_id" in edited else sources.thread_id),
+        fmt("topic", topic, "session" if "topic" in edited else sources.topic),
+        fmt("max_cost", max_cost, "session" if "max_cost" in edited else sources.max_cost),
+        fmt("max_tokens", max_tokens, "session" if "max_tokens" in edited else sources.max_tokens),
+    ]
+    if hitl_conf is None:
+        lines.append(fmt("hitl", "off", sources.hitl))
+    else:
+        for field in ("autonomy_level", "on_deny", "interruption_policy"):
+            key = f"hitl.{field}"
+            lines.append(fmt(key, getattr(hitl_conf, field), "session" if key in edited else sources.hitl))
+    lines.append(
+        "[harness] --- pre-spinup (fixed for this container; edit via `harness config` before next launch) ---"
+    )
+    for field in _CONFIG_PRESPINUP_FIELDS:
+        lines.append(fmt(field, getattr(settings, field), getattr(sources, field)))
+    return lines
+
+
+def _reprice_tracker(tracker: CostTrackerMiddleware | None, new_model: str) -> None:
+    """Point an active cost tracker at `new_model`'s rates after a `/config set
+    model` switch; say so plainly when there is no tracker to re-point.
+
+    A session that launched on a `free` model has no tracker at all
+    (`build_cost_tracker` returns None -- the M1 null=MVP contract), and one
+    can't be added mid-session: it would have to be appended to the middleware
+    list the agent was built from and its session totals would start at zero,
+    so the closing ledger line would under-report the run. Better to say cost
+    tracking stays off than to start a half-accurate one silently.
+    """
+    if tracker is None:
+        _stage(
+            f"config: cost tracking is off this session (launched on an unpriced model with no "
+            f"budget) -- {new_model} will run untracked; restart to price it"
+        )
+        return
+    provider = provider_for(new_model)
+    tracker.reprice(
+        provider.pricing if provider else Free(),
+        new_model[len(provider.prefix):] if provider else new_model,
+        provider.rates_for(new_model) if provider else None,
+    )
+
+
+def _handle_config(
+    line: str,
+    *,
+    config: dict,
+    current_model: str,
+    topic: str | None,
+    tracker: CostTrackerMiddleware | None,
+    hitl_conf,
+    rebuild_agent,
+    edited: set[str],
+    settings=None,
+    sources=None,
+    archive_conn=None,
+    run_id: str | None = None,
+) -> tuple[str, object | None, str | None]:
+    """Handle one `/config`, `/config set <field> <value>`, or `/config save`
+    line. Returns `(current_model, new_agent_or_None, current_topic)` --
+    `new_agent_or_None` is the rebuilt agent when a model switch succeeded,
+    else None (caller keeps its existing agent). Every other live field is
+    mutated in place on the objects the caller already holds (`config` dict,
+    `tracker`, `hitl_conf`), so only model/topic need to flow back out.
+
+    `settings`/`sources` are the pair `parse_args()` already resolved **with the
+    CLI tier applied**; they must be threaded through rather than re-resolved
+    here, or every field passed as a flag would report its provenance as
+    env/profile/default and the source tags -- the whole point of the display --
+    would be wrong. Optional only so the host-side tests can call this bare.
+
+    `archive_conn`/`run_id` are the past-archive handles, so a `/config set
+    topic|model` re-tags the run's `past.sqlite` row the same way `/topic` does.
+    Without them the row keeps the *launch* topic/model for the whole session --
+    `harness past list --topic` files the run in the wrong lane, and the spend
+    ledger attributes every post-switch turn to the launch model. Optional
+    (None => archive off, or a bare host-side test call).
+    """
+    subcommand, args = _parse_config_command(line)
+
+    if subcommand == "":
+        if settings is None or sources is None:
+            settings, sources = resolve_settings()
+        for out in _config_display_lines(
+            settings=settings,
+            sources=sources,
+            current_model=current_model,
+            thread_id=config["configurable"]["thread_id"],
+            topic=topic,
+            max_cost=getattr(tracker, "_max_cost", None) if tracker else None,
+            max_tokens=getattr(tracker, "_max_tokens", None) if tracker else None,
+            hitl_conf=hitl_conf,
+            edited=edited,
+        ):
+            print(out, file=sys.stderr)
+        return current_model, None, topic
+
+    if subcommand == "save":
+        values: dict = {}
+        if "model" in edited:
+            values["model"] = current_model
+        if "topic" in edited:
+            values["topic"] = topic
+        if "max_cost" in edited and tracker is not None:
+            values["max_cost"] = tracker._max_cost
+        if "max_tokens" in edited and tracker is not None:
+            values["max_tokens"] = tracker._max_tokens
+        if not values:
+            _stage("config: nothing session-edited to save (pre-spinup fields aren't touched by /config)")
+            return current_model, None, topic
+        profile_path = Path.cwd() / PROFILE_NAME
+        # A profile that doesn't exist in-container was never bind-mounted:
+        # run-docker mounts it only `if exists` on the host. Writing anyway lands
+        # in the --rm container layer and is gone at exit -- a success message for
+        # a write that cannot persist. Refuse instead: the file it would create
+        # changes nothing about this run either (Settings resolved at startup).
+        if os.environ.get("DEEPAGENTS_IN_CONTAINER") == "1" and not profile_path.exists():
+            _stage(
+                f"config: WARNING - no {PROFILE_NAME} is mounted, so this write would land in "
+                "the throwaway container layer and be lost on exit. Nothing written. Create it "
+                "on the host first (cp project/.harness-profile.yaml.example "
+                "project/.harness-profile.yaml) and relaunch."
+            )
+            return current_model, None, topic
+        try:
+            save_profile(profile_path, values)
+        except OSError as exc:
+            # /project is bound read-only under DEEPAGENTS_JAIL=1 (M4 slice H), so
+            # save_profile's in-place fallback raises too. A REPL command must not
+            # take the session down with it.
+            _stage(
+                f"config: could not write {PROFILE_NAME} ({exc}) - /project is read-only under "
+                "DEEPAGENTS_JAIL=1; save from the host with `harness config set` instead."
+            )
+            return current_model, None, topic
+        _stage(f"config: wrote {PROFILE_NAME}: {', '.join(f'{k}={v}' for k, v in values.items())}")
+        return current_model, None, topic
+
+    if subcommand != "set":
+        _stage(f"config: unknown subcommand {subcommand!r} (use /config, /config set, or /config save)")
+        return current_model, None, topic
+
+    try:
+        field, value = _parse_config_set_args(args)
+    except ValueError as exc:
+        _stage(f"config: {exc}")
+        return current_model, None, topic
+
+    if field == "model":
+        if rebuild_agent is None:
+            _stage("config: model switch unavailable in this context")
+            return current_model, None, topic
+        try:
+            new_agent = rebuild_agent(value)
+        except SystemExit as exc:
+            _stage(f"config: model switch to {value!r} failed: {exc}")
+            return current_model, None, topic
+        # Re-point the cost tracker at the new model's rates. The tracker caches
+        # pricing/rates/name at construction, so without this every post-switch
+        # turn would be billed at the launch model's rates and reported under the
+        # launch model's name.
+        _reprice_tracker(tracker, value)
+        # Re-tag the ledger row too, or the whole run stays attributed to the
+        # launch model. Split here, not in archive.py: that module imports
+        # neither providers nor cost (acyclic rule), so it takes plain strings --
+        # the same split main() does before start_session.
+        if archive_conn is not None and run_id is not None:
+            new_provider = provider_for(value)
+            archive.set_model(
+                archive_conn,
+                run_id,
+                new_provider.prefix.rstrip(":") if new_provider else None,
+                value[len(new_provider.prefix):] if new_provider else value,
+            )
+        edited.add("model")
+        _stage(f"config: model {current_model} -> {value} (this session only; /config save to persist)")
+        return value, new_agent, topic
+
+    if field == "thread_id":
+        old = config["configurable"]["thread_id"]
+        config["configurable"]["thread_id"] = value
+        edited.add("thread_id")
+        _stage(f"config: thread_id {old} -> {value} (takes effect on the next turn)")
+        return current_model, None, topic
+
+    if field == "topic":
+        old = topic
+        # Same write `/topic` makes -- reused, not duplicated -- so the two paths
+        # to the same knob can't persist differently.
+        if archive_conn is not None and run_id is not None:
+            archive.set_topic(archive_conn, run_id, value)
+        edited.add("topic")
+        shown = value if value is not None else "(unset)"
+        _stage(f"config: topic {old} -> {shown} (this session only; /config save to persist)")
+        return current_model, None, value
+
+    if field in ("max_cost", "max_tokens"):
+        if tracker is None:
+            _stage("config: no cost tracker active this session -- restart with a budget or a priced model to enable one")
+            return current_model, None, topic
+        try:
+            cast = float if field == "max_cost" else int
+            parsed = cast(value)
+        except ValueError:
+            _stage(f"config: {field} must be a number, got {value!r}")
+            return current_model, None, topic
+        setattr(tracker, f"_{field}", parsed)
+        edited.add(field)
+        _stage(f"config: {field} -> {parsed} (this session only; /config save to persist)")
+        return current_model, None, topic
+
+    # hitl.* -- mutate the live (frozen) HitlSection PauseMiddleware already
+    # holds a reference to, so it applies to the next gated call, no rebuild.
+    if hitl_conf is None:
+        _stage("config: HITL is off this run (no .harness-config.yaml) -- nothing to edit")
+        return current_model, None, topic
+    valid = _CONFIG_HITL_VALIDATORS[field]
+    if value not in valid:
+        _stage(f"config: {field} must be one of {valid}, got {value!r}")
+        return current_model, None, topic
+    attr = field.split(".", 1)[1]
+    old = getattr(hitl_conf, attr)
+    object.__setattr__(hitl_conf, attr, value)
+    edited.add(field)
+    _stage(f"config: {field} {old} -> {value} (this session only; /config save to persist)")
+    return current_model, None, topic
+
+
 def _cost_totals_for_row(tracker: CostTrackerMiddleware | None):
     """(input_tokens, output_tokens, cost_usd, cost_provenance) for the ledger row.
 
@@ -784,6 +1111,10 @@ def run_repl(
     history_path: Path | None = None,
     hitl_conf=None,
     workspace: Path | None = None,
+    current_model: str | None = None,
+    rebuild_agent=None,
+    settings=None,
+    settings_sources=None,
 ) -> int:
     """Container-lifetime loop: build once (by the caller), then prompt -> invoke
     -> answer until /exit, /quit, or EOF. A non-TTY stdin collapses to the single
@@ -802,9 +1133,17 @@ def run_repl(
     When `archive_conn` is set, the `/recall` and `/topic` REPL commands operate
     on the past archive; `/recall <query>` stages a marked context slice consumed
     by the next turn. When it is None (archive off) both commands are inert.
+
+    Milestone 5, C5: `/config` (view), `/config set <field> <value>` (edit one
+    live field), `/config save` (persist session edits to the profile) --
+    always available (unlike /recall/topic, which gate on features).
+    `current_model`/`rebuild_agent` are the pieces `main()` already has that
+    `_handle_config` needs; both optional so this stays host-testable with a
+    bare-minimum call (matching the rest of run_repl).
     """
     interactive = sys.stdin.isatty()
     current_topic = topic
+    config_edited: set[str] = set()
     pending: list = []  # recall slices staged for the next turn (marked)
     # Rich line editing only for an interactive TTY; a non-TTY run never reaches
     # the loop below. None => plain input() (prompt_toolkit missing / non-TTY).
@@ -878,6 +1217,37 @@ def run_repl(
             # Available whenever the ephemeral source mount is present, independent
             # of the archive; inert (prints "unavailable") on a normal run.
             _handle_refresh(workspace, line)
+            continue
+        if command == "/config":
+            # Always available (unlike /recall/topic above), since every field it
+            # touches -- model, budgets, HITL posture, topic -- makes sense even
+            # without the archive on.
+            #
+            # Belt and braces: this branch sits OUTSIDE the per-turn try below, so
+            # an unexpected exception here would propagate out of the loop and end
+            # the session. A REPL command must never be able to do that -- same
+            # rule the turn handler already follows.
+            try:
+                current_model, new_agent, current_topic = _handle_config(
+                    line,
+                    config=config,
+                    current_model=current_model,
+                    topic=current_topic,
+                    tracker=tracker,
+                    hitl_conf=hitl_conf,
+                    rebuild_agent=rebuild_agent,
+                    edited=config_edited,
+                    settings=settings,
+                    sources=settings_sources,
+                    archive_conn=archive_conn,
+                    run_id=run_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _stage(f"config: command failed: {_err_detail(exc)}")
+                _dump_error(exc)
+                continue
+            if new_agent is not None:
+                agent = new_agent
             continue
 
         try:
@@ -1096,6 +1466,13 @@ def dispatch(argv: list[str]) -> int:
         from harness.doctor import doctor_main
 
         return doctor_main(argv[1:])
+    if argv and argv[0] == "config":
+        # Milestone 5, C6/C7: keyless pre-spinup config wizard. A separate module
+        # (not cli.py's REPL-side /config) so it stays dependency-light -- no
+        # deepagents/langgraph/langchain pulled in just to run the wizard.
+        from harness.config_cli import config_main
+
+        return config_main(argv[1:])
     if argv and argv[0] == "seccomp-sync":
         from harness.seccomp import seccomp_sync_main
 
@@ -1156,9 +1533,11 @@ def main() -> int:
 
     # HITL config (Milestone 3, §9). Presence of .harness-config.yaml turns HITL
     # on; absent => hitl_conf is None and every HITL seam below is skipped, so the
-    # harness is byte-for-byte Milestone 2 (removable contract). Read from the
-    # project CWD like AGENTS.md / .mcp.json (operator config, not workspace code).
-    hitl_conf = hitl_config.load_config(Path.cwd() / hitl_config.CONFIG_NAME)
+    # harness is byte-for-byte Milestone 2 (removable contract). Resolved once in
+    # parse_args() (Milestone 5, C2) alongside every other Settings field, from
+    # the same project CWD like AGENTS.md / .mcp.json (operator config, not
+    # workspace code).
+    hitl_conf = args.settings.hitl
     if hitl_conf is not None:
         _stage(
             f"HITL on (autonomy={hitl_conf.autonomy_level}, "
@@ -1281,6 +1660,26 @@ def main() -> int:
                 on_path_denied=on_path_denied,
                 on_command_denied=on_command_denied,
             )
+
+            def _rebuild_agent(new_model: str):
+                """Milestone 5, C5: `/config set model <spec>` rebuilds through
+                this exact path -- same validate_credentials + build_agent call
+                main() makes at startup, so a bad model fails the same way live
+                as it would at launch, not mid-turn. Everything else (tools,
+                middleware, checkpointer, path/command-denied handlers) stays
+                fixed for the container's lifetime; only the chat model swaps."""
+                validate_credentials(new_model)
+                new_chat_model = resolve_chat_model(new_model)
+                return build_agent(
+                    new_chat_model,
+                    workspace,
+                    tools=tools,
+                    middleware=middleware,
+                    checkpointer=checkpointer,
+                    on_path_denied=on_path_denied,
+                    on_command_denied=on_command_denied,
+                )
+
             if args.headless:
                 # P2: one-shot batch — run the task(s), emit one JSON result on
                 # stdout, exit. No interactive prompt; interrupts resolve by the
@@ -1307,6 +1706,10 @@ def main() -> int:
                     history_path=checkpoint_db.parent / "repl_history",
                     hitl_conf=hitl_conf,
                     workspace=workspace,
+                    current_model=model,
+                    rebuild_agent=_rebuild_agent,
+                    settings=args.settings,
+                    settings_sources=args.settings_sources,
                 )
             if archive_conn is not None:
                 # After the M1 session-total line printed (inside run_repl), so the

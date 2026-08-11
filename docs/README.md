@@ -35,7 +35,7 @@ A milestone moves through three folders. What each stage carries is deliberate:
 
 ## Planned milestones — `milestones/planned/`
 
-*(Empty — nothing is currently queued. New forward plans land here as docs only.)*
+(none currently)
 
 ## In-progress milestones — `milestones/in-progress/`
 
@@ -75,6 +75,16 @@ A milestone moves through three folders. What each stage carries is deliberate:
   (deterministic pause middleware, agent `ask_human` tool, system events) + the two `design_doc.md`
   §12 prereqs it rides on (P1 resilience, P2 headless). **Built** — §0 records what shipped vs.
   deferred (`missing_price`/`permission_denied` events, `shadow` policy, clock-pause, S6 PR-b).
+- **`milestone5.md`** (+ **`milestone5_spec.md`**, full implementation spec) — **Unified Config
+  Surface**: CLI flags + an in-session `/config` command for live knobs (model, budgets, HITL
+  preset) and a pre-spinup wizard (`harness config` / `harness config security`) for knobs fixed
+  at container start (mask mode, jail/AppArmor, resource caps, NetJail), all resolved through one
+  `harness/config.py` precedence chain (CLI flag > env > profile file > default) instead of
+  scattered env-var/`.env` edits. **Built** — §0/§4 record three deliberate scope-downs from the
+  original plan (no `-Autonomy` host flag, no arrow-key `/config` menu, no NetJail list editor in
+  `harness config security`) and one real bug the build surfaced and fixed
+  (`PauseMiddleware` was caching `autonomy_level`/`on_deny` at construction instead of reading them
+  live, so a `/config set hitl.*` edit would have had no effect). §8 holds the folded invariants.
 
 ## Feature plans — `features/`
 

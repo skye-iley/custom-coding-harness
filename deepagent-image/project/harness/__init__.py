@@ -9,7 +9,11 @@ Split out of the original single-file main.py for navigation:
   agent.py      workspace resolution, system prompt, build_agent, result text
   resilience.py Milestone 3 P1: retry/backoff + context-overflow classification
   interrupt.py  Milestone 3 S1: interrupt request model, render, headless policy
-  config.py     Milestone 3 S2: .harness-config.yaml + review_triggers matching
+  config.py     Milestone 3 S2: .harness-config.yaml + review_triggers matching,
+                and Milestone 5's Settings resolver (every run knob, one
+                precedence chain: CLI > env > .harness-profile.yaml > default)
+  config_cli.py Milestone 5 C6/C7: `harness config` / `harness config security`
+                keyless pre-spinup wizard + one-shot show/set
   audit.py      Milestone 3 S7: scrubbed interrupt audit trail (interrupts.jsonl)
   hitl.py       Milestone 3 glue: interrupt resume loop, pause gate, ask_human
   cli.py        argparse + main() (the run loop, checkpointer, session workflows)

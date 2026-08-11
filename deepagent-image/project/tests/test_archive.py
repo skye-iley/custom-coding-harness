@@ -228,6 +228,24 @@ def test_set_topic_updates_row(tmp_path):
     assert [t[0] for t in archive.list_topics(conn)] == ["auth"]
 
 
+def test_set_model_retags_the_ledger_row(tmp_path):
+    """A mid-session model switch must re-tag the row, or the whole run stays
+    attributed to the launch model and the spend ledger is wrong."""
+    conn = _db(tmp_path)
+    archive.start_session(conn, "run-1", "t", "openai", "gpt-5.5")
+    archive.set_model(conn, "run-1", "google_genai", "gemini-3-pro")
+    row = conn.execute("SELECT provider, model FROM sessions WHERE run_id='run-1'").fetchone()
+    assert (row["provider"], row["model"]) == ("google_genai", "gemini-3-pro")
+
+
+def test_set_model_accepts_a_provider_less_model(tmp_path):
+    conn = _db(tmp_path)
+    archive.start_session(conn, "run-1", "t", "openai", "gpt-5.5")
+    archive.set_model(conn, "run-1", None, "some-bare-model")
+    row = conn.execute("SELECT provider, model FROM sessions WHERE run_id='run-1'").fetchone()
+    assert (row["provider"], row["model"]) == (None, "some-bare-model")
+
+
 # --- summary -----------------------------------------------------------------
 
 def test_deterministic_summary_used_without_model(tmp_path):

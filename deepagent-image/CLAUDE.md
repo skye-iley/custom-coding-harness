@@ -31,6 +31,11 @@ on user code inside a separate **workspace** conda env. `project/main.py` is the
   - `agent.py` — workspace resolution, system prompt, `build_agent`, result extraction.
   - `cli.py` — `parse_args` + `main()`: wires the above around the SqliteSaver checkpointer, builds
     the agent once, then hands off to `run_repl()` — the interactive multi-turn loop (see below).
+  - `config.py` — Milestone 5 `Settings`/`resolve_settings` (every run knob, one precedence
+    chain) plus the unchanged Milestone 3 `HitlSection`/`.harness-config.yaml` grammar it nests;
+    see "Unified config" below.
+  - `config_cli.py` — Milestone 5 `harness config` / `harness config security` keyless wizard.
+    Adds no langchain/deepagents dependency of its own — see "Unified config" below.
 - `project/requirements.txt` — harness deps only (installed into `/opt/venv`). Not the agent's
   workspace deps.
 - `project/.env.example` — copy to `project/.env`, set API keys. **`.env` is gitignored and never
@@ -625,7 +630,12 @@ anything compiled, base64-decoded, or indirected passes. The value is that a cas
 refused and leaves evidence instead of silence.
 
 `run-docker.{ps1,sh}` pass the profile automatically when `DEEPAGENTS_JAIL` is on, and **fail closed**
-if it is missing rather than launching unjailed. `harness doctor` verifies the profile is still
+if it is missing rather than launching unjailed. They also forward `-e DEEPAGENTS_JAIL=1` from inside
+that same block: `jail.jail_enabled()` reads the **environment**, not `Settings`, so a value resolved
+from the `-Jail` flag / host env / profile tier would otherwise apply the seccomp relaxation and
+never start the jail — five syscalls relaxed container-wide, no bwrap re-exec, and `nsguard` (which
+defaults to tracking `DEEPAGENTS_JAIL`) off too, i.e. strictly worse than running with the jail off.
+The relaxation and the jail turn on together or not at all; `check-parity` guards the pair. `harness doctor` verifies the profile is still
 narrow and probes whether bwrap can actually unshare here.
 
 Regenerate the profile with `python3 -m harness seccomp-sync` (dev-time, needs network);
@@ -734,6 +744,135 @@ See `docs/features/workspace_visibility.md` (§3, full syntax) for advanced rule
 
 **Removable contract:** Set `DEEPAGENTS_MASK=0` and the harness behaves byte-for-byte like M3.
 
+## Unified config (Milestone 5)
+
+Every run knob — model, budgets, HITL posture, mask/jail/security posture, resource caps —
+resolves through **one precedence chain** instead of scattered env-var/`.env` edits:
+`CLI flag > env var (shell-exported or `.env`, dotenv-loaded before anything else runs) >
+profile file (`project/.harness-profile.yaml`) > built-in default`. `.env` keeps its role as
+the baseline record of defaults when nothing else overrides it.
+
+- **`harness/config.py`** — the resolver module. `resolve_settings()` returns a
+  `(Settings, SettingsSources)` pair (`Settings` covers every knob; `SettingsSources` tags each
+  field's provenance as `"cli"`/`"env"`/`"profile"`/`"default"`). Also still holds the unchanged
+  Milestone 3 HITL grammar — `HitlSection` (was `Config`) + `.harness-config.yaml` parsing —
+  nested onto `Settings.hitl`, since the two **on-disk files stay separate** (the HITL parser is
+  a tested, non-trivial grammar not worth risking in a merge); only the Python API is unified.
+  `LIVE_FIELDS` (`model`, `thread_id`, `topic`, `max_cost`, `max_tokens`, `hitl`) is the single
+  source of truth for the split below — both `/config` and `harness doctor` filter on it.
+- **The pre-spinup / in-session split** (why this isn't one flat list): mask mode, jail/AppArmor,
+  resource caps, and NetJail are Docker startup flags — fixed the moment `docker run` executes,
+  no amount of in-session UI changes that. Model, budgets, HITL posture, and topic are read by
+  the harness process itself and can change any time before the next model call.
+  | Fixed at container start (host side) | Live in-session (container side) |
+  |---|---|
+  | Mask mode, jail/AppArmor, resource caps, NetJail | Model, budgets, HITL posture, topic |
+- **Pre-spinup, host side:**
+  - `run-docker.{ps1,sh}` gain `-Model`/`-MaskMode`/`-Jail`/`-JailApparmor` (`.ps1`) /
+    equivalent env vars (`.sh`, which already treats `VAR=x ./run-docker.sh` as its "flag"
+    mechanism), each resolving through `scripts/lib/config.{ps1,sh}`'s
+    `Resolve-HostSetting`/`_resolve_host_setting` — the same four-tier precedence, since a
+    Docker flag has no way to read `Settings` directly. The **resource caps + NetJail**
+    (`-Cpus`/`-Memory`/`-PidsLimit`/`-NetJail`, `CPUS`/`MEMORY`/`PIDS_LIMIT`/`NET_JAIL`) go
+    through the same resolver, so a `cpus:`/`net_jail:` saved by `harness config security`
+    actually reaches `docker run` — the `.ps1` defaults are `""`, not the literal caps, because
+    a literal default there would shadow the profile tier and make a saved cap unreachable.
+    `-NetJail` is a `[switch]`, so it consults the lower tiers only via
+    `$PSBoundParameters.ContainsKey`, the one way to tell "not passed" from `-NetJail:$false`.
+    `-Autonomy`/`AUTONOMY` is shaped
+    differently: the HITL preset isn't a `Settings`/profile field (it's a whole-file swap-in --
+    `.harness-config.yaml`'s presence *is* the on/off switch), so it's a plain-text write/update
+    of the `autonomy_level:` line (creating the file if absent), not a four-tier resolve --
+    necessarily turns HITL on for the run if it wasn't already.
+  - **`harness config`** (keyless, `harness/config_cli.py`) — the pre-spinup wizard: model +
+    security posture + HITL preset, then confirms (or `--save` skips the prompt) before writing
+    `.harness-profile.yaml`. `harness config show` prints the resolved config with no prompts;
+    `harness config set <field> <value>` is a one-shot, non-interactive write (validated by
+    round-tripping through the profile parser, rolled back on a bad value).
+    **`harness config security`** is the same wizard with the model/HITL screens skipped, plus
+    two quick-edit loops: `.agentignore` (add a masked path or a floor entry, appending to the
+    workspace's `.agentignore` -- a convenience wrapper, not a new masking mechanism, M4 still
+    owns that file's format) and NetJail allowlists (add/delete entries in
+    `netjail/host-services.txt` / `netjail/allowed-domains.txt` in place, preserving comments --
+    resolved relative to `config_cli.py`'s own path since `netjail/` isn't copied into the image,
+    so this only works run on the host, same pre-spinup context every other knob here assumes).
+    It adds **no langchain/deepagents dependency of its own** (stdlib + `harness.config` +
+    `harness.providers` only) -- that is why it is a separate module from `cli.py`. It does
+    **not** mean the wizard runs on a host without the runtime stack: `harness/__init__.py`
+    imports `cli` unconditionally, so any `harness.*` import still loads langgraph. Making
+    that true needs a lazy `__init__` + an entry-point change, deferred (§0.1 F6).
+    Both write paths (`set` and the wizard) **refuse to run from a cwd with no `providers/`
+    directory** and name the right one: they write `Path.cwd()/.harness-profile.yaml`, so run
+    from the repo root they'd produce a profile `run-docker` never mounts and report success.
+- **In-session, `/config`** (REPL, always in the slash menu): `/config` shows the resolved
+  config, source-tagged, live fields first then the pre-spinup half read-only; `/config set
+  <field> <value>` edits one live field (`model` rebuilds the agent through the same
+  `validate_credentials` + `build_agent` path `main()` uses at startup, so a bad model fails the
+  same way live as at launch; `hitl.autonomy_level`/`hitl.on_deny`/`hitl.interruption_policy`
+  mutate the live `HitlSection` `PauseMiddleware` already holds a reference to, via
+  `object.__setattr__` since it's a frozen dataclass — `PauseMiddleware` reads these fields live
+  off that object rather than caching them at construction, specifically so this takes effect on
+  the next gated call with no rebuild); `/config save` persists the session's edited live fields
+  to the profile. Attempting to `/config set` a pre-spinup field is refused with a pointer to
+  `harness config` — it can't change without a container restart. `/config set model` also
+  **re-points the cost tracker** at the new model's rates (`CostTrackerMiddleware.reprice`) —
+  it caches pricing/rates/name at construction, so without that every post-switch turn would be
+  billed at the launch model's rates. A session launched on an unpriced model has *no* tracker
+  (M1's null=MVP contract) and one can't be added mid-session without under-counting the run, so
+  the switch says cost tracking stays off rather than starting a half-accurate one.
+  `/config set topic` and `/config set model` also **re-tag the run's `past.sqlite` row**
+  (`archive.set_topic` / `archive.set_model`) — `/topic` always did, and a knob reachable two ways
+  has to persist the same way, or `harness past list --topic` files the run in the wrong lane and
+  the ledger attributes every post-switch turn to the launch model. A bare `/config set topic`
+  (no value) **clears** it — it is the one nullable live field. `/config save` **refuses** when no
+  profile is mounted (detected in-container by the file's absence: `run-docker` mounts only `if
+  exists`), because that write lands in the `--rm` layer and is lost on exit — a success message
+  for a write that cannot persist is worse than a refusal, and the file wouldn't change this run
+  either. An unwritable target (read-only `/project` under `DEEPAGENTS_JAIL=1`, where
+  `save_profile`'s in-place fallback raises too) is reported, not raised; and the whole `/config`
+  dispatch is wrapped so no subcommand can end the session — the same rule the turn handler
+  follows.
+  The source tags come from the `(Settings, SettingsSources)` pair `parse_args()` resolved
+  **with the CLI tier applied**, threaded through `run_repl` — re-resolving inside `/config`
+  would report every flag-set field as env/profile/default.
+- **`harness doctor`** reports one resolved-config summary line built from `resolve_settings()`
+  with no CLI override (reflecting what an *unflagged* run would do), ahead of its other checks.
+- **File ownership** (kept deliberately separate, not merged): `.harness-config.yaml` = HITL
+  only (unchanged since M3); `.harness-profile.yaml` = everything else this milestone adds.
+  Neither is baked into the image (gitignored like `.env`); copy the checked-in `.example`
+  template to activate. **Both are bind-mounted into `/project` by `run-docker` when present** —
+  that is the only way they reach the container, and without the profile mount the container's
+  `resolve_settings()` would see no profile tier at all (its in-session fields silently ignored,
+  `/config save` writing into the throwaway container layer). The HITL mount is read-only; the
+  **profile mount is read-write**, because `/config save` has to land on the host. A single-file
+  bind mount can't be replaced by rename, so `save_profile` falls back from its atomic
+  tmp+`replace` to an in-place write on `OSError`.
+- **Host-only knobs are forwarded for display**: `--cpus`/`--memory`/`--pids-limit`/NetJail are
+  `docker run` flags, never env vars, so `run-docker` also passes them as `-e CPUS=…` etc.
+  purely so `/config`'s read-only half and `harness doctor` report what the launch actually
+  applied instead of the built-in defaults. Nothing in the container acts on them.
+- **Removable contract:** no `.harness-profile.yaml` present, no new CLI flags passed ⇒ every
+  knob resolves exactly as it did pre-M5 (env var → built-in default). Delete
+  `config_cli.py` + the profile-file branch inside `config.py`'s resolvers +
+  `scripts/lib/config.{ps1,sh}` (reverting `run-docker` to direct env reads) and the harness is
+  byte-for-byte pre-Milestone-5.
+
+- **⚠️ Known gap — enum values are not validated.** `harness config set mask_mode <anything>` is
+  accepted, persisted, and resolved: `_cmd_set` validates by round-tripping through `load_profile`,
+  which checks only the **cast**, and `mask_mode` is a `str` field. A typo'd `alow` then silently
+  resolves to `deny` (`mask.resolve` compares `mode == MODE_ALLOW` and falls to the `else`). It
+  **fails safe** — the restrictive mode is the fallback, so no security consequence — but it fails
+  silently, giving the operator the opposite of what they asked for plus a success message.
+  **Deferred to M5.1 on purpose**, which closes it for every enum knob at once via a `choices` tuple
+  on each field, rather than adding a twelfth hand-maintained per-field constant here
+  (`docs/milestones/planned/milestone5.1.md` §3.1). Don't patch it locally without reading that —
+  and if M5.1 is shelved, fix it directly. Only `mask_mode` is reachable this way: the `hitl.*`
+  fields are validated by `cli._CONFIG_HITL_VALIDATORS`, and the rest are free-text or bools
+  (which `load_profile` already rejects when malformed).
+
+See `docs/milestones/complete/milestone5.md` §0.2 for the full write-up, and the rest of that doc
+for the design/rationale.
+
 ## Interactive REPL Commands (in-container)
 
 When a session is running, type these at the `you>` prompt:
@@ -748,6 +887,7 @@ When a session is running, type these at the `you>` prompt:
 | `/recall [query] [--all]` | Recall past sessions. No query lists recent. Query stages context for the next turn. `--all` widens to whole archive. | `/recall authentication issue` |
 | `/show` | Expand a truncated interrupt/approval context (HITL) | (used when an approval prompt is capped) |
 | `/refresh [subpath]` | Pull live host edits into ephemeral workspace copy (ephemeral mode only). Omit subpath to refresh root. | `/refresh src/` |
+| `/config` | Show resolved config (source-tagged); `set <field> <value>` edits one live field; `save` persists session edits to the profile | `/config set model openai:gpt-5.5` |
 
 ## Admin Commands (keyless, outside container)
 
@@ -766,6 +906,12 @@ harness past show <run-id>
 harness past rm <run-id> [--yes]
 harness past prune [--keep N] [--yes]
 harness past topics                         # list all topics
+
+# Unified config wizard (Milestone 5) -- pre-spinup knobs, writes .harness-profile.yaml
+harness config                              # full interactive wizard, then confirms save
+harness config show                         # print resolved config, no prompts
+harness config set <field> <value>          # one-shot, non-interactive
+harness config security                     # security-only wizard + .agentignore/NetJail quick-edit
 ```
 
 (Requires the harness venv: `source deepagent-image/.venv/bin/activate` or install locally)
@@ -781,6 +927,7 @@ how to disable them, and what behavior they enable/disable:
 | Workspace Masking | M4 | `DEEPAGENTS_MASK` | 1 | Testing/debugging; or trusting the workspace | Agent can read all files; no empty overlays |
 | Cost Tracking | M1 | n/a (auto) | on | Never; budgets are optional | No per-turn usage line; budgets ignored |
 | HITL | M3 | n/a (config file) | off | (not set by env) | Only if `.harness-config.yaml` exists in project root | No approval gates; agent runs freely |
+| Unified Config profile | M5 | n/a (`.harness-profile.yaml`) | off (no file) | Never; hand-edit `.env`/flags for a one-off | No `.harness-profile.yaml` present ⇒ every knob resolves exactly as it did pre-M5 (env var → default) |
 
 **Removable contract:** Each "off" state is byte-for-byte identical to the prior milestone 
 (see [Glossary](../docs/README.md#glossary)). E.g., `DEEPAGENTS_MASK=0` ⇒ M3 parity.

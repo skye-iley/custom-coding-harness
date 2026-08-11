@@ -14,7 +14,8 @@ $pairs = @(
     @("run-docker.ps1", "run-docker.sh"),
     @("smoke.ps1", "smoke.sh"),
     @("verify.ps1", "verify.sh"),
-    @("sync-models.ps1", "sync-models.sh")
+    @("sync-models.ps1", "sync-models.sh"),
+    @("lib\config.ps1", "lib\config.sh")
 )
 
 foreach ($pair in $pairs) {
@@ -35,8 +36,20 @@ foreach ($pair in $pairs) {
 # platform silently launches a jail that will die inside the container, or skips
 # the fail-closed abort. install-apparmor-profile.sh is Linux-only and so has no
 # .ps1 twin - deliberately absent from the pairs list above.
+# M5 adds: the profile file must be MOUNTED (it is gitignored, so it is not in
+# the image's COPY list - without the mount the container's resolve_settings()
+# never sees a profile tier and `/config save` writes to a throwaway layer), the
+# resource caps / NetJail must resolve THROUGH the profile (they were written by
+# `harness config security` and read by nothing), and the caps must be forwarded
+# as env since they are docker flags the container cannot otherwise observe.
+# The DEEPAGENTS_JAIL=1 / DEEPAGENTS_MASK_MODE= markers guard the third-pass F1 fix:
+# the seccomp relaxation and the in-container jail must be turned on by the SAME
+# decision (jail.jail_enabled() reads the env, not Settings), so a one-sided removal
+# would relax five syscalls container-wide, start no jail, and turn nsguard off.
 $markers = @("mask-scan", "refusing to launch unmasked", "DEEPAGENTS_MASK", "DEEPAGENTS_MASK_MODE",
-             "deepagent-userns", "install-apparmor-profile", "DEEPAGENTS_JAIL_APPARMOR")
+             "deepagent-userns", "install-apparmor-profile", "DEEPAGENTS_JAIL_APPARMOR",
+             "/project/.harness-profile.yaml", "pids_limit", "net_jail",
+             "PIDS_LIMIT=", "DEEPAGENTS_JAIL=1", "DEEPAGENTS_MASK_MODE=")
 $rdPs1 = Join-Path (Join-Path $Root "scripts") "run-docker.ps1"
 $rdSh  = Join-Path (Join-Path $Root "scripts") "run-docker.sh"
 foreach ($m in $markers) {
@@ -46,6 +59,42 @@ foreach ($m in $markers) {
         Write-Host "PARITY: marker missing from one of run-docker.{ps1,sh}: '$m'"
         $Failed = $true
     }
+}
+
+
+# Milestone 5, C3/§7c: lib/config.{ps1,sh} resolution parity. True cross-language
+# execution isn't attempted here (bash availability on a Windows dev machine is
+# not guaranteed) -- instead each script asserts its OWN resolver against the
+# same fixture + the same expected literal, so a precedence change in either
+# resolver breaks its own run instead of silently drifting from the other.
+# Mirror block in check-parity.sh.
+$ConfigLibPs1 = Join-Path (Join-Path $Root "scripts") "lib\config.ps1"
+if (Test-Path $ConfigLibPs1) {
+    . $ConfigLibPs1
+    $FixtureDir = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName())
+    New-Item -ItemType Directory -Force -Path $FixtureDir | Out-Null
+    $FixtureEnv = Join-Path $FixtureDir "env"
+    $FixtureProfile = Join-Path $FixtureDir "profile"
+    Set-Content -Path $FixtureEnv -Value "DEEPAGENTS_MASK_MODE=allow" -Encoding utf8
+    Set-Content -Path $FixtureProfile -Value @(
+        "jail: true",
+        'cpus: "6"',
+        "jail_apparmor:   # unset -- comment-only value"
+    ) -Encoding utf8
+
+    $GotMaskMode = Resolve-HostSetting -Value "" -EnvVarName "DEEPAGENTS_MASK_MODE" -ProfileKey "mask_mode" -Default "" -EnvFile $FixtureEnv -ProfileFile $FixtureProfile
+    $GotJail     = Resolve-HostSetting -Value "" -EnvVarName "DEEPAGENTS_JAIL" -ProfileKey "jail" -Default "0" -EnvFile $FixtureEnv -ProfileFile $FixtureProfile
+    $GotCpus     = Resolve-HostSetting -Value "" -EnvVarName "CPUS" -ProfileKey "cpus" -Default "2" -EnvFile $FixtureEnv -ProfileFile $FixtureProfile
+    $GotApparmor = Resolve-HostSetting -Value "" -EnvVarName "DEEPAGENTS_JAIL_APPARMOR" -ProfileKey "jail_apparmor" -Default "" -EnvFile $FixtureEnv -ProfileFile $FixtureProfile
+    $GotCliWins  = Resolve-HostSetting -Value "explicit" -EnvVarName "DEEPAGENTS_JAIL" -ProfileKey "jail" -Default "0" -EnvFile $FixtureEnv -ProfileFile $FixtureProfile
+
+    if ($GotMaskMode -ne "allow")   { Write-Host "PARITY: lib/config.ps1 mask_mode got '$GotMaskMode' want 'allow'"; $Failed = $true }
+    if ($GotJail -ne "true")        { Write-Host "PARITY: lib/config.ps1 jail got '$GotJail' want 'true'"; $Failed = $true }
+    if ($GotCpus -ne "6")           { Write-Host "PARITY: lib/config.ps1 cpus got '$GotCpus' want '6'"; $Failed = $true }
+    if ($GotApparmor -ne "")        { Write-Host "PARITY: lib/config.ps1 jail_apparmor got '$GotApparmor' want '' (comment-only)"; $Failed = $true }
+    if ($GotCliWins -ne "explicit") { Write-Host "PARITY: lib/config.ps1 explicit value did not win, got '$GotCliWins'"; $Failed = $true }
+
+    Remove-Item -Recurse -Force $FixtureDir -ErrorAction SilentlyContinue
 }
 
 if ($Failed) {
