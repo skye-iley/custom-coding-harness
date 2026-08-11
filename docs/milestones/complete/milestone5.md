@@ -30,6 +30,36 @@ same branch; each carries a regression test.
 `check-parity.{sh,ps1}` gained markers for the profile mount, the cap/NetJail profile keys, and
 the cap env forward, so a one-sided edit to either launcher fails CI instead of drifting.
 
+### 0.2 Known gap — enum values are not validated (deferred to M5.1, **not** fixed here)
+
+**Ships in M5 as a known bug.** `harness config set <enum-field> <garbage>` is accepted, persisted,
+and resolved:
+
+```
+$ harness config set mask_mode definitely-not-a-mode
+[harness] wrote .harness-profile.yaml: mask_mode=definitely-not-a-mode     # rc=0
+```
+
+`_cmd_set` validates by round-tripping the merged file through `load_profile`, which checks only the
+**cast**. `mask_mode` is a `str` field, so any string parses. The value persists and resolves into
+`Settings.mask_mode`; `mask.resolve` then compares `mode == MODE_ALLOW` and takes the `else` branch,
+so a typo'd `alow` silently yields **deny** mode.
+
+**Severity: low — it fails safe, but silently.** The restrictive mode is the fallback, so this
+under-permits rather than under-masks; there is no security consequence. The cost is that an
+operator who typos gets the opposite of what they asked for, with a success message and no warning.
+
+**Deliberately not fixed in M5.** The only fix that fits here is a one-off
+`if value not in ("deny", "allow")` bolted onto `_cmd_set` — a twelfth hand-maintained per-field
+constant, in a milestone whose follow-up exists specifically to delete the other eleven. M5.1 closes
+it structurally for *every* enum knob at once by giving each field a `choices` tuple in one registry
+(`docs/milestones/planned/milestone5.1.md` §3.1, and its §1 done-when). If M5.1 is dropped or
+deferred indefinitely, fix this directly instead of leaving it open.
+
+Only `mask_mode` is reachable through `harness config set` today; the three `hitl.*` fields are
+already validated (`cli._CONFIG_HITL_VALIDATORS`) and every other profile field is free-text or a
+bool, which `load_profile` already rejects when malformed.
+
 ## 1. Goal & Definition of Done
 
 Today, changing how a run behaves means editing `project/.env`, passing scattered CLI flags
