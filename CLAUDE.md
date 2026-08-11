@@ -22,10 +22,12 @@ secret-safe containers.
       in-session `/config` command for live knobs (model, budgets, HITL preset) and a pre-spinup
       wizard (`harness config` / `harness config security`) for knobs fixed at container start
       (mask mode, jail/AppArmor, resource caps, NetJail), resolved through one `harness/config.py`
-      precedence chain (CLI flag > env > profile file > default). **Built** — §4 records three
-      deliberate scope-downs from the original plan (no `-Autonomy` host flag, no arrow-key
-      `/config` menu, no NetJail list editor in `harness config security`) and a real
-      `PauseMiddleware` caching bug the build surfaced and fixed along the way. See the "Unified
+      precedence chain (CLI flag > env > profile file > default). **Built** — §4 records one
+      deliberate deviation from the original plan (no arrow-key `/config` menu — most settable
+      fields are free text, so a picker doesn't fit them) and a real `PauseMiddleware` caching bug
+      the build surfaced and fixed along the way; §0.1 records the pre-merge review fixes (two
+      passes, including the launcher forwarding `-e DEEPAGENTS_JAIL` so the seccomp relaxation and
+      the in-container jail can't come apart). See the "Unified
       config" section in `deepagent-image/CLAUDE.md`.
   - `docs/milestones/in-progress/` — **being built** milestones (doc + separate invariants doc + code
     on a feature branch). *(`milestone4.md` — **Real Trust Boundary**, merged to `main`,

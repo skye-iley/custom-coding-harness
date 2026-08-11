@@ -139,7 +139,13 @@ def load_config(path: Path) -> HitlSection | None:
     path = Path(path)
     if not path.is_file():
         return None
-    return parse_config(path.read_text(encoding="utf-8"), source=str(path))
+    # utf-8-sig, not utf-8: a file written by Windows PowerShell 5.1's
+    # `Set-Content -Encoding utf8` (or Notepad) carries a BOM, which plain utf-8
+    # preserves -- the first key then parses as "﻿autonomy_level" and hits
+    # the unknown-key branch, so the harness refuses to start. utf-8-sig strips a
+    # leading BOM when present and is a no-op otherwise. The *writers* stay on
+    # plain utf-8: tolerate BOMs, never emit them.
+    return parse_config(path.read_text(encoding="utf-8-sig"), source=str(path))
 
 
 def find_config(start: Path) -> HitlSection | None:
@@ -381,15 +387,19 @@ def _mask_enabled_cast(value) -> bool:
     return str(value).strip() != "0"
 
 
-def _resolve(cli_val, env_raw: str | None, profile_val, default, *, cast=str):
-    """One field's precedence: CLI > env > profile > default (milestone5_spec.md §4)."""
+def _resolve(cli_val, env_raw: str | None, profile_val, default, *, cast=str, env_name: str = ""):
+    """One field's precedence: CLI > env > profile > default (milestone5_spec.md §4).
+
+    `env_name` is carried purely so a bad env value names *which* variable was
+    bad -- an unqualified "invalid value '3x'" leaves the operator hunting."""
     if cli_val is not None:
         return cast(cli_val), "cli"
     if env_raw:
         try:
             return cast(env_raw), "env"
         except ValueError:
-            raise SystemExit(f"invalid value {env_raw!r}")
+            prefix = f"{env_name}: " if env_name else ""
+            raise SystemExit(f"{prefix}invalid value {env_raw!r}")
     if profile_val is not None:
         return cast(profile_val), "profile"
     return default, "default"
@@ -405,7 +415,9 @@ def load_profile(path: Path) -> dict:
         return {}
     source = str(path)
     values: dict = {}
-    for raw in path.read_text(encoding="utf-8").splitlines():
+    # utf-8-sig for the same reason as load_config: tolerate a BOM from a
+    # hand-edited or PowerShell-written file rather than failing on key 1.
+    for raw in path.read_text(encoding="utf-8-sig").splitlines():
         if not raw.strip() or raw.lstrip().startswith("#"):
             continue
         if raw[0] in " \t":
@@ -481,6 +493,12 @@ def save_profile(path: Path, values: dict) -> None:
         # in-session `/config save` can only write in place. Losing atomicity is
         # acceptable here: the file has one writer at a time (a wizard on the host
         # OR one REPL), and a torn write still parses or fails loud on next load.
+        #
+        # If THIS write fails too the target is genuinely unwritable -- notably
+        # `/project` bound read-only under DEEPAGENTS_JAIL=1 (M4 slice H). The
+        # OSError propagates deliberately (not SystemExit: an in-session
+        # `/config save` must be able to catch it and stay in the REPL), so every
+        # caller has to handle it.
         tmp.unlink(missing_ok=True)
         path.write_text(text, encoding="utf-8")
 
@@ -517,7 +535,10 @@ def resolve_settings(
     sources: dict = {}
 
     def field(name: str, env_name: str, *, cast=str, default=None):
-        v, s = _resolve(cli_val(name), env.get(env_name), profile.get(name), default, cast=cast)
+        v, s = _resolve(
+            cli_val(name), env.get(env_name), profile.get(name), default,
+            cast=cast, env_name=env_name,
+        )
         values[name] = v
         sources[name] = s
 

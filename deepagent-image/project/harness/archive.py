@@ -213,6 +213,23 @@ def set_topic(conn: sqlite3.Connection, run_id: str, topic: str | None) -> None:
     conn.commit()
 
 
+def set_model(
+    conn: sqlite3.Connection, run_id: str, provider: str | None, model: str | None
+) -> None:
+    """Re-tag this run's provider/model after a mid-session `/config set model`.
+
+    Without this the ledger row keeps the *launch* model for the whole run, which
+    undercuts the spend-ledger role §8 gives `past.sqlite`. Plain strings in, like
+    `start_session` -- archive.py imports neither `providers` nor `cost`, so the
+    caller splits the prefix off (`cli._handle_config`).
+    """
+    conn.execute(
+        "UPDATE sessions SET provider = ?, model = ? WHERE run_id = ?",
+        (provider, model, run_id),
+    )
+    conn.commit()
+
+
 def get_topic(conn: sqlite3.Connection, run_id: str) -> str | None:
     row = conn.execute("SELECT topic FROM sessions WHERE run_id = ?", (run_id,)).fetchone()
     return row["topic"] if row else None

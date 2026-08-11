@@ -9,12 +9,20 @@ so there is one writer, not two (milestone5.md §4 C6/C7).
 screens skipped, not a separate implementation ("already the same program, a
 narrower entry point" -- milestone5.md §4 C7).
 
-Deliberately dependency-light like config.py itself: `harness.providers` is
+This module adds **no langchain/deepagents dependency of its own** -- which is
+the reason it is a separate module from `cli.py`. `harness.providers` is
 imported (stdlib + harness.cost only, no langchain -- see its module
-docstring) for the model menu and API-key detection, but nothing here imports
-`harness.cli` (which pulls the full deepagents/langgraph/langchain stack) or
-calls `providers.resolve_chat_model` -- that only runs when an actual agent
-run starts, not at wizard-build time.
+docstring) for the model menu and API-key detection; nothing here imports
+`harness.cli` or calls `providers.resolve_chat_model`, which only runs when an
+actual agent run starts.
+
+That is a statement about *this file*, not about running the wizard on a bare
+host: `harness/__init__.py` does an unconditional `from harness.cli import
+main`, so importing `harness.config_cli` through the package still loads
+`cli.py` and therefore langgraph. Making the wizard genuinely runnable without
+the runtime stack means a lazy `__getattr__` in `__init__.py` plus an
+entry-point change (`__main__.py` routing `config`/`doctor` before `cli` is
+imported) -- deliberately not done here, see milestone5.md §0.1.
 
 Deviation from the fuller spec sketch (milestone5_spec.md §9): the
 interactive menus here are plain numbered `input()` choices, not an arrow-key
@@ -118,6 +126,34 @@ def agentignore_add_pattern(workspace: Path, pattern: str) -> Path:
     with path.open("a", encoding="utf-8") as f:
         f.write(f"{sep}{pattern}\n")
     return path
+
+
+def agentignore_effective_mode(workspace: Path) -> str:
+    """The visibility mode a quick-edit to this workspace's `.agentignore` lands in.
+
+    Prefers the file's own `#!mode:` header (M4 owns that grammar, so this reads
+    it through `mask._parse_agentignore` rather than reimplementing it), and falls
+    back to the resolved `mask_mode` setting when the file has no header. A
+    malformed file degrades to the resolved setting instead of taking the wizard
+    down with a `SystemExit` -- the mask scan will still reject it loudly at
+    launch, which is where that error belongs.
+    """
+    path = _agentignore_path(workspace)
+    if path.is_file():
+        try:
+            from harness import mask  # stdlib-only, same dependency tier as this module
+
+            parsed = mask._parse_agentignore(path.read_text(encoding="utf-8"), str(workspace))
+            header = parsed["directives"].get("mode")
+            if header:
+                return header
+        except Exception:  # noqa: BLE001 - malformed/unreadable file, fall through
+            pass
+    try:
+        settings, _ = resolve_settings()
+        return settings.mask_mode
+    except SystemExit:
+        return "deny"
 
 
 def netjail_dir() -> Path:
@@ -259,6 +295,32 @@ def write_hitl_preset(path: Path, autonomy_level: str) -> None:
     path.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
+def _expected_cwd() -> Path:
+    """`project/` -- the dir holding `providers/`, `.env`, and the two config
+    files. `harness/config_cli.py` -> parent.parent."""
+    return Path(__file__).resolve().parent.parent
+
+
+def _refuse_wrong_cwd() -> bool:
+    """True (and prints why) when the cwd can't be the one `run-docker` reads.
+
+    Every write path here targets `Path.cwd() / PROFILE_NAME` -- the documented
+    contract `cli.main`/`resolve_settings` rely on. Run from the repo root that
+    resolves to a `.harness-profile.yaml` `run-docker` never mounts, so the
+    operator gets a saved profile that silently does nothing. Detected by the
+    `providers/` directory, which only the right cwd has. Refusing beats
+    silently re-anchoring the path: the "reads Path.cwd()" contract stays true.
+    """
+    if (Path.cwd() / "providers").is_dir():
+        return False
+    print(
+        f"[harness] refusing to write from {Path.cwd()}: this is not the harness project "
+        f"directory, so the {PROFILE_NAME} written here is not the one run-docker mounts. "
+        f"cd {_expected_cwd()} and re-run."
+    )
+    return True
+
+
 # --- wizard steps --------------------------------------------------------------
 
 
@@ -325,34 +387,65 @@ def _wizard_hitl_step() -> str:
     return "guided" if preset.startswith("guided") else "strict"
 
 
-def _wizard_agentignore_step() -> None:
+def _wizard_agentignore_step() -> list[str]:
+    """`.agentignore` quick-edit loop. Returns the edits actually applied (each
+    already written to disk when this returns), so the caller's summary can say
+    so -- these writes are NOT covered by the profile save confirmation.
+
+    Mode-aware, because a bare pattern means opposite things in the two modes: in
+    deny mode it masks a path, in **allow** mode it IS the allow-list entry, so
+    "add a path to mask" would make a secret *visible*. The step names the
+    inversion and relabels the option rather than silently rerouting the operator
+    to the floor -- promoting an ordinary mask to a permanent, un-negatable floor
+    entry behind their back is its own surprise.
+    """
     workspace = Path(os.getenv("AGENT_WORKSPACE") or (Path.cwd() / "workspace"))
+    allow_mode = agentignore_effective_mode(workspace) == "allow"
+    applied: list[str] = []
+    if allow_mode:
+        print(
+            "[harness] note: .agentignore is in allow mode - a plain pattern makes a path "
+            "VISIBLE, not masked. To hide something here, add it to the floor block (option 3)."
+        )
+    plain_option = (
+        "add a path to ALLOW (this workspace is in allow mode)"
+        if allow_mode
+        else "add a path to mask"
+    )
     while True:
         action = _numbered_choice(
             ".agentignore quick-edit:",
-            ["skip", "add a path to mask", "add a floor entry (can never be unmasked)"],
+            ["skip", plain_option, "add a floor entry (can never be unmasked)"],
             default_index=0,
         )
         if action == "skip":
-            return
+            return applied
         pattern = input("pattern: ").strip()
         if pattern:
-            if action.startswith("add a path"):
+            if action == plain_option:
                 path = agentignore_add_pattern(workspace, pattern)
-                print(f"[harness] added {pattern!r} to {path}")
+                verb = "allow-listed" if allow_mode else "added"
+                print(f"[harness] {verb} {pattern!r} in {path}")
+                applied.append(f".agentignore: {verb} {pattern!r} ({path})")
             else:
                 path = agentignore_add_floor(workspace, pattern)
                 print(f"[harness] added {pattern!r} to the floor block in {path}")
+                applied.append(f".agentignore: added {pattern!r} to the floor block ({path})")
         if not _confirm("Add another?", default=False):
-            return
+            return applied
 
 
-def _wizard_netjail_step() -> None:
+def _wizard_netjail_step() -> list[str]:
+    """NetJail allowlist editor. Returns the edits actually applied (written to
+    disk as soon as the operator answers), for the same reason
+    `_wizard_agentignore_step` does: the profile save confirmation does not cover
+    them, so the summary has to name them."""
     net_dir = netjail_dir()
+    applied: list[str] = []
     if not net_dir.is_dir():
         print(f"[harness] NetJail directory not found at {net_dir} -- skipping (host-side only; "
               "run `harness config security` from a checked-out repo, not inside a container).")
-        return
+        return applied
     files = {
         "host-services.txt (host port forwarders)": "host-services.txt",
         "allowed-domains.txt (egress domains)": "allowed-domains.txt",
@@ -360,7 +453,7 @@ def _wizard_netjail_step() -> None:
     while True:
         which = _numbered_choice("NetJail allowlists:", ["done", *files], default_index=0)
         if which == "done":
-            return
+            return applied
         fname = files[which]
         path = net_dir / fname
         entries = netjail_list_entries(path)
@@ -378,6 +471,7 @@ def _wizard_netjail_step() -> None:
             if entry:
                 netjail_add_entry(path, entry)
                 print(f"[harness] added {entry!r} to {fname}")
+                applied.append(f"NetJail: added {entry!r} to {fname}")
         elif action == "delete":
             if not entries:
                 print("[harness] nothing to delete.")
@@ -386,6 +480,7 @@ def _wizard_netjail_step() -> None:
             if raw.isdigit() and 1 <= int(raw) <= len(entries):
                 removed = netjail_remove_entry(path, int(raw) - 1)
                 print(f"[harness] removed {removed!r} from {fname}")
+                applied.append(f"NetJail: removed {removed!r} from {fname}")
             else:
                 print(f"[harness] invalid entry number {raw!r}.")
 
@@ -397,6 +492,8 @@ def _run_wizard(*, security_only: bool, auto_save: bool) -> int:
             "`harness config set <field> <value>` for a non-interactive one-shot."
         )
         return 1
+    if _refuse_wrong_cwd():
+        return 1
 
     values: dict = {}
     if not security_only:
@@ -406,11 +503,17 @@ def _run_wizard(*, security_only: bool, auto_save: bool) -> int:
     values.update(_wizard_security_step())
 
     hitl_choice = None
+    # `.agentignore` / NetJail edits write to disk the moment the operator answers
+    # -- they are not part of the profile `values` the save confirmation covers.
+    # Collected here so the summary and the decline path can say so out loud
+    # (restructuring them into a deferred-write transaction would mean two writers
+    # per file; naming them is the honest, smaller fix).
+    applied: list[str] = []
     if not security_only:
         hitl_choice = _wizard_hitl_step()
     else:
-        _wizard_agentignore_step()
-        _wizard_netjail_step()
+        applied += _wizard_agentignore_step()
+        applied += _wizard_netjail_step()
 
     # `hitl_choice is None` means the screen was skipped (security-only run);
     # "off" is an explicit answer that has to be acted on.
@@ -423,12 +526,21 @@ def _run_wizard(*, security_only: bool, auto_save: bool) -> int:
         print(f"  hitl: off{' (moves the existing .harness-config.yaml aside)' if hitl_path.is_file() else ''}")
     elif hitl_choice is not None:
         print(f"  hitl.autonomy_level: {hitl_choice}")
+    if applied:
+        print("Already applied (not part of the profile save):")
+        for line in applied:
+            print(f"  {line}")
     if not values and hitl_choice is None:
-        print("  (no changes)")
+        if not applied:
+            print("  (no changes)")
         return 0
 
     if not (auto_save or _confirm(f"Save to {PROFILE_NAME}?", default=True)):
-        print("[harness] not saved.")
+        if applied:
+            print("[harness] profile not saved. (The .agentignore / NetJail edits listed "
+                  "above were applied immediately.)")
+        else:
+            print("[harness] not saved.")
         return 0
 
     if values:
@@ -456,6 +568,8 @@ def _cmd_show() -> int:
 def _cmd_set(field: str, value: str) -> int:
     if field not in PROFILE_FIELDS:
         print(f"[harness] unknown/unsettable field {field!r} (settable: {', '.join(sorted(PROFILE_FIELDS))})")
+        return 1
+    if _refuse_wrong_cwd():
         return 1
     profile_path = Path.cwd() / PROFILE_NAME
     before = profile_path.read_text(encoding="utf-8") if profile_path.exists() else None

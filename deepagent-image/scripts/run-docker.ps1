@@ -74,6 +74,13 @@ $Memory = Resolve-HostSetting -Value $Memory -EnvVarName "MEMORY" -ProfileKey "m
 $PidsLimit = Resolve-HostSetting -Value $PidsLimit -EnvVarName "PIDS_LIMIT" -ProfileKey "pids_limit" `
     -Default "512" -EnvFile $EnvFile -ProfileFile $ProfileFile
 
+# Mask mode resolves ONCE here, not inside the mask-scan block, because it has two
+# consumers: the scan container (which computes the overlay set) and the agent
+# container (whose in-container `harness doctor` / mask.resolve re-read the env).
+# One resolution, two consumers -- the point of lib\config. Mirror of run-docker.sh.
+$ScanMode = Resolve-HostSetting -Value $MaskMode -EnvVarName "DEEPAGENTS_MASK_MODE" `
+    -ProfileKey "mask_mode" -Default "" -EnvFile $EnvFile -ProfileFile $ProfileFile
+
 # NetJail is a [switch], so "not passed" is indistinguishable from "-NetJail:$false"
 # by value alone -- only consult the lower tiers when the flag is genuinely absent.
 if (-not $PSBoundParameters.ContainsKey('NetJail')) {
@@ -335,9 +342,8 @@ if ($MaskEnabled -eq "" -or $MaskEnabled -eq "1") {
     # resolver honours it — the scan gets no --env-file, so without this the env
     # knob is silently ignored and `allow` degrades to `deny` (under-masking).
     # Milestone 5, C3: -MaskMode / .harness-profile.yaml's mask_mode now layer on
-    # top of the same host-env / .env fallback this always had.
-    $ScanMode = Resolve-HostSetting -Value $MaskMode -EnvVarName "DEEPAGENTS_MASK_MODE" `
-        -ProfileKey "mask_mode" -Default "" -EnvFile $EnvFile -ProfileFile $ProfileFile
+    # top of the same host-env / .env fallback this always had. $ScanMode is
+    # resolved once at the top of the script (shared with the agent container).
     $ScanModeArgs = @()
     if (-not [string]::IsNullOrEmpty($ScanMode)) {
         $ScanModeArgs = @("-e", "DEEPAGENTS_MASK_MODE=$ScanMode")
@@ -403,6 +409,13 @@ if ($JailMode -and $JailMode -notin @("0", "false", "no", "off")) {
         exit 1
     }
     $JailArgs = @("--security-opt", "seccomp=$((Resolve-Path $SeccompProfile).Path)")
+    # The seccomp relaxation and the in-container jail must be turned on by the SAME
+    # decision. jail.jail_enabled() reads DEEPAGENTS_JAIL from the environment and does
+    # not consult Settings, so a value resolved from the -Jail flag / host env / profile
+    # tier would apply the relaxation here and never start the jail inside - relaxed
+    # syscalls, no containment, and nsguard (which defaults to tracking DEEPAGENTS_JAIL)
+    # off too. Normalized to "1": the container only tests truthiness.
+    $JailArgs += "-e", "DEEPAGENTS_JAIL=1"
     Write-Host "Jail: bwrap fs jail ON (narrow seccomp profile)"
 
     # M4 slice J (11.6): seccomp is only ONE of the two gates. On an AppArmor host
@@ -468,6 +481,17 @@ if (-not [string]::IsNullOrEmpty($ResolvedModel)) {
     $ModelArgs = @("-e", "DEEPAGENTS_MODEL=$ResolvedModel")
 }
 
+# Same for the resolved mask mode: the scan container already gets it (it computes
+# the overlay set), but the AGENT container never did, so an in-container
+# `harness doctor` re-ran mask.resolve against an unset env and reported `deny` on
+# an `allow` launch. Enforcement is unaffected either way -- the jail's overmounts
+# read the frozen mask-snapshot.txt, not a fresh resolve -- this is about the two
+# halves reporting the same mode.
+$MaskModeArgs = @()
+if (-not [string]::IsNullOrEmpty($ScanMode)) {
+    $MaskModeArgs = @("-e", "DEEPAGENTS_MASK_MODE=$ScanMode")
+}
+
 # Host-only knobs the container cannot otherwise observe: --cpus/--memory/
 # --pids-limit/NetJail are `docker run` flags, never env vars, so without these
 # the in-session `/config` read-only view and `harness doctor` would report the
@@ -493,7 +517,7 @@ $dockerArgs = @(
     "-e", "DEEPAGENTS_STATE_DIR=/project/state",
     "-v", "${MountWorkspace}:/project/workspace",
     "-v", "${StateHostDir}:/project/state"
-) + $SrcMountArgs + $MaskArgs + $ModelArgs + $CapEnvArgs
+) + $SrcMountArgs + $MaskArgs + $ModelArgs + $MaskModeArgs + $CapEnvArgs
 
 # Git identity: mount host .gitconfig read-only into the agent user's home (uid 10001 -> /home/agent),
 # not /root (container runs USER agent). Never mount ~/.ssh into an autonomous-agent container -
@@ -514,6 +538,14 @@ if ($Autonomy) {
         exit 1
     }
     $HitlConfigPath = Join-Path $Root "project\.harness-config.yaml"
+    # NOT Set-Content -Encoding utf8: on Windows PowerShell 5.1 (this repo's primary
+    # shell) that writes a BOM. config.parse_config used to read with plain "utf-8",
+    # so the first key parsed as "<BOM>autonomy_level" and the harness SystemExit'd on
+    # the unknown-key branch -- i.e. -Autonomy bricked the run it was asked to
+    # configure. The readers are BOM-tolerant now (utf-8-sig); this side simply must
+    # not emit one. `n line endings for parity with run-docker.sh and config.py's
+    # own writers.
+    $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     if (Test-Path $HitlConfigPath) {
         $existing = Get-Content $HitlConfigPath
         if ($existing -match '^\s*autonomy_level\s*:') {
@@ -521,9 +553,9 @@ if ($Autonomy) {
         } else {
             $updated = @("autonomy_level: $Autonomy") + $existing
         }
-        Set-Content -Path $HitlConfigPath -Value $updated -Encoding utf8
+        [System.IO.File]::WriteAllText($HitlConfigPath, (($updated -join "`n") + "`n"), $Utf8NoBom)
     } else {
-        Set-Content -Path $HitlConfigPath -Value "autonomy_level: $Autonomy" -Encoding utf8
+        [System.IO.File]::WriteAllText($HitlConfigPath, "autonomy_level: $Autonomy`n", $Utf8NoBom)
     }
     Write-Host "HITL: autonomy_level set to '$Autonomy' in .harness-config.yaml (turns HITL on for this run if it wasn't already)"
 }

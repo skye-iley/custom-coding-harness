@@ -35,7 +35,7 @@ on user code inside a separate **workspace** conda env. `project/main.py` is the
     chain) plus the unchanged Milestone 3 `HitlSection`/`.harness-config.yaml` grammar it nests;
     see "Unified config" below.
   - `config_cli.py` — Milestone 5 `harness config` / `harness config security` keyless wizard.
-    Dependency-light on purpose (no langchain/deepagents) — see "Unified config" below.
+    Adds no langchain/deepagents dependency of its own — see "Unified config" below.
 - `project/requirements.txt` — harness deps only (installed into `/opt/venv`). Not the agent's
   workspace deps.
 - `project/.env.example` — copy to `project/.env`, set API keys. **`.env` is gitignored and never
@@ -630,7 +630,12 @@ anything compiled, base64-decoded, or indirected passes. The value is that a cas
 refused and leaves evidence instead of silence.
 
 `run-docker.{ps1,sh}` pass the profile automatically when `DEEPAGENTS_JAIL` is on, and **fail closed**
-if it is missing rather than launching unjailed. `harness doctor` verifies the profile is still
+if it is missing rather than launching unjailed. They also forward `-e DEEPAGENTS_JAIL=1` from inside
+that same block: `jail.jail_enabled()` reads the **environment**, not `Settings`, so a value resolved
+from the `-Jail` flag / host env / profile tier would otherwise apply the seccomp relaxation and
+never start the jail — five syscalls relaxed container-wide, no bwrap re-exec, and `nsguard` (which
+defaults to tracking `DEEPAGENTS_JAIL`) off too, i.e. strictly worse than running with the jail off.
+The relaxation and the jail turn on together or not at all; `check-parity` guards the pair. `harness doctor` verifies the profile is still
 narrow and probes whether bwrap can actually unshare here.
 
 Regenerate the profile with `python3 -m harness seccomp-sync` (dev-time, needs network);
@@ -791,8 +796,14 @@ the baseline record of defaults when nothing else overrides it.
     `netjail/host-services.txt` / `netjail/allowed-domains.txt` in place, preserving comments --
     resolved relative to `config_cli.py`'s own path since `netjail/` isn't copied into the image,
     so this only works run on the host, same pre-spinup context every other knob here assumes).
-    Dependency-light on purpose: stdlib + `harness.config` + `harness.providers` only, no
-    langchain/deepagents -- importing it doesn't need the runtime stack the way `cli.py` does.
+    It adds **no langchain/deepagents dependency of its own** (stdlib + `harness.config` +
+    `harness.providers` only) -- that is why it is a separate module from `cli.py`. It does
+    **not** mean the wizard runs on a host without the runtime stack: `harness/__init__.py`
+    imports `cli` unconditionally, so any `harness.*` import still loads langgraph. Making
+    that true needs a lazy `__init__` + an entry-point change, deferred (§0.1 F6).
+    Both write paths (`set` and the wizard) **refuse to run from a cwd with no `providers/`
+    directory** and name the right one: they write `Path.cwd()/.harness-profile.yaml`, so run
+    from the repo root they'd produce a profile `run-docker` never mounts and report success.
 - **In-session, `/config`** (REPL, always in the slash menu): `/config` shows the resolved
   config, source-tagged, live fields first then the pre-spinup half read-only; `/config set
   <field> <value>` edits one live field (`model` rebuilds the agent through the same
@@ -809,6 +820,18 @@ the baseline record of defaults when nothing else overrides it.
   billed at the launch model's rates. A session launched on an unpriced model has *no* tracker
   (M1's null=MVP contract) and one can't be added mid-session without under-counting the run, so
   the switch says cost tracking stays off rather than starting a half-accurate one.
+  `/config set topic` and `/config set model` also **re-tag the run's `past.sqlite` row**
+  (`archive.set_topic` / `archive.set_model`) — `/topic` always did, and a knob reachable two ways
+  has to persist the same way, or `harness past list --topic` files the run in the wrong lane and
+  the ledger attributes every post-switch turn to the launch model. A bare `/config set topic`
+  (no value) **clears** it — it is the one nullable live field. `/config save` **refuses** when no
+  profile is mounted (detected in-container by the file's absence: `run-docker` mounts only `if
+  exists`), because that write lands in the `--rm` layer and is lost on exit — a success message
+  for a write that cannot persist is worse than a refusal, and the file wouldn't change this run
+  either. An unwritable target (read-only `/project` under `DEEPAGENTS_JAIL=1`, where
+  `save_profile`'s in-place fallback raises too) is reported, not raised; and the whole `/config`
+  dispatch is wrapped so no subcommand can end the session — the same rule the turn handler
+  follows.
   The source tags come from the `(Settings, SettingsSources)` pair `parse_args()` resolved
   **with the CLI tier applied**, threaded through `run_repl` — re-resolving inside `/config`
   would report every flag-set field as env/profile/default.
