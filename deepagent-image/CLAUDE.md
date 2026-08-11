@@ -73,6 +73,11 @@ on user code inside a separate **workspace** conda env. `project/main.py` is the
 .\scripts\run-docker.ps1 -WorkspacePath C:\path\to\repo "your task"
 ```
 
+To iterate on the image tiers **without** a rebuild, bind-mount the tree over
+`/project` — see "Fast dev loop" under "Test suite layout & conventions". It has two
+mount/env gotchas whose failures masquerade as real regressions; read it before
+hand-rolling a `docker run`.
+
 `run-docker.ps1` refuses to start without `project\.env`. It bind-mounts the workspace to
 `/project/workspace`, seeds missing `environment.yml` / `.gitignore` / `run-in-env.sh`, and runs
 the container with `-it` so the in-container REPL (`harness/cli.py:run_repl`) has a TTY for its
@@ -478,6 +483,51 @@ layered by dependency so most of it also runs on a bare host with just pytest:
   `choose_model` → `validate_credentials` → `resolve_chat_model` path (so a routing
   regression fails here too) and **skips** — never fails — when the stack or the
   model is unreachable.
+
+### Fast dev loop — run the image tiers without rebuilding
+
+`smoke` rebuilds both image targets every run, which is the right default but slow
+to iterate against. Once the images exist, bind-mount the working tree over
+`/project` instead: the container gets your live edits with no rebuild. **Rebuild
+only when `requirements.txt` changes** — everything else is mounted.
+
+```powershell
+$w = "<repo>\deepagent-image"
+docker run --rm -v "$w\project:/project" `
+  -v "$w\apparmor:/project/apparmor:ro" -v "$w\seccomp:/project/seccomp:ro" `
+  --add-host host.docker.internal:host-gateway `
+  -e DEEPAGENTS_LIVE_MODEL=1 -e OLLAMA_HOST=http://host.docker.internal:11434 `
+  deepagent-harness-test python3 -m pytest tests/ -q -ra
+```
+
+```bash
+w="<repo>/deepagent-image"
+docker run --rm -v "$w/project:/project" \
+  -v "$w/apparmor:/project/apparmor:ro" -v "$w/seccomp:/project/seccomp:ro" \
+  --add-host host.docker.internal:host-gateway \
+  -e DEEPAGENTS_LIVE_MODEL=1 -e OLLAMA_HOST=http://host.docker.internal:11434 \
+  deepagent-harness-test python3 -m pytest tests/ -q -ra
+```
+
+One non-obvious requirement, and one preference:
+
+- **Mount `apparmor/` and `seccomp/` back explicitly.** The Dockerfile copies them
+  *into* `/project`, but on the host they are **siblings** of `project/`
+  (`deepagent-image/apparmor`, `deepagent-image/seccomp`) — so mounting `project/`
+  over `/project` hides the baked-in copies. Without the two extra mounts,
+  `test_apparmor` / `test_seccomp` / the AppArmor+seccomp cases in `test_doctor`
+  fail on missing artifacts (11 tests). Not fixable in the tests: they are the CI
+  regression guards on those profiles, so skipping when the artifact is absent
+  would let a *deleted* profile pass silently.
+- **Prefer leaving `DEEPAGENTS_MODEL` unset.** Not a correctness trap — every test
+  that asserts default/profile resolution now scrubs it explicitly, and the suite
+  is green with it set. But leaving it unset is the stronger check: auto-selection
+  then has to reach `ollama:gemma4` by itself, which is what a stock run does.
+  Point the live tier at another model with a per-test monkeypatch when you need to.
+
+Drop `DEEPAGENTS_LIVE_MODEL` / `OLLAMA_HOST` / `--add-host` to run just the
+hermetic tiers. `smoke` remains the authority before a PR — it builds clean, so it
+catches anything the mount papers over (a missing `COPY`, a stale image layer).
 
 Conventions for new tests:
 
