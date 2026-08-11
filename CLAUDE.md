@@ -114,6 +114,30 @@ secret-safe containers.
 Per the global "confirm outward-facing actions" rule, pushing and PR creation are outward-facing:
 do them when the work is complete or the user asks, not speculatively mid-session.
 
+### Worktrees — copy `.env` in as part of setup
+
+`deepagent-image/project/.env` is gitignored, so `git worktree add` produces a tree where the
+harness cannot run: no API keys, no `OLLAMA_HOST`, no `DEEPAGENTS_MODEL`. Copy it over from the
+main worktree in the same step that creates the worktree:
+
+```powershell
+rtk git worktree add ..\wt-<name> -b <type>/<short-description>
+rtk Copy-Item deepagent-image\project\.env ..\wt-<name>\deepagent-image\project\.env
+```
+```bash
+rtk git worktree add ../wt-<name> -b <type>/<short-description>
+rtk cp deepagent-image/project/.env ../wt-<name>/deepagent-image/project/.env
+```
+
+**Copy it with a file command — never by reading the file and writing its contents back out.**
+A copy moves the bytes without either end seeing them; a read-then-write pulls live secrets into
+the agent's context, which is both wasted tokens and a leak path. Same reason applies to `cat`ing
+or diffing it to "check" — confirm with a path/size test instead. This is the "secrets live in
+`.env` only, never echoed into logs" hard rule below, applied to worktree setup.
+
+Removing a worktree: `rtk git worktree remove <path>` (it refuses if the tree is dirty — check
+`git status --porcelain` in it first, and confirm the branch is pushed before deleting anything).
+
 ## Build & run (PowerShell primary on this machine)
 
 ```powershell
