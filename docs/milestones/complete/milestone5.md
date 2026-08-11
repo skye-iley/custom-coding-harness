@@ -12,6 +12,12 @@ original spec sketch remains: C5 drops the planned arrow-key `/config` menu for 
 doesn't fit most of them anyway). One real bug the build surfaced and fixed along the way: §4 C5's
 `PauseMiddleware` caching note.
 
+**Follow-on: `docs/milestones/planned/milestone5.1.md` (Config Field Registry).** The review that
+produced §0.1 also found the *structural* reason the C5 menu was dropped: a knob is declared in ten
+places and none of them records its valid values, so no field can render a picker. 5.1 replaces that
+duplication with one `FieldSpec` table everything derives from, then adds the menu on top. It is a
+behavior-preserving refactor — this milestone's test suite is its oracle.
+
 ### 0.1 Second-pass review fixes
 
 A review of the completed branch found the resolver and both wizards correct in isolation but

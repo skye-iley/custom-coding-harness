@@ -72,7 +72,15 @@ secret-safe containers.
     `PathGuardDenied` is still a true escape and still never approvable. Folds into `milestone4.md` on
     completion.)*
   - `docs/milestones/planned/` — **not-yet-built** milestones (docs only). Wins over `design_doc.md`
-    for "what we build next." Currently empty.
+    for "what we build next."
+    - `milestone5.1.md` — **Config Field Registry**: follow-on refactor of Milestone 5. M5 unified
+      *resolution* but not *declaration* — a knob is spelled out in ten places, nine of which fail
+      silently if missed, and no field carries its own valid values, which is what actually blocks
+      the arrow-key `/config` menu M5 scoped out. One `FieldSpec` table becomes the single
+      declaration; `Settings`, profile I/O, the resolver loop, both display renderers, `/config
+      set` dispatch, the wizard screens, and the new picker all derive from it. Behavior-preserving
+      by construction — the M5 suite (604 host + 85 image tests) is the oracle and must pass
+      unchanged, so an edited test that isn't asserting a now-derived constant is a red flag.
   - `docs/features/workspace_visibility.md` — **named feature plan** (not a numbered milestone): restrict
     which workspace paths an agent can see (`.agentignore` policy, designated-secret floor, docker-mask
     → bwrap fs-tool jail → optional overlayfs). **Planned** — summarized in `design_doc.md` §2.
