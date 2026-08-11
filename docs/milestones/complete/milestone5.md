@@ -60,6 +60,15 @@ Only `mask_mode` is reachable through `harness config set` today; the three `hit
 already validated (`cli._CONFIG_HITL_VALIDATORS`) and every other profile field is free-text or a
 bool, which `load_profile` already rejects when malformed.
 
+### 0.3 Third-pass review — fixes specified, not yet applied
+
+A final pre-merge review found ten further items, two of them merge-blocking: the resolved `jail`
+value never reaches the container (so a profile/flag-set jail applies the seccomp **relaxation**
+without starting the jail or its `nsguard` backstop), and `-Autonomy` writes a UTF-8 BOM on Windows
+PowerShell 5.1 that `parse_config` rejects as an unknown key, killing the run it was meant to
+configure. Full remediation spec — exact call sites, patches, and regression tests — in
+**`milestone5_review_fixes.md`** (same folder). Fold its rows into §0.1 and delete it once applied.
+
 ## 1. Goal & Definition of Done
 
 Today, changing how a run behaves means editing `project/.env`, passing scattered CLI flags
