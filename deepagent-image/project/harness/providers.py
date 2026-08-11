@@ -184,6 +184,27 @@ def provider_for(model: str) -> Provider | None:
     return _provider_for(model)
 
 
+def provider_available(provider: Provider) -> bool:
+    """Is this provider usable right now, for auto-selection purposes?
+
+    Keyed providers need their `api_key_env` set to a non-empty value. Keyless
+    ones (`requires_key = false` — ollama, lmstudio) are always available: they
+    talk to a local daemon, so there is no credential whose presence could act
+    as the "configured" signal. Gating them on `api_key_env` anyway would make a
+    keyless provider permanently unselectable, which is why ollama could not be
+    the default before.
+
+    Consequence worth knowing: with a keyless provider carrying a `default_model`
+    (ollama does, at priority 0), auto-selection always succeeds, so a host with
+    no Ollama daemon fails at *connect* time rather than with `choose_model`'s
+    "No model configured" SystemExit. That exit is now only reachable when every
+    provider with a `default_model` is keyed and unkeyed.
+    """
+    if not provider.requires_key:
+        return True
+    return bool(os.getenv(provider.api_key_env))
+
+
 def choose_model(explicit_model: str | None) -> str:
     if explicit_model:
         return explicit_model
@@ -193,7 +214,7 @@ def choose_model(explicit_model: str | None) -> str:
         return env_model
 
     for provider in PROVIDERS:
-        if provider.default_model and os.getenv(provider.api_key_env):
+        if provider.default_model and provider_available(provider):
             return provider.default_model
 
     raise SystemExit(

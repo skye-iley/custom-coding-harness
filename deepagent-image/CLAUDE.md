@@ -67,6 +67,7 @@ on user code inside a separate **workspace** conda env. `project/main.py` is the
 .\scripts\build.ps1                       # docker build -t deepagent-harness
 .\scripts\verify.ps1                      # sanity-check harness venv + conda in one start
 .\scripts\smoke.ps1                       # smoke test
+.\scripts\smoke.ps1 -LiveModel            # + the live-model tier (real model in/out)
 .\scripts\run-docker.ps1                  # opens straight to the you> prompt
 .\scripts\run-docker.ps1 "your task"      # runs that task first, then drops to the prompt
 .\scripts\run-docker.ps1 -WorkspacePath C:\path\to\repo "your task"
@@ -142,11 +143,30 @@ Harness changes → `project/requirements.txt` + rebuild. Never edit `/opt/venv`
 resolution all derive from it, so maps can't drift. It is **loaded at import time from the
 `project/providers/` registry** (one `provider.toml` per provider + `models/<model>.toml` per
 model), not hard-coded — add/change a provider or model by editing TOML, no Python edit needed
-(see `providers/README.md`). Auto-selection scans by ascending `priority` and **skips any provider
-whose `default_model` is unset** (ollama, lmstudio, openrouter are intentionally unset). Override
-explicitly with `DEEPAGENTS_MODEL=provider:model`. OpenAI-compatible providers (cursor, openrouter,
-lmstudio) route via `ChatOpenAI` and need their `*_BASE_URL`. `DEEPAGENTS_PROVIDERS_DIR` overrides
-the registry path (used by tests).
+(see `providers/README.md`). Override explicitly with `DEEPAGENTS_MODEL=provider:model`.
+OpenAI-compatible providers (cursor, openrouter, lmstudio) route via `ChatOpenAI` and need their
+`*_BASE_URL`. `DEEPAGENTS_PROVIDERS_DIR` overrides the registry path (used by tests).
+
+**Auto-selection** (`choose_model`, when neither `--model` nor `DEEPAGENTS_MODEL` is set) scans by
+ascending `priority` and takes the first provider that has a `default_model` **and** is *available*
+(`providers.provider_available`). Two gates, both required:
+- `default_model` set — lmstudio and openrouter are still deliberately unset, so they are never
+  auto-picked.
+- available — a **keyed** provider (`requires_key = true`) needs a non-empty `api_key_env`; a
+  **keyless** one (`requires_key = false`) is always available, because there is no credential whose
+  presence could signal "configured".
+
+**`ollama` is the shipped default** (`priority = 0`, `default_model = "gemma4"`), so an unconfigured
+run pins a local model instead of spending a cloud free-tier quota — which is what makes the
+live-model test tier practical (see "Test suite layout & conventions"). Two consequences worth
+knowing:
+- Auto-selection now effectively always succeeds, so a host with no Ollama daemon fails at
+  *connect* time, not with `choose_model`'s "No model configured" `SystemExit`. That exit is only
+  reachable when every provider carrying a `default_model` is keyed and unkeyed.
+- The `gemma4` stem is an Ollama **tag**. A locally-tagged variant (`gemma4:harnesstest1`) needs its
+  own `providers/ollama/models/<tag>.toml` before it is a *known* spec; without one it still runs
+  (`validate_credentials` passes unknown specs through to `init_chat_model`) but carries no rates or
+  metadata.
 
 `scripts/sync-models.{sh,ps1}` (= `python3 -m harness sync-models`, code in `harness/sync_models.py`)
 regenerates `models/*.toml` from each provider's live list-models endpoint. **Dev-time only** — it
@@ -449,12 +469,35 @@ layered by dependency so most of it also runs on a bare host with just pytest:
   budgets, the null=MVP cost-tracker contract). Each guards its module with
   `pytest.importorskip(...)`, so on a bare host the module is reported skipped
   instead of erroring; in the `test` image it runs.
+- **Live-model (needs a reachable model):** `test_live_model` — real prompts to a
+  real model, real replies asserted. **Off unless `DEEPAGENTS_LIVE_MODEL=1`**
+  (marker + gate in `conftest.py`), so the two tiers above stay hermetic and CI is
+  unaffected. `smoke -LiveModel` / `LIVE_MODEL=1 ./smoke.sh` turns it on and points
+  the container at a host-run daemon. Take the session-scoped **`live_model`
+  fixture**: it resolves the model through the harness's own
+  `choose_model` → `validate_credentials` → `resolve_chat_model` path (so a routing
+  regression fails here too) and **skips** — never fails — when the stack or the
+  model is unreachable.
 
 Conventions for new tests:
 
-- **No keys, no network, no real model calls.** Stub `create_deep_agent` /
-  `subprocess.run`, monkeypatch `providers.PROVIDERS`, build throwaway provider
-  registries under `tmp_path` via `providers._load_providers(dir)`.
+- **Exercise the real model where the behavior under test is model behavior.**
+  Stubs are deterministic *and* structurally blind: they answer however the test
+  wrote them to, so a harness that is internally consistent but doesn't actually
+  work reads green. Real bugs have been caught only by running a model —
+  tool-calling the model won't emit, `usage_metadata` a provider omits (silently
+  billing $0), a reply shape the extractor mishandles. So when a case asserts
+  something that depends on what a *model* does rather than on what the harness
+  does with it, add a `live_model` case alongside the stubbed one. Ollama being
+  the default makes this cheap: no key, no quota, no rate limit.
+  **Don't convert the existing tiers** — a stubbed test is still the right tool
+  for harness logic, and the live tier is additive.
+- **No keys, no network, no real cloud calls — outside the live tier.** In the
+  host and image tiers: stub `create_deep_agent` / `subprocess.run`, monkeypatch
+  `providers.PROVIDERS`, build throwaway provider registries under `tmp_path` via
+  `providers._load_providers(dir)`. The live tier is the *only* place a real model
+  call belongs, it is opt-in, and even there the model must be a local one — a
+  test that needs a cloud key is a test CI can never run.
 - **All filesystem writes go to `tmp_path`** (or the `workspace_sandbox` fixture,
   which is a tmp workspace with CWD pointed at it). Nothing a test writes may
   reach the repo or the host-mounted workspace.

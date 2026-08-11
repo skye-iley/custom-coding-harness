@@ -92,6 +92,75 @@ def artifact_dir(request, tmp_path):
     return resolve_artifact_dir(request.node.name, tmp_path)
 
 
+# --- live-model tier -------------------------------------------------------
+#
+# The third test tier: cases that send a real prompt to a real model and assert
+# on the real reply. Off unless DEEPAGENTS_LIVE_MODEL=1, so the host and image
+# tiers stay hermetic (no keys, no network) and CI is unaffected. Ollama being
+# the default provider is what makes this practical -- a local model has no
+# free-tier quota to burn. See "Test suite layout & conventions" in
+# deepagent-image/CLAUDE.md.
+
+_LIVE_ENV = "DEEPAGENTS_LIVE_MODEL"
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "live_model: sends a real prompt to a real model; runs only when "
+        f"{_LIVE_ENV}=1 (see tests/conftest.py).",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if os.getenv(_LIVE_ENV) == "1":
+        return
+    skip = pytest.mark.skip(reason=f"live-model tier off; set {_LIVE_ENV}=1 to run")
+    for item in items:
+        if "live_model" in item.keywords:
+            item.add_marker(skip)
+
+
+@pytest.fixture(scope="session")
+def live_model():
+    """A real chat model, resolved the same way a real run resolves one.
+
+    Goes through `providers.choose_model` + `validate_credentials` +
+    `resolve_chat_model` rather than constructing a client directly, so the test
+    exercises the harness's own routing and a routing regression shows up here
+    too. Skips (never fails) when the runtime stack is absent or the model is
+    unreachable -- an offline laptop should not turn the suite red, but note that
+    means a silent skip is possible: check for the `live_model` cases in the
+    output when you mean to be testing against a real model.
+    """
+    pytest.importorskip("langchain")
+    providers = _load_providers_module()
+    spec = providers.choose_model(None)
+    providers.validate_credentials(spec)
+    try:
+        model = providers.resolve_chat_model(spec)
+        # Cheapest possible round trip: proves the daemon/endpoint answers before
+        # a test blames the harness for what is really a model that isn't running.
+        if isinstance(model, str):
+            from langchain.chat_models import init_chat_model
+
+            model = init_chat_model(model)
+        model.invoke("ping")
+    except Exception as exc:  # noqa: BLE001 - any transport/config failure = skip
+        pytest.skip(f"live model {spec!r} unreachable: {type(exc).__name__}: {exc}")
+    return model
+
+
+def _load_providers_module():
+    """Import harness.providers the same way the test modules do."""
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _bootstrap import _load
+
+    return _load("harness.providers")
+
+
 @pytest.fixture
 def provider_registry():
     """Redirect DEEPAGENTS_PROVIDERS_DIR at the committed fixture registry for the

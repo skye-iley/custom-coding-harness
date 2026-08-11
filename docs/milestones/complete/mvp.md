@@ -165,7 +165,11 @@ the `scripts/` wrappers:
   (openai / anthropic / google_genai / deepseek / ollama) pass through to `init_chat_model`;
   OpenAI-compatible providers (cursor / openrouter / lmstudio) route via `ChatOpenAI` + a
   `*_BASE_URL`. Selection precedence: `--model` → `DEEPAGENTS_MODEL` → first provider by ascending
-  `priority` whose API key is set and whose `default_model` is non-`None`. The dev-time
+  `priority` that has a non-`None` `default_model` and is *available* — keyed providers
+  (`requires_key = true`) need their API key set, keyless ones are always available. *(Amended
+  after the MVP: the availability gate originally required the API key for every provider, keyless
+  included, which made a local provider unselectable. Ollama is now the shipped default at
+  `priority = 0` — see `deepagent-image/CLAUDE.md` "Model routing".)* The dev-time
   `sync-models` command (`python3 -m harness sync-models`; `scripts/sync-models.{sh,ps1}`)
   regenerates `models/*.toml` from each provider's live list-models endpoint — it needs keys +
   network (the sealed runtime has neither) and never rewrites `provider.toml`.

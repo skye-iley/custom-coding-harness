@@ -17,6 +17,14 @@
 #                               # build the jail — either the kernel/runtime refuses
 #                               # nested userns, or the host LSM denies bwrap's mounts;
 #                               # =1 turns that skip into a failure (pin the boundary).
+#   LIVE_MODEL=1 ./smoke.sh     # also run the live-model tier: real prompts to a real
+#                               # model, real replies asserted (tests/test_live_model.py).
+#                               # Default off, so the suite stays hermetic. Needs a
+#                               # reachable model — with the shipped default that is a
+#                               # host `ollama serve` listening on the docker bridge
+#                               # (OLLAMA_HOST=0.0.0.0:11434 ollama serve). Individual
+#                               # cases SKIP rather than fail when it is unreachable, so
+#                               # read the -ra recap instead of trusting a green exit.
 #   DEEPAGENTS_JAIL_APPARMOR=unconfined ./smoke.sh
 #                               # run the jail gate with AppArmor off for that container.
 #                               # Needed on Ubuntu/Debian Docker, where `docker-default`
@@ -28,6 +36,7 @@ NETJAIL_DIR="$ROOT/netjail"
 NET_JAIL="${NET_JAIL:-}"
 KEEP_ARTIFACTS="${KEEP_ARTIFACTS:-}"
 JAIL_CHECK="${JAIL_CHECK:-}"
+LIVE_MODEL="${LIVE_MODEL:-}"
 
 # ---------------------------------------------------------------------------
 # NetJail plumbing — mirror of run-docker.sh's NET_JAIL path. Kept in sync with
@@ -262,11 +271,23 @@ else
   echo "M4 jail: bwrap gate + masked/unmasked/write/ro boundary checks — ok"
 fi
 
+# Live-model tier: off by default so the suite needs no model, no keys, no network.
+# LIVE_MODEL=1 turns it on and reaches a host-run daemon at host.docker.internal
+# (--add-host maps it on Linux, where it is not built in). Under NET_JAIL the
+# netjail forwarder already set OLLAMA_HOST for us — don't overwrite it.
+LIVE_ARGS=()
+if [[ -n "$LIVE_MODEL" ]]; then
+  LIVE_ARGS=(-e "DEEPAGENTS_LIVE_MODEL=1" --add-host "host.docker.internal:host-gateway")
+  [[ -n "$NET_JAIL" ]] || LIVE_ARGS+=(-e "OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}")
+  [[ -n "${DEEPAGENTS_MODEL:-}" ]] && LIVE_ARGS+=(-e "DEEPAGENTS_MODEL=$DEEPAGENTS_MODEL")
+  echo "LiveModel: on -> live-model tier will run (cases SKIP if the model is unreachable)"
+fi
+
 # Full suite via pytest discovery on the test image. -v names every test case
 # (file::test PASSED/FAILED); -ra recaps non-passing tests at the end. Failures
 # print the failing test id, file:line, and asserted values by default.
 docker run --rm ${NET_ARGS[@]+"${NET_ARGS[@]}"} ${PROXY_ENV[@]+"${PROXY_ENV[@]}"} \
-  ${ARTIFACT_ARGS[@]+"${ARTIFACT_ARGS[@]}"} \
+  ${ARTIFACT_ARGS[@]+"${ARTIFACT_ARGS[@]}"} ${LIVE_ARGS[@]+"${LIVE_ARGS[@]}"} \
   deepagent-harness-test python3 -m pytest tests/ -v -ra
 
 # NOT `[[ -n "$X" ]] && echo …`: as the *last* statement that idiom makes the

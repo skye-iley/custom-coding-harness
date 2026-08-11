@@ -1,0 +1,24 @@
+name = "gemma4"
+
+# Ollama's default auto-selected model (see ../provider.toml). The id is an
+# Ollama *tag* as `ollama list` reports it, so a locally-tagged variant needs its
+# own file here before `DEEPAGENTS_MODEL=ollama:gemma4:harnesstest1` is a *known*
+# spec. A tag contains a colon, which Windows forbids in a filename — so name the
+# file freely and set `name` to the real tag (the loader prefers `name` over the
+# file stem): `gemma4-harnesstest1.toml` holding `name = "gemma4:harnesstest1"`.
+# An unknown spec still runs — validate_credentials passes it through to
+# init_chat_model with a note — it just carries no rates and no metadata.
+
+# Model metadata (commented = not recorded).
+# display_name =
+# context_window =
+# output_token_limit =
+
+# Local/self-hosted: no API charge. provider.toml declares pricing = "free", so
+# no [pricing] table applies here — cost is 0 by strategy, not by empty rates.
+
+# Watt-hours per token (optional estimate; tracked even for free models).
+[energy]
+# per_input_token =
+# per_output_token =
+# source =

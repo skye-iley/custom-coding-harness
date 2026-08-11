@@ -170,10 +170,13 @@ def test_rates_for_keys_on_bare_id(tmp_path):
 # --- choose_model ----------------------------------------------------------
 
 def _two_provider_registry(tmp_path):
-    _write_provider(tmp_path, "alpha", api_key_env="ALPHA_API_KEY", priority=1,
-                    default_model="a1", models=[("a1", "")])
-    _write_provider(tmp_path, "beta", api_key_env="BETA_API_KEY", priority=2,
-                    default_model="b1", models=[("b1", "")])
+    # Both keyed: these cases are about the api_key_env gate, and only a keyed
+    # provider is gated on it (a keyless one is always available -- see the
+    # keyless auto-select cases below).
+    _write_provider(tmp_path, "alpha", api_key_env="ALPHA_API_KEY", requires_key=True,
+                    priority=1, default_model="a1", models=[("a1", "")])
+    _write_provider(tmp_path, "beta", api_key_env="BETA_API_KEY", requires_key=True,
+                    priority=2, default_model="b1", models=[("b1", "")])
     return providers._load_providers(tmp_path)
 
 
@@ -215,6 +218,65 @@ def test_choose_model_none_available_raises(tmp_path, monkeypatch):
     monkeypatch.delenv("BETA_API_KEY", raising=False)
     with pytest.raises(SystemExit):
         providers.choose_model(None)
+
+
+# --- keyless auto-selection (ollama as the shipped default) -----------------
+#
+# Regression guard: auto-selection used to gate on `os.getenv(api_key_env)` for
+# every provider, so a keyless one (requires_key = false) could never be picked
+# no matter what -- there is no credential to detect. That is why ollama had to
+# stay `default_model`-less. The gate now consults requires_key first.
+
+def test_provider_available_keyless_needs_no_key(tmp_path, monkeypatch):
+    _write_provider(tmp_path, "local", api_key_env="LOCAL_API_KEY",
+                    requires_key=False, models=[("m1", "")])
+    [p] = providers._load_providers(tmp_path)
+    monkeypatch.delenv("LOCAL_API_KEY", raising=False)
+    assert providers.provider_available(p) is True
+
+
+def test_provider_available_keyed_needs_key(tmp_path, monkeypatch):
+    _write_provider(tmp_path, "acme", api_key_env="ACME_API_KEY",
+                    requires_key=True, models=[("m1", "")])
+    [p] = providers._load_providers(tmp_path)
+    monkeypatch.delenv("ACME_API_KEY", raising=False)
+    assert providers.provider_available(p) is False
+    monkeypatch.setenv("ACME_API_KEY", "k")
+    assert providers.provider_available(p) is True
+
+
+def test_choose_model_autoselects_keyless_provider_without_key(tmp_path, monkeypatch):
+    _write_provider(tmp_path, "local", api_key_env="LOCAL_API_KEY", requires_key=False,
+                    priority=0, default_model="m1", models=[("m1", "")])
+    _write_provider(tmp_path, "cloud", api_key_env="CLOUD_API_KEY", requires_key=True,
+                    priority=1, default_model="c1", models=[("c1", "")])
+    monkeypatch.setattr(providers, "PROVIDERS", providers._load_providers(tmp_path))
+    monkeypatch.delenv("DEEPAGENTS_MODEL", raising=False)
+    monkeypatch.delenv("LOCAL_API_KEY", raising=False)
+    monkeypatch.setenv("CLOUD_API_KEY", "k")  # cloud is available too...
+    # ...but the keyless local provider is lower priority, so it wins.
+    assert providers.choose_model(None) == "local:m1"
+
+
+def test_choose_model_keyless_still_skipped_without_default_model(tmp_path, monkeypatch):
+    # requires_key=false alone is not enough: no default_model => never auto-picked
+    # (lmstudio/openrouter stay in that state).
+    _write_provider(tmp_path, "local", api_key_env="LOCAL_API_KEY", requires_key=False,
+                    priority=0, models=[("m1", "")])
+    _write_provider(tmp_path, "cloud", api_key_env="CLOUD_API_KEY", requires_key=True,
+                    priority=1, default_model="c1", models=[("c1", "")])
+    monkeypatch.setattr(providers, "PROVIDERS", providers._load_providers(tmp_path))
+    monkeypatch.delenv("DEEPAGENTS_MODEL", raising=False)
+    monkeypatch.setenv("CLOUD_API_KEY", "k")
+    assert providers.choose_model(None) == "cloud:c1"
+
+
+def test_shipped_registry_autoselects_ollama(monkeypatch):
+    """The shipped providers/ dir must resolve to a local model with no keys set."""
+    monkeypatch.delenv("DEEPAGENTS_MODEL", raising=False)
+    for provider in providers.PROVIDERS:
+        monkeypatch.delenv(provider.api_key_env, raising=False)
+    assert providers.choose_model(None) == "ollama:gemma4"
 
 
 # --- validate_credentials --------------------------------------------------

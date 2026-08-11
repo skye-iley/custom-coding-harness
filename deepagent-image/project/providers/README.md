@@ -19,8 +19,8 @@ providers/
 | field          | type   | required | meaning                                                       |
 |----------------|--------|----------|---------------------------------------------------------------|
 | `api_key_env`  | str    | yes      | env var holding the key / opting the provider in              |
-| `requires_key` | bool   | yes      | `validate_credentials` enforces `api_key_env` when true       |
-| `priority`     | int    | yes      | auto-selection order; lowest wins when several keys are set    |
+| `requires_key` | bool   | yes      | `validate_credentials` enforces `api_key_env` when true; also gates auto-selection (see below) |
+| `priority`     | int    | yes      | auto-selection order; lowest wins among available providers    |
 | `default_model`| str    | no       | model stem auto-selected for this provider; omit => never auto |
 | `prefix`       | str    | no       | model spec prefix; defaults to `"<dirname>:"`                  |
 | `base_url_env` | str    | no       | set => OpenAI-compatible, routed via `ChatOpenAI`             |
@@ -29,6 +29,24 @@ providers/
 
 `default_model` is a model file stem (e.g. `gemini-3.5-flash`), not a full spec.
 The full spec handed to langchain is `prefix + stem`.
+
+### Auto-selection: two gates
+
+When neither `--model` nor `DEEPAGENTS_MODEL` is set, `choose_model` walks the
+registry by ascending `priority` and takes the first provider that passes **both**:
+
+1. **`default_model` is set** — omit it and the provider is never auto-picked
+   (lmstudio, openrouter).
+2. **The provider is available** (`providers.provider_available`) — `requires_key
+   = true` needs a non-empty `api_key_env`; `requires_key = false` is *always*
+   available, since a local daemon has no credential to detect.
+
+Gate 2 is why **ollama is the default** (`priority = 0`, `default_model =
+"gemma4"`): a keyless provider used to be gated on `api_key_env` like a keyed one,
+which made it permanently unselectable. An unconfigured run now picks a local
+model rather than spending a cloud free-tier quota. Trade-off: auto-selection
+effectively always succeeds, so a host with no daemon running fails at connect
+time instead of with a clean "No model configured" error.
 
 ### `[limits]` — plan rate limits (request pacing)
 
@@ -184,9 +202,11 @@ The committed estimates are placeholders. For locally-hosted models, `source`
 names the (specified, not-yet-built) device-measurement backend — see
 `docs/specs/energy.md`.
 
-Local/keyless providers (ollama, lmstudio) and ones with no chosen default
-(openrouter) have no model files and no `default_model`; add a model file +
-`default_model` when you pin one.
+`ollama` carries one hand-written model file (`models/gemma4.toml`) because it is
+the auto-selection default; the stem is an Ollama **tag**, so a locally-tagged
+variant needs its own file to be a known spec. `lmstudio` and `openrouter` still
+have no model files and no `default_model`; add a model file + `default_model`
+when you pin one.
 
 ## Refreshing model files from provider APIs
 

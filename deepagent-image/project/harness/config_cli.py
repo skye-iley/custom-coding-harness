@@ -40,7 +40,7 @@ from harness.config import (
     resolve_settings,
     save_profile,
 )
-from harness.providers import PROVIDERS
+from harness.providers import PROVIDERS, provider_available
 
 # --- pure formatting / parsing (host-testable, no I/O) ------------------------
 
@@ -263,12 +263,17 @@ def write_hitl_preset(path: Path, autonomy_level: str) -> None:
 
 
 def _wizard_model_step() -> str | None:
-    detected = [p for p in PROVIDERS if p.default_model and os.getenv(p.api_key_env)]
+    # Same availability rule choose_model uses, so the wizard offers exactly what
+    # an unflagged run would actually pick -- keyless local providers included.
+    detected = [p for p in PROVIDERS if p.default_model and provider_available(p)]
     if not detected:
         print("Model: no provider API key detected in the environment -- keeping auto-select.")
         return None
     options = [p.default_model for p in detected] + ["(keep current / auto-select)"]
-    keys = ", ".join(p.api_key_env for p in detected)
+    keys = ", ".join(
+        p.api_key_env if p.requires_key else f"{p.prefix.rstrip(':')} (keyless)"
+        for p in detected
+    )
     choice = _numbered_choice(f"Model -- pick a provider (keys detected: {keys}):", options, default_index=len(options) - 1)
     return None if choice == options[-1] else choice
 

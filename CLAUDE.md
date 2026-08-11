@@ -135,6 +135,11 @@ cd deepagent-image
                                           #   or the host LSM denying bwrap's mounts (AppArmor).
                                           #   On an AppArmor host, set DEEPAGENTS_JAIL_APPARMOR=unconfined
                                           #   to make it run (drops the whole profile — see §11.6).
+.\scripts\smoke.ps1 -LiveModel            # + the live-model tier (LIVE_MODEL=1 ./scripts/smoke.sh):
+                                          #   real prompts to a real model, real replies asserted.
+                                          #   Needs a reachable model — with the shipped default
+                                          #   that is a host `ollama serve`. Cases SKIP (not fail)
+                                          #   when unreachable, so read the -ra recap.
 .\scripts\run-docker.ps1                  # opens a persistent interactive session (you> prompt)
 .\scripts\run-docker.ps1 "your task"      # runs that task first, then drops to the prompt
 ```
@@ -174,6 +179,29 @@ documented in detail in **[deepagent-image/CLAUDE.md — Launcher environment](.
 The key distinction: `.env` is container-bound (via `--env-file`); launcher vars 
 are read by the host shell *before* `docker run` and affect container startup 
 parameters only.
+
+## Testing guideline — exercise the real model where the behavior is the model's
+
+The default provider is **local Ollama** (`ollama:gemma4`, `priority = 0`) precisely so that
+running a real model is cheap: no key, no quota, no free-tier rate limit to wait on.
+
+**When a test asserts something that depends on what a *model* does — not on what the harness
+does with it — add a live-model case.** Stubs are deterministic *and* structurally blind: they
+answer however the test wrote them to, so a harness that is internally consistent but does not
+actually work still reads green. Several real bugs surfaced only by running a model, never by the
+stubbed suite.
+
+- Live cases live in `deepagent-image/project/tests/test_live_model.py`, carry the `live_model`
+  marker, and take the `live_model` fixture. **Off unless `DEEPAGENTS_LIVE_MODEL=1`**;
+  `smoke -LiveModel` / `LIVE_MODEL=1 ./scripts/smoke.sh` turns them on.
+- This is **additive, not a replacement**. The host and image tiers stay hermetic (no keys, no
+  network, no real model calls) — a stubbed test is still the right tool for harness logic, and
+  CI must be able to run the suite with nothing installed.
+- A live case must use a **local** model. A test that needs a cloud key is a test CI can never run.
+- Live cases **skip** rather than fail when the model is unreachable, so a green exit is not proof
+  they ran — check the `-ra` recap when you mean to be testing against a real model.
+
+Full tier description: `deepagent-image/CLAUDE.md` → "Test suite layout & conventions".
 
 ## Hard rules
 
