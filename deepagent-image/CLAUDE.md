@@ -834,7 +834,21 @@ the baseline record of defaults when nothing else overrides it.
   `scripts/lib/config.{ps1,sh}` (reverting `run-docker` to direct env reads) and the harness is
   byte-for-byte pre-Milestone-5.
 
-See `docs/milestones/complete/milestone5.md` for the full design/rationale.
+- **⚠️ Known gap — enum values are not validated.** `harness config set mask_mode <anything>` is
+  accepted, persisted, and resolved: `_cmd_set` validates by round-tripping through `load_profile`,
+  which checks only the **cast**, and `mask_mode` is a `str` field. A typo'd `alow` then silently
+  resolves to `deny` (`mask.resolve` compares `mode == MODE_ALLOW` and falls to the `else`). It
+  **fails safe** — the restrictive mode is the fallback, so no security consequence — but it fails
+  silently, giving the operator the opposite of what they asked for plus a success message.
+  **Deferred to M5.1 on purpose**, which closes it for every enum knob at once via a `choices` tuple
+  on each field, rather than adding a twelfth hand-maintained per-field constant here
+  (`docs/milestones/planned/milestone5.1.md` §3.1). Don't patch it locally without reading that —
+  and if M5.1 is shelved, fix it directly. Only `mask_mode` is reachable this way: the `hitl.*`
+  fields are validated by `cli._CONFIG_HITL_VALIDATORS`, and the rest are free-text or bools
+  (which `load_profile` already rejects when malformed).
+
+See `docs/milestones/complete/milestone5.md` §0.2 for the full write-up, and the rest of that doc
+for the design/rationale.
 
 ## Interactive REPL Commands (in-container)
 
