@@ -25,9 +25,14 @@ Done when:
   fails if any derived structure was hand-maintained instead of derived.
 - The M5 test suite passes **unchanged** except where a test asserts a hand-written constant that
   this milestone makes derived. Resolved values, precedence, file formats, and stderr text are
-  byte-identical — this is a refactor plus one additive UI affordance (§4 R6).
+  byte-identical — this is a refactor plus exactly **two** deliberate additions: the picker (§4 R6)
+  and enum validation (below). Anything else that moves is a bug.
 - `/config set <field>` with **no value** opens an arrow-key picker for any field carrying
   `choices`; free-text fields keep today's typed path. `/config set <field> <value>` is unchanged.
+- **Every enum-valued knob rejects an invalid value at the point of entry**, closing §3.1's
+  validation gap — `harness config set mask_mode alow` fails loudly instead of persisting a string
+  that silently resolves to the opposite mode. This is the one place the milestone is *allowed* to
+  change behavior, and it needs its own regression test.
 - `harness config`'s wizard screens are generated from the registry rather than hand-written
   `_numbered_choice` calls, so a new choice-typed knob appears in the wizard for free.
 - One display renderer, not the two that render the same data in two formats today.
@@ -48,8 +53,8 @@ Adding one **live** field to M5 as it stands today:
 
 | # | Site | File |
 |---|---|---|
-| 1 | `Settings` dataclass field | `config.py:319` |
-| 2 | `SettingsSources` dataclass field (same name, `str` type) | `config.py:341` |
+| 1 | `Settings` dataclass field | `config.py:320` |
+| 2 | `SettingsSources` dataclass field (same name, `str` type) | `config.py:342` |
 | 3 | `LIVE_FIELDS` frozenset | `config.py:367` |
 | 4 | One of `_PROFILE_{BOOL,FLOAT,INT,STR}_FIELDS`, by cast | `config.py:304-307` |
 | 5 | `_PROFILE_WRITE_ORDER` tuple | `config.py:313` |
@@ -74,9 +79,31 @@ Two symptoms are **already in the file**, not hypothetical:
 - `cli._config_display_lines` and `config_cli.format_settings_lines` render the same data with two
   different widths and one `[harness] ` prefix. Same logic, twice, drifting independently.
 
-And the thing that blocks the menu: `_CONFIG_HITL_VALIDATORS` (`cli.py:687`) is the *only* place any
-field's valid values are written down, and it covers three of them. `mask_mode` has exactly two legal
-values; nothing in the code knows that.
+### 3.1 The missing-`choices` hole is not just cosmetic
+
+`_CONFIG_HITL_VALIDATORS` (`cli.py:687`) is the **only** place any field's valid values are written
+down, and it covers three of them — the three `hitl.*` sub-fields. Every other enum-valued knob has
+its legal values either hardcoded inline in one wizard prompt (`mask_mode`'s `["deny", "allow"]`,
+`config_cli.py:298`) or nowhere at all.
+
+That is what blocks the menu — a picker needs a value list, and no field carries one. It is also a
+**live validation gap**, verified against the branch:
+
+```
+$ harness config set mask_mode definitely-not-a-mode
+[harness] wrote .harness-profile.yaml: mask_mode=definitely-not-a-mode     # rc=0
+```
+
+`_cmd_set` validates by round-tripping through `load_profile`, which only checks the *cast* — and
+`mask_mode` is a `str` field, so any string parses. The garbage persists and resolves straight into
+`Settings.mask_mode`. `mask.resolve` then compares `mode == MODE_ALLOW` and takes the `else` branch,
+so a typo'd `alow` silently yields **deny** mode.
+
+It fails safe, which is why this is a bug and not an incident. But it fails *silently*: an operator
+who typos the mode gets the opposite of what they asked for, with a success message and no warning —
+the same shape as the M5 §0.1 bugs (a knob written and then not honored), one layer up. Giving the
+field a `choices` tuple closes it at the point of entry, for every enum knob at once, which is why
+this milestone is not purely a cleanup.
 
 ## 4. Slices (in build order)
 
@@ -166,11 +193,14 @@ while `/config`'s display and dispatch include them.
 2. **`hitl.*` in the same registry, or its own?** → **Same**, via dotted names. They are separate
    *files* (a deliberate M5 decision that stands), not separate *concepts* to a user typing
    `/config set`.
-3. **Should the launchers read the registry?** → **No.** `run-docker` is deliberately
-   Python-independent — M5 wrote `-Autonomy`'s YAML edit in bash and PowerShell rather than shell
-   out to the harness for exactly this reason. Emitting a build-time JSON manifest for the shell to
-   parse trades a hand-written call for a generated-artifact staleness problem. Guard the coverage
-   with a test (R7) instead of removing the duplication.
+3. **Should the launchers read the registry?** → **No.** `run-docker` needs **no host Python** —
+   verified: its only `python3` references are inside a `docker run` (the mask scan,
+   `run-docker.sh:387` / `.ps1:351`) or inside an error-message string. Every knob it resolves, it
+   resolves in pure shell. M5 wrote `-Autonomy`'s YAML edit twice, in bash and PowerShell, rather
+   than shell out to the harness for exactly this reason. Reading the registry would mean either a
+   host Python dependency the launcher has never had, or a generated JSON manifest that can go
+   stale against the source it mirrors. Guard the coverage with a test (R7) instead of removing the
+   duplication.
 4. **Picker for free-text fields (history / recent values)?** → **Out of scope.** A picker over
    arbitrary prior strings is a different feature with its own storage question.
 
@@ -190,9 +220,10 @@ A registry refactor that quietly changes one field's default, cast, or tier is w
 duplication it removes — and it would be invisible in review, since the diff is mostly deletions.
 The controls:
 
-- **The M5 suite is the oracle.** 604 host tests + 85 image `test_cli` tests pass unchanged. A test
-  edit is allowed **only** where the test asserts a hand-written constant this milestone derives;
-  any other edited test is a behavior change wearing a refactor's clothes.
+- **The M5 suite is the oracle.** 604 host tests + 85 image `test_cli` tests pass unchanged
+  (counts verified on this branch). A test edit is allowed **only** where the test asserts a
+  hand-written constant this milestone derives, or where it pins the pre-fix behavior of §3.1's
+  validation gap; any other edited test is a behavior change wearing a refactor's clothes.
 - **A resolution snapshot test lands first, before R1**: a matrix over every field × every tier
   (cli / env / profile / default) asserting the resolved value and source tag. M5's
   `test_resolve_settings_precedence_every_field` is most of this already; extend it to pin defaults
