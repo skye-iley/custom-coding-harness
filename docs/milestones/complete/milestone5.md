@@ -12,6 +12,24 @@ original spec sketch remains: C5 drops the planned arrow-key `/config` menu for 
 doesn't fit most of them anyway). One real bug the build surfaced and fixed along the way: §4 C5's
 `PauseMiddleware` caching note.
 
+### 0.1 Second-pass review fixes
+
+A review of the completed branch found the resolver and both wizards correct in isolation but
+**under-plumbed at the edges** — six fields were written and read by nothing. All fixed on the
+same branch; each carries a regression test.
+
+| Bug | Why it mattered | Fix |
+|---|---|---|
+| `.harness-profile.yaml` never reached the container | Gitignored ⇒ not in the Dockerfile's enumerated `COPY`, and `run-docker` mounted only `workspace`/`state`/`.harness-config.yaml`. So the container's `resolve_settings()` **always** saw an empty profile tier: `topic`/`max_cost`/`max_tokens` silently ignored on every containerized run (`model` worked only via the explicit `-e` forward), and `/config save` wrote into the `--rm` container layer and printed success. | Bind-mount it into `/project`, read-write. `save_profile` gained an in-place fallback: a single-file bind mount can't be replaced by rename (`EBUSY`), so the atomic tmp+`replace` would have crashed in the exact deployment the mount exists for. |
+| `cpus`/`memory`/`pids_limit`/`net_jail` resolved nowhere | `harness config security`'s custom posture prompts for all four, `save_profile` writes them, the `.example` documents them — and both launchers still read raw `${CPUS:-2}` / `[string]$Cpus = "2"`. `check-parity` even asserted a `cpus` profile fixture, so the resolver existed and only the call site was missing. Directly contradicted §8's "never silently accepted or no-op'd". | Routed through `_resolve_host_setting`/`Resolve-HostSetting`. The `.ps1` cap defaults moved to `""` (a literal default shadows the profile tier); `-NetJail` is a `[switch]`, so it consults the lower tiers only when `$PSBoundParameters` shows it genuinely absent. |
+| `/config`'s pre-spinup half reported defaults for host-only knobs | Caps and NetJail are `docker run` flags, never env vars, so the read-only display showed `cpus = 2 (default)` under `-Cpus 8`. A read-only view whose job is "what will this run actually do" that reports the opposite is worse than omitting the field. | `run-docker` forwards them as informational `-e`. Nothing in the container acts on them. |
+| `/config set model` left the cost tracker on the old model | `CostTrackerMiddleware` caches `_pricing`/`_rates`/`_bare_model` at construction; only the chat model was swapped. Every post-switch turn billed at the launch model's rates, reported under the launch model's name. | `CostTrackerMiddleware.reprice()`, called from the switch. Budgets and accumulated totals deliberately survive — a budget is a session ceiling, not a per-model one. A session with no tracker (launched unpriced) says so instead of starting a half-accurate one mid-run. |
+| `/config` source tags were wrong for anything set by a CLI flag | `_handle_config` re-resolved with no `cli=` tier, so `--max-cost 5` displayed `(default)`. The provenance tags are the entire point of the display. | Thread `parse_args()`'s already-resolved `(Settings, SettingsSources)` pair through `run_repl`. |
+| Wizard "default" posture and "off" HITL preset were silent no-ops | `_wizard_security_step` returned `{}` for "default", so a saved `jail: true` survived a run that reported "jail off"; `_wizard_hitl_step` returned `None` for "off", indistinguishable from "screen skipped", so an existing `.harness-config.yaml` stayed and HITL stayed on. | Both write their choice explicitly. "off" moves `.harness-config.yaml` aside to `.disabled` rather than deleting it — presence-of-file *is* the switch, but the file may carry a hand-written `review_triggers` block a config wizard has no business destroying. |
+
+`check-parity.{sh,ps1}` gained markers for the profile mount, the cap/NetJail profile keys, and
+the cap env forward, so a one-sided edit to either launcher fails CI instead of drifting.
+
 ## 1. Goal & Definition of Done
 
 Today, changing how a run behaves means editing `project/.env`, passing scattered CLI flags

@@ -470,9 +470,19 @@ def save_profile(path: Path, values: dict) -> None:
     for name in _PROFILE_WRITE_ORDER:
         lines.append(f"{name}: {_format_scalar(merged.get(name))}")
 
+    text = "\n".join(lines) + "\n"
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        # `run-docker` bind-mounts this file into the container as a single-file
+        # mount, and a rename over a mount point fails with EBUSY -- so an
+        # in-session `/config save` can only write in place. Losing atomicity is
+        # acceptable here: the file has one writer at a time (a wizard on the host
+        # OR one REPL), and a torn write still parses or fails loud on next load.
+        tmp.unlink(missing_ok=True)
+        path.write_text(text, encoding="utf-8")
 
 
 def resolve_settings(

@@ -26,10 +26,21 @@ NETJAIL_DIR="$ROOT/netjail"
 # agent can't exhaust the host CPU/RAM or fork-bomb it. NOT a sandbox (the trust
 # boundary is still the container; see docs/milestones/mvp.md §5). Override via env:
 #   CPUS=4 MEMORY=8g PIDS_LIMIT=1024 ./run-docker.sh "task"
-CPUS="${CPUS:-2}"
-MEMORY="${MEMORY:-4g}"
-PIDS_LIMIT="${PIDS_LIMIT:-512}"
+# Milestone 5, C3: .harness-profile.yaml's cpus/memory/pids_limit layer under the
+# env var, so `harness config security`'s saved caps actually take effect.
+CPUS="$(_resolve_host_setting "${CPUS:-}" CPUS cpus "2")"
+MEMORY="$(_resolve_host_setting "${MEMORY:-}" MEMORY memory "4g")"
+PIDS_LIMIT="$(_resolve_host_setting "${PIDS_LIMIT:-}" PIDS_LIMIT pids_limit "512")"
 CAP_FLAGS=(--cpus "$CPUS" --memory "$MEMORY" --pids-limit "$PIDS_LIMIT")
+
+# NetJail on/off resolves the same way, so a saved `net_jail: true` launches the
+# jail without re-typing NET_JAIL=1. Normalized to 1/"" here because everything
+# downstream tests `[[ "$NET_JAIL" == "1" ]]`.
+NET_JAIL="$(_resolve_host_setting "${NET_JAIL:-}" NET_JAIL net_jail "0")"
+case "$NET_JAIL" in
+  1 | true | yes | on) NET_JAIL=1 ;;
+  *) NET_JAIL="" ;;
+esac
 
 # Host reachability: make `host.docker.internal` resolve to the host on native
 # Linux (Docker Desktop/WSL2 provide it already; re-declaring host-gateway is a
@@ -305,6 +316,35 @@ if [[ -f "$HITL_CONFIG_PATH" ]]; then
   echo "HITL config: mounted (.harness-config.yaml present)"
 fi
 
+# Unified config profile (Milestone 5, C4): same story as .harness-config.yaml --
+# gitignored, so NOT baked into the image; mount it into /project (the harness
+# CWD) so the container's resolve_settings() sees the same profile tier the host
+# side just resolved against. Without this the profile's in-session fields
+# (topic/max_cost/max_tokens) are silently ignored on every containerized run and
+# `/config save` writes into the throwaway container layer.
+#
+# Read-WRITE, unlike the HITL mount: `/config save` is a documented in-session
+# action that must land on the host. The agent can't reach it -- its file tools
+# are rooted at /project/workspace and the bwrap jail (slice H) binds /project
+# read-only.
+PROFILE_MOUNT=()
+if [[ -f "$PROFILE_FILE" ]]; then
+  PROFILE_MOUNT=(-v "$PROFILE_FILE:/project/.harness-profile.yaml")
+  echo "Config profile: mounted (.harness-profile.yaml present)"
+fi
+
+# Host-only knobs the container cannot otherwise observe: --cpus/--memory/
+# --pids-limit/NetJail are `docker run` flags, never env vars, so without these
+# the in-session `/config` read-only view and `harness doctor` would report the
+# built-in defaults no matter what this launch actually applied. Informational
+# only -- nothing in the container acts on them.
+CAP_ENV=(
+  -e "CPUS=$CPUS"
+  -e "MEMORY=$MEMORY"
+  -e "PIDS_LIMIT=$PIDS_LIMIT"
+  -e "NET_JAIL=${NET_JAIL:-0}"
+)
+
 # -it gives the REPL prompt loop a TTY. If stdin isn't actually a terminal
 # (CI, piped smoke tests), -t fails to allocate and Docker falls back to a
 # plain pipe, which the harness already handles via the non-TTY fallback.
@@ -507,8 +547,10 @@ build_agent_run() {
     ${SRC_MOUNT[@]+"${SRC_MOUNT[@]}"}
     ${GIT_MOUNT[@]+"${GIT_MOUNT[@]}"}
     ${HITL_MOUNT[@]+"${HITL_MOUNT[@]}"}
+    ${PROFILE_MOUNT[@]+"${PROFILE_MOUNT[@]}"}
     ${MASK_ARGS[@]+"${MASK_ARGS[@]}"}
     ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}
+    "${CAP_ENV[@]}"
     deepagent-harness)
   if [[ $# -gt 0 ]]; then
     AGENT_RUN+=(python3 main.py "$@")

@@ -329,3 +329,25 @@ def test_save_profile_unknown_key_fails(tmp_path):
     p = tmp_path / ".harness-profile.yaml"
     with pytest.raises(SystemExit):
         cfg.save_profile(p, {"thread_id": "nope"})  # not a profile field
+
+
+def test_save_profile_falls_back_to_in_place_write_when_rename_fails(tmp_path, monkeypatch):
+    """Regression: run-docker bind-mounts .harness-profile.yaml into the
+    container as a single-file mount, and renaming over a mount point fails with
+    EBUSY -- so the atomic tmp+replace write made `/config save` crash in the
+    exact deployment the mount exists for. Fall back to writing in place."""
+    path = tmp_path / cfg.PROFILE_NAME
+    cfg.save_profile(path, {"topic": "before"})
+
+    real_replace = Path.replace
+
+    def refuse_replace(self, target):
+        if str(target).endswith(cfg.PROFILE_NAME):
+            raise OSError(16, "Device or resource busy")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", refuse_replace)
+    cfg.save_profile(path, {"topic": "after"})
+
+    assert cfg.load_profile(path)["topic"] == "after"
+    assert not (tmp_path / (cfg.PROFILE_NAME + ".tmp")).exists()  # scratch cleaned up

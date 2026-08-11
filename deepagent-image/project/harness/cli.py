@@ -762,6 +762,31 @@ def _config_display_lines(
     return lines
 
 
+def _reprice_tracker(tracker: CostTrackerMiddleware | None, new_model: str) -> None:
+    """Point an active cost tracker at `new_model`'s rates after a `/config set
+    model` switch; say so plainly when there is no tracker to re-point.
+
+    A session that launched on a `free` model has no tracker at all
+    (`build_cost_tracker` returns None -- the M1 null=MVP contract), and one
+    can't be added mid-session: it would have to be appended to the middleware
+    list the agent was built from and its session totals would start at zero,
+    so the closing ledger line would under-report the run. Better to say cost
+    tracking stays off than to start a half-accurate one silently.
+    """
+    if tracker is None:
+        _stage(
+            f"config: cost tracking is off this session (launched on an unpriced model with no "
+            f"budget) -- {new_model} will run untracked; restart to price it"
+        )
+        return
+    provider = provider_for(new_model)
+    tracker.reprice(
+        provider.pricing if provider else Free(),
+        new_model[len(provider.prefix):] if provider else new_model,
+        provider.rates_for(new_model) if provider else None,
+    )
+
+
 def _handle_config(
     line: str,
     *,
@@ -772,6 +797,8 @@ def _handle_config(
     hitl_conf,
     rebuild_agent,
     edited: set[str],
+    settings=None,
+    sources=None,
 ) -> tuple[str, object | None, str | None]:
     """Handle one `/config`, `/config set <field> <value>`, or `/config save`
     line. Returns `(current_model, new_agent_or_None, current_topic)` --
@@ -779,14 +806,18 @@ def _handle_config(
     else None (caller keeps its existing agent). Every other live field is
     mutated in place on the objects the caller already holds (`config` dict,
     `tracker`, `hitl_conf`), so only model/topic need to flow back out.
+
+    `settings`/`sources` are the pair `parse_args()` already resolved **with the
+    CLI tier applied**; they must be threaded through rather than re-resolved
+    here, or every field passed as a flag would report its provenance as
+    env/profile/default and the source tags -- the whole point of the display --
+    would be wrong. Optional only so the host-side tests can call this bare.
     """
     subcommand, args = _parse_config_command(line)
 
     if subcommand == "":
-        # Pre-spinup half is fixed for this container's lifetime, so a fresh
-        # resolve is as good as a cached one and needs nothing threaded in
-        # from main() beyond what this function already takes.
-        settings, sources = resolve_settings()
+        if settings is None or sources is None:
+            settings, sources = resolve_settings()
         for out in _config_display_lines(
             settings=settings,
             sources=sources,
@@ -838,6 +869,11 @@ def _handle_config(
         except SystemExit as exc:
             _stage(f"config: model switch to {value!r} failed: {exc}")
             return current_model, None, topic
+        # Re-point the cost tracker at the new model's rates. The tracker caches
+        # pricing/rates/name at construction, so without this every post-switch
+        # turn would be billed at the launch model's rates and reported under the
+        # launch model's name.
+        _reprice_tracker(tracker, value)
         edited.add("model")
         _stage(f"config: model {current_model} -> {value} (this session only; /config save to persist)")
         return value, new_agent, topic
@@ -1029,6 +1065,8 @@ def run_repl(
     workspace: Path | None = None,
     current_model: str | None = None,
     rebuild_agent=None,
+    settings=None,
+    settings_sources=None,
 ) -> int:
     """Container-lifetime loop: build once (by the caller), then prompt -> invoke
     -> answer until /exit, /quit, or EOF. A non-TTY stdin collapses to the single
@@ -1145,6 +1183,8 @@ def run_repl(
                 hitl_conf=hitl_conf,
                 rebuild_agent=rebuild_agent,
                 edited=config_edited,
+                settings=settings,
+                sources=settings_sources,
             )
             if new_agent is not None:
                 agent = new_agent
@@ -1608,6 +1648,8 @@ def main() -> int:
                     workspace=workspace,
                     current_model=model,
                     rebuild_agent=_rebuild_agent,
+                    settings=args.settings,
+                    settings_sources=args.settings_sources,
                 )
             if archive_conn is not None:
                 # After the M1 session-total line printed (inside run_repl), so the

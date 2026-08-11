@@ -36,8 +36,16 @@ foreach ($pair in $pairs) {
 # platform silently launches a jail that will die inside the container, or skips
 # the fail-closed abort. install-apparmor-profile.sh is Linux-only and so has no
 # .ps1 twin - deliberately absent from the pairs list above.
+# M5 adds: the profile file must be MOUNTED (it is gitignored, so it is not in
+# the image's COPY list - without the mount the container's resolve_settings()
+# never sees a profile tier and `/config save` writes to a throwaway layer), the
+# resource caps / NetJail must resolve THROUGH the profile (they were written by
+# `harness config security` and read by nothing), and the caps must be forwarded
+# as env since they are docker flags the container cannot otherwise observe.
 $markers = @("mask-scan", "refusing to launch unmasked", "DEEPAGENTS_MASK", "DEEPAGENTS_MASK_MODE",
-             "deepagent-userns", "install-apparmor-profile", "DEEPAGENTS_JAIL_APPARMOR")
+             "deepagent-userns", "install-apparmor-profile", "DEEPAGENTS_JAIL_APPARMOR",
+             "/project/.harness-profile.yaml", "pids_limit", "net_jail",
+             "PIDS_LIMIT=")
 $rdPs1 = Join-Path (Join-Path $Root "scripts") "run-docker.ps1"
 $rdSh  = Join-Path (Join-Path $Root "scripts") "run-docker.sh"
 foreach ($m in $markers) {

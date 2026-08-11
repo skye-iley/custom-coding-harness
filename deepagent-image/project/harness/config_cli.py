@@ -220,6 +220,26 @@ def agentignore_add_floor(workspace: Path, pattern: str) -> Path:
 # review_triggers/on_deny/system_interrupts block survives untouched.
 
 
+def disable_hitl(path: Path) -> Path | None:
+    """Turn HITL off by moving `.harness-config.yaml` aside to
+    `<name>.disabled`. Returns the new path, or `None` if there was no file to
+    disable.
+
+    Renamed, never deleted: presence-of-file *is* the on/off switch (M3), so
+    turning HITL off means the file must not be there -- but it may carry a
+    hand-written `review_triggers` block the wizard can't reconstruct, and a
+    config wizard has no business destroying that. Moving it aside makes the
+    choice reversible with one `mv`.
+    """
+    if not path.is_file():
+        return None
+    target = path.with_name(path.name + ".disabled")
+    if target.exists():
+        target.unlink()
+    path.replace(target)
+    return target
+
+
 def write_hitl_preset(path: Path, autonomy_level: str) -> None:
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -264,7 +284,15 @@ def _wizard_security_step() -> dict:
         ],
         default_index=0,
     )
-    if posture.startswith("hardened"):
+    if posture.startswith("default"):
+        # Write the values explicitly rather than returning an empty diff: an
+        # empty diff leaves a previously-saved `jail: true` in place, so the
+        # wizard would report "mask on, jail off" and the next run would come up
+        # jailed. Picking a posture must mean the posture you picked.
+        values["mask_mode"] = "deny"
+        values["jail"] = False
+    elif posture.startswith("hardened"):
+        values["mask_mode"] = "deny"
         values["jail"] = True
     elif posture.startswith("custom"):
         values["mask_mode"] = _numbered_choice("Mask mode:", ["deny", "allow"], default_index=0)
@@ -276,12 +304,13 @@ def _wizard_security_step() -> dict:
         values["memory"] = input("Memory limit [4g]: ").strip() or "4g"
         values["pids_limit"] = input("PIDs limit [512]: ").strip() or "512"
         values["net_jail"] = _confirm("Enable NetJail (deny-all egress + allowlist)?", default=False)
-    # "default" adds nothing -- an empty profile diff for this step, matching
-    # "matches current .env" (milestone5_spec.md §9's wizard mockup).
     return values
 
 
-def _wizard_hitl_step() -> str | None:
+def _wizard_hitl_step() -> str:
+    """Returns "off" | "guided" | "strict" -- "off" is a real answer the caller
+    must act on (move any existing .harness-config.yaml aside), not the absence
+    of one. `_run_wizard` uses None for "this screen was skipped"."""
     preset = _numbered_choice(
         "HITL preset:",
         [
@@ -292,7 +321,7 @@ def _wizard_hitl_step() -> str | None:
         default_index=0,
     )
     if preset.startswith("off"):
-        return None
+        return "off"
     return "guided" if preset.startswith("guided") else "strict"
 
 
@@ -383,14 +412,17 @@ def _run_wizard(*, security_only: bool, auto_save: bool) -> int:
         _wizard_agentignore_step()
         _wizard_netjail_step()
 
+    # `hitl_choice is None` means the screen was skipped (security-only run);
+    # "off" is an explicit answer that has to be acted on.
+    hitl_path = Path.cwd() / CONFIG_NAME
     print()
     print("Summary:")
     for k, v in values.items():
         print(f"  {k}: {v}")
-    if hitl_choice is not None:
+    if hitl_choice == "off":
+        print(f"  hitl: off{' (moves the existing .harness-config.yaml aside)' if hitl_path.is_file() else ''}")
+    elif hitl_choice is not None:
         print(f"  hitl.autonomy_level: {hitl_choice}")
-    elif not security_only:
-        print("  hitl: off")
     if not values and hitl_choice is None:
         print("  (no changes)")
         return 0
@@ -401,8 +433,12 @@ def _run_wizard(*, security_only: bool, auto_save: bool) -> int:
 
     if values:
         save_profile(Path.cwd() / PROFILE_NAME, values)
-    if hitl_choice is not None:
-        write_hitl_preset(Path.cwd() / CONFIG_NAME, hitl_choice)
+    if hitl_choice == "off":
+        moved = disable_hitl(hitl_path)
+        if moved is not None:
+            print(f"[harness] HITL off: moved {CONFIG_NAME} to {moved.name} (rename it back to re-enable).")
+    elif hitl_choice is not None:
+        write_hitl_preset(hitl_path, hitl_choice)
     print("[harness] saved.")
     return 0
 

@@ -767,7 +767,14 @@ the baseline record of defaults when nothing else overrides it.
     equivalent env vars (`.sh`, which already treats `VAR=x ./run-docker.sh` as its "flag"
     mechanism), each resolving through `scripts/lib/config.{ps1,sh}`'s
     `Resolve-HostSetting`/`_resolve_host_setting` — the same four-tier precedence, since a
-    Docker flag has no way to read `Settings` directly. `-Autonomy`/`AUTONOMY` is shaped
+    Docker flag has no way to read `Settings` directly. The **resource caps + NetJail**
+    (`-Cpus`/`-Memory`/`-PidsLimit`/`-NetJail`, `CPUS`/`MEMORY`/`PIDS_LIMIT`/`NET_JAIL`) go
+    through the same resolver, so a `cpus:`/`net_jail:` saved by `harness config security`
+    actually reaches `docker run` — the `.ps1` defaults are `""`, not the literal caps, because
+    a literal default there would shadow the profile tier and make a saved cap unreachable.
+    `-NetJail` is a `[switch]`, so it consults the lower tiers only via
+    `$PSBoundParameters.ContainsKey`, the one way to tell "not passed" from `-NetJail:$false`.
+    `-Autonomy`/`AUTONOMY` is shaped
     differently: the HITL preset isn't a `Settings`/profile field (it's a whole-file swap-in --
     `.harness-config.yaml`'s presence *is* the on/off switch), so it's a plain-text write/update
     of the `autonomy_level:` line (creating the file if absent), not a four-tier resolve --
@@ -796,13 +803,31 @@ the baseline record of defaults when nothing else overrides it.
   off that object rather than caching them at construction, specifically so this takes effect on
   the next gated call with no rebuild); `/config save` persists the session's edited live fields
   to the profile. Attempting to `/config set` a pre-spinup field is refused with a pointer to
-  `harness config` — it can't change without a container restart.
+  `harness config` — it can't change without a container restart. `/config set model` also
+  **re-points the cost tracker** at the new model's rates (`CostTrackerMiddleware.reprice`) —
+  it caches pricing/rates/name at construction, so without that every post-switch turn would be
+  billed at the launch model's rates. A session launched on an unpriced model has *no* tracker
+  (M1's null=MVP contract) and one can't be added mid-session without under-counting the run, so
+  the switch says cost tracking stays off rather than starting a half-accurate one.
+  The source tags come from the `(Settings, SettingsSources)` pair `parse_args()` resolved
+  **with the CLI tier applied**, threaded through `run_repl` — re-resolving inside `/config`
+  would report every flag-set field as env/profile/default.
 - **`harness doctor`** reports one resolved-config summary line built from `resolve_settings()`
   with no CLI override (reflecting what an *unflagged* run would do), ahead of its other checks.
 - **File ownership** (kept deliberately separate, not merged): `.harness-config.yaml` = HITL
   only (unchanged since M3); `.harness-profile.yaml` = everything else this milestone adds.
   Neither is baked into the image (gitignored like `.env`); copy the checked-in `.example`
-  template to activate.
+  template to activate. **Both are bind-mounted into `/project` by `run-docker` when present** —
+  that is the only way they reach the container, and without the profile mount the container's
+  `resolve_settings()` would see no profile tier at all (its in-session fields silently ignored,
+  `/config save` writing into the throwaway container layer). The HITL mount is read-only; the
+  **profile mount is read-write**, because `/config save` has to land on the host. A single-file
+  bind mount can't be replaced by rename, so `save_profile` falls back from its atomic
+  tmp+`replace` to an in-place write on `OSError`.
+- **Host-only knobs are forwarded for display**: `--cpus`/`--memory`/`--pids-limit`/NetJail are
+  `docker run` flags, never env vars, so `run-docker` also passes them as `-e CPUS=…` etc.
+  purely so `/config`'s read-only half and `harness doctor` report what the launch actually
+  applied instead of the built-in defaults. Nothing in the container acts on them.
 - **Removable contract:** no `.harness-profile.yaml` present, no new CLI flags passed ⇒ every
   knob resolves exactly as it did pre-M5 (env var → built-in default). Delete
   `config_cli.py` + the profile-file branch inside `config.py`'s resolvers +

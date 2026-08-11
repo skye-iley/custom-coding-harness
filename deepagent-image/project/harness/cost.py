@@ -434,6 +434,26 @@ class CostTrackerMiddleware(AgentMiddleware):
         """USD/kWh used to price energy in the session-total line (or None)."""
         return self._electricity_rate
 
+    @property
+    def bare_model(self) -> str:
+        """Model name this tracker is currently pricing against."""
+        return self._bare_model
+
+    def reprice(self, pricing: Pricing, bare_model: str, rates: "ModelRates | None") -> None:
+        """Point the tracker at a different model's rates mid-session.
+
+        Milestone 5's `/config set model` swaps the chat model without rebuilding
+        anything else, so without this the tracker would keep charging the launch
+        model's rates -- and report the launch model's name -- for every turn after
+        the switch. Budgets and the accumulated session/turn totals are deliberately
+        preserved: a budget is a session ceiling on real spend, not a per-model one,
+        and tokens already billed at the old rates stay billed at them.
+        """
+        self._pricing = pricing
+        self._bare_model = bare_model
+        self._rates = rates
+        self._warned_unpriced = False  # a new model deserves its own missing-rate warning
+
     def before_agent(self, state, runtime):
         # Reset the per-turn view; the session total carries across turns.
         self.turn = UsageAccumulator()

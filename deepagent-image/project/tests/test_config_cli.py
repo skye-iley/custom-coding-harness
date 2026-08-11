@@ -238,14 +238,34 @@ def test_wizard_model_step_blank_keeps_auto_select(monkeypatch):
     assert cc._wizard_model_step() is None
 
 
-def test_wizard_security_step_default_posture_is_noop(monkeypatch):
+def test_wizard_security_step_default_posture_writes_values_explicitly(monkeypatch):
+    # Regression: an empty diff here left a previously-saved `jail: true` in the
+    # profile untouched, so the wizard reported "jail off" and the next run came
+    # up jailed. A picked posture must write the posture it names.
     _input_sequence(monkeypatch, [""])  # default posture
-    assert cc._wizard_security_step() == {}
+    assert cc._wizard_security_step() == {"mask_mode": "deny", "jail": False}
 
 
 def test_wizard_security_step_hardened_sets_jail(monkeypatch):
     _input_sequence(monkeypatch, ["2"])  # hardened
-    assert cc._wizard_security_step() == {"jail": True}
+    assert cc._wizard_security_step() == {"mask_mode": "deny", "jail": True}
+
+
+def test_wizard_default_posture_overwrites_saved_jail(tmp_path, monkeypatch):
+    """The end-to-end shape of the regression above: a profile with jail on,
+    then a 'default' posture run, must leave jail off on disk."""
+    monkeypatch.chdir(tmp_path)
+    cfg.save_profile(tmp_path / cfg.PROFILE_NAME, {"jail": True})
+    assert cfg.load_profile(tmp_path / cfg.PROFILE_NAME)["jail"] is True
+
+    monkeypatch.setattr(cc.sys.stdin, "isatty", lambda: True, raising=False)
+    _input_sequence(monkeypatch, [
+        "",   # model: keep current / auto-select (or skipped if no keys)
+        "",   # security posture: default
+        "",   # HITL preset: off
+    ])
+    cc._run_wizard(security_only=True, auto_save=True)
+    assert cfg.load_profile(tmp_path / cfg.PROFILE_NAME)["jail"] is False
 
 
 def test_wizard_security_step_custom_collects_all_fields(monkeypatch):
@@ -271,9 +291,26 @@ def test_wizard_security_step_custom_collects_all_fields(monkeypatch):
     assert "jail_apparmor" not in values  # blank input => not set
 
 
-def test_wizard_hitl_step_off_returns_none(monkeypatch):
+def test_wizard_hitl_step_off_returns_off_not_none(monkeypatch):
+    # Regression: "off" used to return None, indistinguishable from "screen
+    # skipped", so _run_wizard printed "hitl: off" and left an existing
+    # .harness-config.yaml in place -- HITL stayed on.
     _input_sequence(monkeypatch, [""])
-    assert cc._wizard_hitl_step() is None
+    assert cc._wizard_hitl_step() == "off"
+
+
+def test_disable_hitl_moves_file_aside(tmp_path):
+    path = tmp_path / cfg.CONFIG_NAME
+    path.write_text("autonomy_level: strict\nreview_triggers:\n  - { on: path, pattern: \"*.env\" }\n")
+    moved = cc.disable_hitl(path)
+    assert moved is not None and moved.name.endswith(".disabled")
+    assert not path.exists()          # presence-of-file IS the switch: HITL now off
+    assert "review_triggers" in moved.read_text()  # hand-edited block preserved, not deleted
+    assert cfg.load_config(path) is None
+
+
+def test_disable_hitl_absent_file_is_noop(tmp_path):
+    assert cc.disable_hitl(tmp_path / cfg.CONFIG_NAME) is None
 
 
 def test_wizard_hitl_step_strict(monkeypatch):

@@ -976,3 +976,91 @@ def test_handle_config_unknown_subcommand(tmp_path, monkeypatch, capsys):
         edited=set(),
     )
     assert "unknown subcommand" in capsys.readouterr().err
+
+
+# --- Milestone 5 review fixes: provenance threading + tracker repricing --------
+
+
+def test_handle_config_uses_threaded_sources_not_a_fresh_resolve(tmp_path, monkeypatch, capsys):
+    """Regression: `/config` re-resolved settings with no `cli=` tier, so any
+    field passed as a CLI flag reported its provenance as default/env/profile.
+    The source tags are the whole point of the display, so the pair parse_args()
+    already resolved (WITH the CLI tier) has to be threaded through."""
+    monkeypatch.chdir(tmp_path)
+    settings = cfg.Settings(model="openai:gpt-6", max_cost=5.0)
+    sources = cfg.SettingsSources(model="cli", max_cost="cli")
+
+    cli._handle_config(
+        "/config",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="openai:gpt-6",
+        topic=None,
+        tracker=None,
+        hitl_conf=None,
+        rebuild_agent=None,
+        edited=set(),
+        settings=settings,
+        sources=sources,
+    )
+    line = next(l for l in capsys.readouterr().err.splitlines() if "model" in l and "gpt-6" in l)
+    assert "(cli)" in line
+
+
+def test_handle_config_bare_falls_back_to_resolve_when_not_threaded(tmp_path, monkeypatch, capsys):
+    """The threading is optional so host tests can call this bare -- that path
+    must still print rather than crash on the None pair."""
+    monkeypatch.chdir(tmp_path)
+    cli._handle_config(
+        "/config",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="m",
+        topic=None,
+        tracker=None,
+        hitl_conf=None,
+        rebuild_agent=None,
+        edited=set(),
+    )
+    assert "pre-spinup" in capsys.readouterr().err
+
+
+def test_reprice_tracker_repoints_rates_and_name(monkeypatch):
+    """Regression: CostTrackerMiddleware caches pricing/rates/model name at
+    construction, so before this every turn after `/config set model` was billed
+    at the LAUNCH model's rates and reported under the launch model's name."""
+    tracker = cli.build_cost_tracker("openai:gpt-5.5", max_cost=1.0, max_tokens=None)
+    assert tracker is not None
+    before = tracker.bare_model
+
+    cli._reprice_tracker(tracker, "anthropic:claude-haiku-4-5")
+    assert tracker.bare_model != before
+    assert tracker.bare_model == "claude-haiku-4-5"
+    # Budgets and accumulated spend survive: a budget is a session ceiling, not
+    # a per-model one.
+    assert tracker._max_cost == 1.0
+
+
+def test_reprice_tracker_none_says_tracking_stays_off(capsys):
+    """A session launched on an unpriced model has no tracker at all (M1's
+    null=MVP contract) and one can't be added mid-session without under-counting
+    the run -- so say so instead of switching silently."""
+    cli._reprice_tracker(None, "openai:gpt-5.5")
+    err = capsys.readouterr().err
+    assert "cost tracking is off" in err and "openai:gpt-5.5" in err
+
+
+def test_config_set_model_reprices_the_tracker(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    tracker = cli.build_cost_tracker("openai:gpt-5.5", max_cost=1.0, max_tokens=None)
+    assert tracker is not None
+
+    cli._handle_config(
+        "/config set model anthropic:claude-haiku-4-5",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="openai:gpt-5.5",
+        topic=None,
+        tracker=tracker,
+        hitl_conf=None,
+        rebuild_agent=lambda spec: f"agent-{spec}",
+        edited=set(),
+    )
+    assert tracker.bare_model == "claude-haiku-4-5"

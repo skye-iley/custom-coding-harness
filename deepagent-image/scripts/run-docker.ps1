@@ -19,9 +19,12 @@ param(
     # agent can't exhaust the host CPU/RAM or fork-bomb it. NOT a sandbox (trust
     # boundary is still the container; docs/milestones/mvp.md §5). Override e.g.
     #   .\run-docker.ps1 -Cpus 4 -Memory 8g -PidsLimit 1024 "task"
-    [string]$Cpus = "2",
-    [string]$Memory = "4g",
-    [string]$PidsLimit = "512",
+    # Milestone 5, C3: defaults live in Resolve-HostSetting, not here, so an
+    # unpassed flag can fall through to env / .env / .harness-profile.yaml --
+    # a literal "2" here would shadow a saved `cpus: 6` in the profile.
+    [string]$Cpus = "",
+    [string]$Memory = "",
+    [string]$PidsLimit = "",
     # Milestone 5, C3: CLI parity for knobs that previously only had env/.env
     # coverage. All four resolve CLI flag > host env > project\.env >
     # .harness-profile.yaml > default via Resolve-HostSetting (lib\config.ps1).
@@ -59,6 +62,24 @@ $NetjailDir = Join-Path $Root "netjail"
 . (Join-Path $PSScriptRoot "lib\config.ps1")
 if (-not (Test-Path $EnvFile)) {
     throw "Missing $EnvFile - copy project\.env.example to project\.env and set API keys."
+}
+
+# Milestone 5, C3: resource caps resolve through the same four-tier chain as every
+# other pre-spinup knob, so `harness config security`'s saved caps actually take
+# effect instead of being written and ignored. Mirror of run-docker.sh.
+$Cpus = Resolve-HostSetting -Value $Cpus -EnvVarName "CPUS" -ProfileKey "cpus" `
+    -Default "2" -EnvFile $EnvFile -ProfileFile $ProfileFile
+$Memory = Resolve-HostSetting -Value $Memory -EnvVarName "MEMORY" -ProfileKey "memory" `
+    -Default "4g" -EnvFile $EnvFile -ProfileFile $ProfileFile
+$PidsLimit = Resolve-HostSetting -Value $PidsLimit -EnvVarName "PIDS_LIMIT" -ProfileKey "pids_limit" `
+    -Default "512" -EnvFile $EnvFile -ProfileFile $ProfileFile
+
+# NetJail is a [switch], so "not passed" is indistinguishable from "-NetJail:$false"
+# by value alone -- only consult the lower tiers when the flag is genuinely absent.
+if (-not $PSBoundParameters.ContainsKey('NetJail')) {
+    $NetJailResolved = Resolve-HostSetting -Value "" -EnvVarName "NET_JAIL" -ProfileKey "net_jail" `
+        -Default "0" -EnvFile $EnvFile -ProfileFile $ProfileFile
+    if ($NetJailResolved -in @("1", "true", "yes", "on")) { $NetJail = [switch]$true }
 }
 
 $DefaultWorkspace = Join-Path $Root "project\workspace"
@@ -447,6 +468,19 @@ if (-not [string]::IsNullOrEmpty($ResolvedModel)) {
     $ModelArgs = @("-e", "DEEPAGENTS_MODEL=$ResolvedModel")
 }
 
+# Host-only knobs the container cannot otherwise observe: --cpus/--memory/
+# --pids-limit/NetJail are `docker run` flags, never env vars, so without these
+# the in-session `/config` read-only view and `harness doctor` would report the
+# built-in defaults no matter what this launch actually applied. Informational
+# only -- nothing in the container acts on them.
+$NetJailValue = if ($NetJail) { "1" } else { "0" }
+$CapEnvArgs = @(
+    "-e", "CPUS=$Cpus",
+    "-e", "MEMORY=$Memory",
+    "-e", "PIDS_LIMIT=$PidsLimit",
+    "-e", "NET_JAIL=$NetJailValue"
+)
+
 $dockerArgs = @(
     "run", "--rm"
 ) + $TtyFlags + $JailArgs + @(
@@ -459,7 +493,7 @@ $dockerArgs = @(
     "-e", "DEEPAGENTS_STATE_DIR=/project/state",
     "-v", "${MountWorkspace}:/project/workspace",
     "-v", "${StateHostDir}:/project/state"
-) + $SrcMountArgs + $MaskArgs + $ModelArgs
+) + $SrcMountArgs + $MaskArgs + $ModelArgs + $CapEnvArgs
 
 # Git identity: mount host .gitconfig read-only into the agent user's home (uid 10001 -> /home/agent),
 # not /root (container runs USER agent). Never mount ~/.ssh into an autonomous-agent container -
@@ -502,6 +536,22 @@ $HitlConfig = Join-Path $Root "project\.harness-config.yaml"
 if (Test-Path $HitlConfig) {
     $dockerArgs += "-v", "${HitlConfig}:/project/.harness-config.yaml:ro"
     Write-Host "HITL config: mounted (.harness-config.yaml present)"
+}
+
+# Unified config profile (Milestone 5, C4): same story as .harness-config.yaml --
+# gitignored, so NOT baked into the image; mount it into /project (the harness
+# CWD) so the container's resolve_settings() sees the same profile tier the host
+# side just resolved against. Without this the profile's in-session fields
+# (topic/max_cost/max_tokens) are silently ignored on every containerized run and
+# `/config save` writes into the throwaway container layer.
+#
+# Read-WRITE, unlike the HITL mount: `/config save` is a documented in-session
+# action that must land on the host. The agent can't reach it -- its file tools
+# are rooted at /project/workspace and the bwrap jail (slice H) binds /project
+# read-only.
+if (Test-Path $ProfileFile) {
+    $dockerArgs += "-v", "${ProfileFile}:/project/.harness-profile.yaml"
+    Write-Host "Config profile: mounted (.harness-profile.yaml present)"
 }
 
 $dockerArgs += "deepagent-harness"
