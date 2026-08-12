@@ -11,7 +11,10 @@ name = "gemma4"
 
 # Model metadata (commented = not recorded).
 # display_name =
-# context_window =
+# For a local Ollama tag the usable window IS the num_ctx below, not the weights'
+# architectural maximum: the daemon truncates to num_ctx regardless. Keep the two
+# numbers equal -- raising one without the other makes this metadata a lie.
+context_window = 65536
 # output_token_limit =
 
 # Local/self-hosted: no API charge. provider.toml declares pricing = "free", so
@@ -27,7 +30,7 @@ name = "gemma4"
 # GPU; 131072 measured ~6.4 GB, also fully on GPU. Cost is ~17 MiB per 1K tokens on
 # a ~4.3 GB base. Raise it if you have the VRAM -- but check `ollama ps` still says
 # `100% GPU`, because exceeding VRAM offloads layers to CPU and throughput falls off
-# a cliff rather than degrading smoothly.
+# a cliff rather than degrading smoothly -- and update `context_window` above to match.
 [options]
 num_ctx = 65536
 
