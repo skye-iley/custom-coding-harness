@@ -9,15 +9,21 @@
 > telemetry milestone whose correctness is "the numbers look about right" is untestable by
 > construction, so the numbers get pinned before they exist.
 
-M6 = the data the harness already computes becomes durable, derivable, and publishable **without
-becoming a leak, and without the agent being able to edit its own record**. The invariants split
-four ways: **capture**, **derivation** (one authority), **containment** (nothing sensitive escapes,
-and the sink is agent-unreachable), and **removability**.
+M6 = the data the harness already computes becomes durable, **decomposable**, derivable, and
+publishable — without becoming a leak, and without the agent being able to edit its own record. The
+invariants split five ways: **capture** (including the wall-clock decomposition), **derivation**
+(one authority), **containment** (nothing sensitive escapes, and the sink is agent-unreachable),
+**removability**, and **joinability** (a benchmark sweep must be able to aggregate).
 
-The load-bearing one is 14: telemetry is an **audit surface**, so it lives in the state dir with
-`past.sqlite` and `denials.jsonl`, not in the workspace. `milestone6.md` §5a has the argument;
-invariants 15–16 state exactly how much tamper-resistance that buys (file tools: always; shell:
-only under `DEEPAGENTS_JAIL=1`) so the claim can't quietly inflate.
+Two are load-bearing and pull in opposite directions, so neither can be quietly traded away:
+
+- **14** — telemetry is an **audit surface**, so it lives in the state dir with `past.sqlite` and
+  `denials.jsonl`, not the workspace (`milestone6.md` §5a). Invariants 15–16 state exactly how much
+  tamper-resistance that buys (file tools: always; shell: only under `DEEPAGENTS_JAIL=1`) so the
+  claim cannot inflate.
+- **4a** — wall clock **decomposes**, with every component measured at its own seam and only the
+  residual inferred. A number that cannot be decomposed cannot be compared, and comparison is the
+  milestone's primary purpose (§5b).
 
 ## Capture
 
@@ -35,6 +41,39 @@ only under `DEEPAGENTS_JAIL=1`) so the claim can't quietly inflate.
 4. **`duration_ms` is wall-clock around the turn**, tool execution and HITL wait included — not
    model latency. Pinned by a test with a stubbed slow tool, because the field's *meaning* is what
    makes it useful or misleading, and both look identical in a JSON file.
+
+4a. **Wall clock decomposes, and the residual is bounded.**
+    `model_ms + tool_ms + retry_sleep_ms + paced_sleep_ms ≤ duration_ms`, and the residual
+    (`duration_ms` minus those) is non-negative and small on a stubbed turn with known timings.
+    Every component is measured at its own seam; **only** the residual is inferred. This is the
+    invariant that catches a future blocking call (a streaming path, a second limiter) silently
+    disappearing into "overhead" — the failure mode a single `duration_ms` cannot expose.
+
+4b. **Rate-limit pacing is not counted as model latency.** With a limiter configured to pace at a
+    known rate, `paced_sleep_ms` is non-zero and `model_ms` excludes it. *(Without this the free-tier
+    case reports ~60s "model latency" that is a property of the plan, not the model —
+    `milestone6.md` §5 fork 6.)*
+
+4c. **Retry sleep is recorded, not absorbed.** A stubbed retryable failure yields `retry_count ≥ 1`
+    and a `retry_sleep_ms` matching the injected sleeps. *(`resilience.retry_call` takes `sleep=` as
+    a parameter specifically so the caller owns it; `cli._invoke_resilient` passing bare `time.sleep`
+    is what loses the number today.)*
+
+4d. **A context-overflow trim is flagged.** The one-shot trim in `_invoke_resilient` sets
+    `context_trimmed: true` on that turn's record — a trimmed turn is not comparable to an
+    untrimmed one, and a benchmark that mixes them silently is measuring two different things.
+
+4e. **Tool work is recorded by name.** `tool_calls` is a per-tool-name mapping (not a bare integer),
+    `tool_errors` counts failures, and `tool_ms` is their summed duration — all read off
+    `wrap_tool_call`'s `request.tool_call`, the same field `PauseMiddleware` uses. *(Reading
+    top-level `tool_name` instead is a real bug this repo has already shipped once, in M3's pause
+    gate.)*
+
+4f. **Telemetry does not depend on the cost tracker existing.** On an unpriced model — `ollama:gemma4`,
+    `pricing = "free"`, the default provider and the local-benchmark case — M1 appends **no**
+    `CostTrackerMiddleware`, and telemetry must still record tokens, timings and tool mix, with
+    `cost_usd` null. *(Telemetry riding on the tracker would be absent exactly where it is most
+    wanted.)*
 
 5. **No tracker ⇒ no fabricated numbers.** M1 builds `CostTrackerMiddleware` only when there is
    something to track, so a run on an unpriced model must record `cost_usd: null`, never `0.0`.
@@ -122,6 +161,24 @@ only under `DEEPAGENTS_JAIL=1`) so the claim can't quietly inflate.
     importing `cli.py` — the property M5 §0.1 F6 established for `config`/`doctor`. A new
     subcommand that re-drags the runtime stack in silently undoes it.
 
+## Joinability (a sweep must be able to aggregate)
+
+23. **A headless run's stdout JSON joins to the ledger without parsing stderr.** `_batch_payload`
+    carries `run_id` (the `past.sqlite` key) and the `session.json` path — not only `thread_id`,
+    which repeats across resumes and is therefore not a key. *(This is the difference between
+    telemetry you can aggregate over 300 benchmark instances and telemetry you open one file at a
+    time.)*
+
+24. **`topic` is on every record and on the session row.** A sweep passes `--topic <instance_id>`;
+    the label must survive into each turn record, `session.json`, and the archive row, so all three
+    join on it. *(No new mechanism — `--topic` already lands on the `past.sqlite` row; the invariant
+    is that telemetry does not drop it.)*
+
+25. **Records are append-only and one run's records are contiguous by `run_id`.** Two concurrent
+    runs against the same state dir (a parallel sweep) must not interleave into an unparseable file:
+    each line is independently valid JSON and carries its own `run_id`, so separation is by field,
+    never by file position.
+
 ## What is deliberately *not* invariant here
 
 - **Metric accuracy against an external oracle.** There is no second source for "what this run
@@ -129,4 +186,10 @@ only under `DEEPAGENTS_JAIL=1`) so the claim can't quietly inflate.
   accuracy to M1's already-tested pricing math.
 - **The deferred §8 metrics** — routing accuracy, token-reduction ratio, session success rate, TTFT.
   Each is blocked on a feature that does not exist (router, compression, post-hoc GitHub state,
-  streaming). They get invariants when they get data sources, not before.
+  streaming). They get invariants when they get data sources, not before. **TTFT especially:** the
+  harness does not stream, so there is no first-token event to time. `model_ms` is full-response
+  latency and no doc may call it TTFT.
+- **Benchmark correctness.** Telemetry records cost and effort; whether a SWE-bench instance was
+  *resolved* is decided by the benchmark's own `FAIL_TO_PASS`/`PASS_TO_PASS` evaluation against the
+  produced diff (§5b). A harness that scored itself would be marking its own homework, so no
+  invariant here asserts anything about task success.

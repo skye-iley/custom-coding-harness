@@ -85,11 +85,19 @@ A milestone moves through three folders. What each stage carries is deliberate:
   `past.sqlite` / `denials.jsonl`, not in the agent-writable workspace, because the subject of the
   audit must not be able to edit the record (§5a). **Planned — branch `feat/milestone6-telemetry`
   carries the docs only; no code yet.**
+  Its **primary purpose is benchmark-grade attribution** (§5b): wall clock decomposes into
+  `model_ms` / `tool_ms` / `retry_sleep_ms` / `paced_sleep_ms` + a bounded residual, each measured
+  at its own seam, with per-tool-name counts and `run_id` in the headless JSON so a sweep (e.g.
+  SWE-bench Lite, one instance per `--headless` run, `--topic <instance_id>` as the join key) can
+  aggregate. It does **not** score a benchmark — correctness stays with the benchmark's own
+  evaluation of the produced diff.
 - **`milestone6_invariants.md`** — the checkable properties, written before the code on purpose:
-  capture (one record per turn, failed turns included, never breaks a turn), derivation (the summary
-  is derived and must agree with the `past.sqlite` row, which stays authoritative), containment (no
-  prompt/reply/tool-arg text by construction; aggregates only reach a PR; git-pr degrades to today's
-  body on any telemetry failure), and removability. Folds into `milestone6.md` on completion.
+  capture (one record per turn, failed turns included, never breaks a turn, **and the wall-clock
+  decomposition** — invariant 4a, the one that catches a future blocking call vanishing into
+  "overhead"), derivation (the summary is derived and must agree with the `past.sqlite` row, which
+  stays authoritative), containment (no prompt/reply/tool-arg text by construction; aggregates only
+  reach a PR; git-pr degrades to today's body on any telemetry failure), removability, and
+  joinability. Folds into `milestone6.md` on completion.
 
 ## Complete milestones — `milestones/complete/`
 

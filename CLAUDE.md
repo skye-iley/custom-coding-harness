@@ -104,6 +104,15 @@ secret-safe containers.
       sink placement, the one-authority rule against `past.sqlite`, and which §8 metrics are
       deferred *by dependency* are all decided there. Defaults **on**
       (`DEEPAGENTS_TELEMETRY=0` disables); PR summary goes in the body.
+      **Primary purpose is benchmark-grade per-run attribution** (§5b — e.g. a SWE-bench Lite
+      sweep): wall clock must **decompose** into `model_ms` / `tool_ms` / `retry_sleep_ms` /
+      `paced_sleep_ms` + a bounded residual, each measured at its own seam (`before_model`/
+      `after_model`, `wrap_tool_call`, `retry_call`'s injected `sleep=`, an instrumented
+      `InMemoryRateLimiter.acquire`), plus per-tool-name call counts and `run_id` in the headless
+      JSON so a sweep can join stdout to the ledger. Telemetry **does not score** a benchmark —
+      correctness comes from the benchmark's own evaluation of the produced diff. Note
+      `TelemetryMiddleware` must not ride on `CostTrackerMiddleware`: M1 omits the tracker entirely
+      on a `pricing = "free"` model, which is the default local-Ollama benchmark case.
   - `docs/milestones/planned/` — **not-yet-built** milestones (docs only). Wins over `design_doc.md`
     for "what we build next." *(Currently empty — `milestone5.1.md` moved to `in-progress/`.)*
   - `docs/features/workspace_visibility.md` — **named feature plan** (not a numbered milestone): restrict
