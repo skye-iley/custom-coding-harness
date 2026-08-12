@@ -292,6 +292,11 @@ def test_wrap_tool_call_denies_gated_call(monkeypatch, capsys):
 def test_wrap_tool_call_halt_on_deny_raises(monkeypatch):
     # Default on_deny=halt: a deny raises HaltTurn (turn ends) instead of returning
     # a blocked result that the ReAct loop would continue from.
+    #
+    # Needs langchain_core: the halt path builds a real ToolMessage to repair the
+    # dangling tool_call (hitl._blocked_result). Guarded per-test, not per-module —
+    # every other test in this file is pure and must keep running in the host tier.
+    pytest.importorskip("langchain_core")
     config = _cfg_with_triggers(("command", "rm -rf*"), on_deny="halt")
     mw = hitl.PauseMiddleware(config)
     monkeypatch.setattr(hitl.interrupt, "raise_interrupt", lambda req: False)
@@ -321,6 +326,9 @@ def test_wrap_tool_call_approves_gated_call(monkeypatch):
 
 def test_blocked_result_is_stop_and_report():
     # The deny message must NOT invite a workaround (that drove the rmdir bypass).
+    # _blocked_result returns a real ToolMessage, so this one needs langchain_core
+    # (see the note on test_wrap_tool_call_halt_on_deny_raises above).
+    pytest.importorskip("langchain_core")
     req = _FakeToolCallRequest("execute", {"command": "rm -rf x"}, id="c9")
     msg = hitl._blocked_result(req, "execute")
     text = msg.content.lower()

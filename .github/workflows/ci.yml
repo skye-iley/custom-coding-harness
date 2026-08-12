@@ -8,7 +8,33 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install pytest
-      - run: python -m pytest tests/test_mask.py tests/test_pathguard.py tests/test_doctor.py tests/test_cost.py tests/test_providers.py tests/test_archive.py tests/test_resilience.py tests/test_interrupt.py tests/test_audit.py tests/test_ratelimit.py tests/test_hostmap.py tests/test_jail.py tests/test_seccomp.py tests/test_nsguard.py tests/test_apparmor.py
+      # The WHOLE directory, deliberately — not a hand-picked file list.
+      #
+      # This step used to enumerate 15 files, and the list had already drifted from
+      # the suite it was meant to describe: test_sync_models / test_loaders /
+      # test_import_isolation are documented host-tier in deepagent-image/CLAUDE.md
+      # and were absent here, along with test_config, test_hitl, test_memadmin,
+      # test_refresh, test_workflows and more. Measured at the time of this change:
+      # the list ran 407 tests where the directory runs 653 on the same pytest-only
+      # environment. 246 host-runnable tests were reaching CI only through the much
+      # slower image job — and a newly added host-tier file joined them silently,
+      # since nothing failed when the author forgot to extend the list.
+      #
+      # What makes the directory safe here is `pytest.importorskip(...)` at the top
+      # of every module that needs the runtime stack: on this job (pytest and
+      # nothing else) they report SKIPPED, not errors. That is the same guard the
+      # suite conventions already require, so this step now *enforces* the
+      # convention instead of duplicating a stale copy of its results.
+      #
+      # Consequence to accept on purpose: a new test that imports langchain without
+      # a guard turns this job red. That is the intended signal — the alternative is
+      # the silent under-coverage above. Fix it by adding the guard (module-level
+      # importorskip, or per-test when the rest of the module is pure, as
+      # test_hitl.py does), never by re-introducing a file list here.
+      #
+      # -ra so the skip reasons are on the record: a green run here is only
+      # meaningful alongside what it skipped.
+      - run: python -m pytest tests/ -ra
         working-directory: deepagent-image/project
       # M4 slice H invariant 31 (the vendored seccomp profile must stay Docker's
       # default plus exactly five relaxed syscalls, so a swap to `seccomp=unconfined`
