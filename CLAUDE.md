@@ -88,8 +88,11 @@ secret-safe containers.
       sanctioned behavior change: **every enum knob now rejects an invalid value at the point of
       entry**, closing M5's known `mask_mode: alow` → silently-`deny` gap for profile, env, and CLI
       at once. See the "Unified config" section in `deepagent-image/CLAUDE.md`.
-    - `milestone6.md` (+ `milestone6_invariants.md`) — **Telemetry** (`design_doc.md` §8 + §12.7):
-      per-turn `<state-dir>/usage.jsonl` sink, a derived session summary, that summary appended
+    - `milestone6.md` (+ `milestone6_invariants.md` + `milestone6_spec.md`) — **Telemetry**
+      (`design_doc.md` §8 + §12.7). **Build from `milestone6_spec.md`** — it is the
+      implementation-level doc (exact schemas, capture seams, module layout, test plan, build
+      order); the other two are the plan and the checkable properties. Scope: a per-turn
+      `<state-dir>/usage.jsonl` sink, a derived session summary, that summary appended
       to the PR body `git-pr` opens, and keyless read access. **Planned — docs only on
       `feat/milestone6-telemetry`, no code yet.** Not a from-scratch build: M1 already computes
       per-turn tokens/cost/energy and discards them, M2 persists only a session roll-up, and

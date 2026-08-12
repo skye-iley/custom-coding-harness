@@ -98,6 +98,13 @@ A milestone moves through three folders. What each stage carries is deliberate:
   stays authoritative), containment (no prompt/reply/tool-arg text by construction; aggregates only
   reach a PR; git-pr degrades to today's body on any telemetry failure), removability, and
   joinability. Folds into `milestone6.md` on completion.
+- **`milestone6_spec.md`** — the implementation-level spec (same relationship `milestone5_spec.md`
+  has to `milestone5.md`): exact `usage.jsonl` / `session.json` schemas, which hook captures which
+  field, the `scrub.py` extraction, the `FieldSpec` entry for the on/off knob, the PR-block format,
+  the `harness telemetry` argv grammar, failure paths, test plan, and build order. **Written to be
+  sufficient to build from cold** — including the one composition fact the repo has never verified
+  (whether telemetry's `wrap_tool_call` nests outside `PauseMiddleware`'s), which §3.1 makes a probe
+  step rather than a guess.
 
 ## Complete milestones — `milestones/complete/`
 

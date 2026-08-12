@@ -43,8 +43,12 @@ Two are load-bearing and pull in opposite directions, so neither can be quietly 
    makes it useful or misleading, and both look identical in a JSON file.
 
 4a. **Wall clock decomposes, and the residual is bounded.**
-    `model_ms + tool_ms + retry_sleep_ms + paced_sleep_ms ≤ duration_ms`, and the residual
-    (`duration_ms` minus those) is non-negative and small on a stubbed turn with known timings.
+    `model_ms + tool_ms + retry_sleep_ms + paced_sleep_ms + hitl_wait_ms ≤ duration_ms`, and the
+    residual (`duration_ms` minus those) is non-negative and small on a stubbed turn with known
+    timings. `hitl_wait_ms` is a term because human think time is wall clock inside the turn that
+    is neither the harness's nor the model's — omitting it would make this invariant fail the first
+    time anyone runs with HITL on, which is how invariants get weakened instead of fixed
+    (`milestone6_spec.md` §6).
     Every component is measured at its own seam; **only** the residual is inferred. This is the
     invariant that catches a future blocking call (a streaming path, a second limiter) silently
     disappearing into "overhead" — the failure mode a single `duration_ms` cannot expose.
@@ -68,6 +72,12 @@ Two are load-bearing and pull in opposite directions, so neither can be quietly 
     `wrap_tool_call`'s `request.tool_call`, the same field `PauseMiddleware` uses. *(Reading
     top-level `tool_name` instead is a real bug this repo has already shipped once, in M3's pause
     gate.)*
+
+4g. **`tool_ms` never contains human wait time.** Whether telemetry's `wrap_tool_call` wraps outside
+    or inside `PauseMiddleware`'s is a middleware-composition fact this repo has not verified, so
+    `milestone6_spec.md` §3.1 requires a probe *before* capture code is written and a subtraction
+    only if the probe says telemetry is outer. The invariant holds under either composition — which
+    is the point of stating it as a property rather than as an implementation.
 
 4f. **Telemetry does not depend on the cost tracker existing.** On an unpriced model — `ollama:gemma4`,
     `pricing = "free"`, the default provider and the local-benchmark case — M1 appends **no**
@@ -154,8 +164,9 @@ Two are load-bearing and pull in opposite directions, so neither can be quietly 
     has kept.)*
 
 21. **Telemetry adds no sibling import to `cost.py`.** `test_import_isolation`'s acyclic guard still
-    passes: `telemetry.py` may import `harness.audit` and nothing else from the package; `cli.py`
-    feeds it, exactly as it feeds `archive.py`.
+    passes: `telemetry.py` may import `harness.scrub` (the leaf module the scrub moves into — see
+    `milestone6_spec.md` §1) and nothing else from the package; `cli.py` feeds it, exactly as it
+    feeds `archive.py`.
 
 22. **The keyless path stays keyless.** `harness telemetry show` routes through `dispatch` without
     importing `cli.py` — the property M5 §0.1 F6 established for `config`/`doctor`. A new
