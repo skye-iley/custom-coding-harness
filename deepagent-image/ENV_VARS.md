@@ -79,7 +79,7 @@ reach the host daemon. See `providers/README.md` → "Auto-selection: two gates"
 | Var | Purpose | Type | Default | Example |
 |-----|---------|------|---------|---------|
 | `DEEPAGENTS_MASK` | Enable workspace masking scan + empty-overlay mounts | 0/1 | 1 | — |
-| `DEEPAGENTS_MASK_MODE` | Visibility mode: "deny" (default) or "allow" | string | deny | — |
+| `DEEPAGENTS_MASK_MODE` | Visibility mode: `deny` (default) or `allow`. **Validated since M5.1** — any other value aborts at startup instead of silently resolving to `deny` | enum | deny | `allow` |
 | `DEEPAGENTS_AGENTIGNORE` | Override in-workspace config filename | string | `.agentignore` | `.maskignore` |
 | `DEEPAGENTS_JAIL` | Route all fs tools + the shell through the bubblewrap jail (slice H). Requires the narrow seccomp profile; `run-docker` passes it and fails closed if absent. On an AppArmor host it also needs the narrowed LSM profile — `run-docker` selects it automatically once loaded (`scripts/install-apparmor-profile.sh`), see `DEEPAGENTS_JAIL_APPARMOR` | 0/1 | 0 (off) | `1` |
 | `DEEPAGENTS_NS_GUARD` | Shell-tool denylist for the namespace syscalls the jail's seccomp profile re-permits container-wide. A tripwire, not containment | `0`/`1`/`warn` | tracks `DEEPAGENTS_JAIL` | `warn` |

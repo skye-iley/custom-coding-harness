@@ -623,3 +623,98 @@ def test_config_main_set_wrong_arity(tmp_path, monkeypatch, capsys):
     rc = cc.config_main(["set", "jail"])
     assert rc == 1
     assert "usage" in capsys.readouterr().out
+
+
+# =============================================================================
+# Milestone 5.1: wizard screens + `harness config set` derive from the registry
+# =============================================================================
+
+
+def test_ask_field_renders_an_enum_as_a_numbered_menu(monkeypatch, capsys):
+    _input_sequence(monkeypatch, ["2"])
+    assert cc._ask_field(cfg.SPECS_BY_NAME["mask_mode"]) == "allow"
+    out = capsys.readouterr().out
+    assert "Mask mode:" in out and "1) deny" in out and "2) allow" in out
+
+
+def test_ask_field_renders_a_bool_as_an_off_on_menu(monkeypatch):
+    _input_sequence(monkeypatch, ["2"])
+    # The answer goes back through the field's own cast, so "on" becomes a real
+    # bool by the same _TRUTHY rule every other tier uses.
+    assert cc._ask_field(cfg.SPECS_BY_NAME["jail"]) is True
+
+
+def test_ask_field_text_prompt_carries_its_default(monkeypatch, capsys):
+    _input_sequence(monkeypatch, [""])
+    assert cc._ask_field(cfg.SPECS_BY_NAME["cpus"]) == "2"
+    _input_sequence(monkeypatch, ["8"])
+    assert cc._ask_field(cfg.SPECS_BY_NAME["cpus"]) == "8"
+
+
+def test_ask_field_unset_default_renders_blank_is_auto(monkeypatch):
+    prompts = []
+
+    def record(prompt=""):
+        prompts.append(prompt)
+        return ""
+
+    monkeypatch.setattr("builtins.input", record)
+    # default=None => blank means "not written", and the caller drops it.
+    assert cc._ask_field(cfg.SPECS_BY_NAME["jail_apparmor"]) is None
+    assert prompts == ["AppArmor profile (blank = auto): "]
+
+
+def test_ask_field_confirm_shape(monkeypatch):
+    _input_sequence(monkeypatch, ["y"])
+    assert cc._ask_field(cfg.SPECS_BY_NAME["net_jail"]) is True
+
+
+def test_custom_posture_asks_every_persisted_prespinup_knob(monkeypatch):
+    """The DoD's "a new choice-typed knob appears in the wizard for free": add a
+    spec to the registry and the custom screen asks about it, with no edit to
+    `_wizard_security_step`."""
+    extra = cfg.FieldSpec(
+        name="mask_mode", tier="prespinup", env_var="X", profile_key="mask_mode",
+        default="deny", choices=("deny", "allow"), label="Mask mode",
+    )
+    new = cfg.FieldSpec(
+        name="cpus", tier="prespinup", env_var="CPUS", profile_key="cpus",
+        default="2", label="CPU limit",
+    )
+    monkeypatch.setattr(cc, "WIZARD_PRESPINUP_SPECS", (extra, new))
+    _input_sequence(monkeypatch, ["3", "2", "16"])  # custom, mask_mode=allow, cpus=16
+    assert cc._wizard_security_step() == {"mask_mode": "allow", "cpus": "16"}
+
+
+def test_cmd_set_rejects_an_invalid_enum_value(tmp_path, monkeypatch, capsys):
+    """The §3.1 gap, closed. Before M5.1 this returned 0 and persisted
+    `mask_mode=definitely-not-a-mode`, which then silently resolved to deny."""
+    monkeypatch.chdir(tmp_path)
+    rc = cc._cmd_set("mask_mode", "definitely-not-a-mode")
+    assert rc == 1
+    assert not (tmp_path / cfg.PROFILE_NAME).exists()  # not left half-written
+    assert "must be one of" in capsys.readouterr().out
+
+
+def test_cmd_set_invalid_enum_rolls_back_a_prior_profile(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cc._cmd_set("mask_mode", "allow")
+    before = (tmp_path / cfg.PROFILE_NAME).read_text(encoding="utf-8")
+    assert cc._cmd_set("mask_mode", "alow") == 1
+    assert (tmp_path / cfg.PROFILE_NAME).read_text(encoding="utf-8") == before
+
+
+def test_cmd_set_accepts_every_declared_choice(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    for value in cfg.SPECS_BY_NAME["mask_mode"].choices:
+        assert cc._cmd_set("mask_mode", value) == 0
+        assert cfg.load_profile(tmp_path / cfg.PROFILE_NAME)["mask_mode"] == value
+
+
+def test_format_settings_lines_is_the_shared_renderer(tmp_path):
+    """R3: one renderer, not two. `harness config show`'s output is
+    `format_config_lines` at its default prefix/width."""
+    settings, sources = cfg.resolve_settings(
+        env={}, profile_path=tmp_path / "none.yaml", hitl_path=tmp_path / "none-hitl.yaml"
+    )
+    assert cc.format_settings_lines(settings, sources) == cfg.format_config_lines(settings, sources)

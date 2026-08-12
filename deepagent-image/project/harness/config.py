@@ -303,22 +303,198 @@ PROFILE_NAME = ".harness-profile.yaml"
 
 _TRUTHY = {"1", "true", "yes", "on"}
 
-# Profile-file fields, by parse strategy. Deliberately excludes thread_id
-# (per-run, not a standing preference), headless (a mode picked per-invocation),
-# mask_enabled (a debugging escape hatch, not a saveable default), and hitl
-# (lives in its own file, CONFIG_NAME) -- milestone5_spec.md §5.
-_PROFILE_BOOL_FIELDS = frozenset({"jail", "net_jail"})
-_PROFILE_FLOAT_FIELDS = frozenset({"max_cost"})
-_PROFILE_INT_FIELDS = frozenset({"max_tokens"})
-_PROFILE_STR_FIELDS = frozenset(
-    {"model", "topic", "mask_mode", "jail_apparmor", "cpus", "memory", "pids_limit"}
-)
-PROFILE_FIELDS = frozenset(_PROFILE_BOOL_FIELDS | _PROFILE_FLOAT_FIELDS | _PROFILE_INT_FIELDS | _PROFILE_STR_FIELDS)
 
-# Field ordering for a written profile file (matches milestone5_spec.md §5's example).
-_PROFILE_WRITE_ORDER = (
-    "model", "topic", "max_cost", "max_tokens",
-    "mask_mode", "jail", "jail_apparmor", "cpus", "memory", "pids_limit", "net_jail",
+def _to_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in _TRUTHY
+
+
+def _mask_enabled_cast(value) -> bool:
+    """Mirrors the pre-M5 semantics: mask is on unless the value is literally
+    ``"0"`` (``os.environ.get("DEEPAGENTS_MASK", "1").strip() != "0"``)."""
+    if isinstance(value, bool):
+        return value
+    return str(value).strip() != "0"
+
+
+# =============================================================================
+# Milestone 5.1: the field registry
+# =============================================================================
+#
+# ONE declaration per knob. Everything that used to be a hand-maintained
+# parallel list derives from ``FIELD_SPECS`` below: the profile-file field set
+# and its per-cast parse buckets, the write order, ``LIVE_FIELDS``, the
+# resolver loop, both display renderers, ``/config set``'s settable set and
+# validators, and the wizard's custom-posture screen. Adding a live field is
+# one entry here; a test fails if any derived structure was hand-written
+# instead (milestone5.1.md §1).
+
+
+@dataclass(frozen=True)
+class FieldSpec:
+    """One run knob, declared once.
+
+    ``name``            -- the ``Settings`` attribute, or a dotted ``hitl.*``
+                           sub-field (dotted names live in ``.harness-config.yaml``,
+                           resolved as part of the whole ``HitlSection`` object, so
+                           the resolver skips them while ``/config`` includes them).
+    ``tier``            -- ``"live"`` (changeable in-session) | ``"prespinup"``
+                           (fixed the moment ``docker run`` executes).
+    ``env_var``         -- ``None`` => not env-settable, and therefore not walked
+                           by ``resolve_settings`` (``hitl`` + the dotted subfields).
+    ``profile_key``     -- ``None`` => deliberately not persisted; the reason is in
+                           the entry's own comment, not a module-level note.
+    ``cast``            -- the env/CLI cast. Also selects the profile-file parse
+                           strategy (``_profile_parser``), so the two can't drift.
+    ``choices``         -- the legal values of an *enum* knob. Drives validation at
+                           every point of entry (milestone5.1.md §3.1), the
+                           ``/config set`` picker, and the wizard's numbered menu.
+                           ``None`` for free text and for bools (``_to_bool``
+                           accepts ``1``/``true``/``on``/... -- a value list would
+                           reject the very spellings the launchers pass).
+    ``label``           -- wizard/menu prompt text.
+    ``wizard``          -- how the wizard renders it: ``"auto"`` (menu when the
+                           field is enum or bool, else a text prompt) or
+                           ``"confirm"`` (a y/N question).
+    ``settable``        -- editable via ``/config set`` in-session. The *behaviour*
+                           lives in ``cli._LIVE_APPLIERS`` (it mutates the tracker /
+                           archive / agent, which ``config.py`` must not import);
+                           a test asserts the two agree exactly both ways.
+    ``nullable``        -- a bare ``/config set <field>`` clears it.
+    """
+
+    name: str
+    tier: str
+    env_var: str | None = None
+    profile_key: str | None = None
+    cast: object = str
+    default: object = None
+    default_factory: object = None
+    choices: tuple[str, ...] | None = None
+    label: str = ""
+    wizard: str = "auto"
+    settable: bool = False
+    nullable: bool = False
+
+    def resolved_default(self):
+        return self.default_factory() if self.default_factory is not None else self.default
+
+
+FIELD_SPECS: tuple[FieldSpec, ...] = (
+    # --- in-session-live (can change via /config without a restart) -----------
+    FieldSpec(
+        name="model", tier="live", env_var="DEEPAGENTS_MODEL", profile_key="model",
+        label="Model", settable=True,
+    ),
+    FieldSpec(
+        # profile_key=None: per-run, not a standing preference. Persisting it would
+        # silently resume yesterday's thread on every launch (milestone5_spec.md §5).
+        name="thread_id", tier="live", env_var="DEEPAGENTS_THREAD_ID", profile_key=None,
+        default_factory=lambda: f"session-{datetime.now():%Y%m%d-%H%M%S}",
+        label="Thread id", settable=True,
+    ),
+    FieldSpec(
+        name="topic", tier="live", env_var="DEEPAGENTS_TOPIC", profile_key="topic",
+        label="Topic", settable=True, nullable=True,
+    ),
+    FieldSpec(
+        name="max_cost", tier="live", env_var="DEEPAGENTS_MAX_COST", profile_key="max_cost",
+        cast=float, label="Max cost (USD)", settable=True,
+    ),
+    FieldSpec(
+        name="max_tokens", tier="live", env_var="DEEPAGENTS_MAX_TOKENS", profile_key="max_tokens",
+        cast=int, label="Max tokens", settable=True,
+    ),
+    FieldSpec(
+        # env_var=None / profile_key=None: HITL is a whole-file object in its own
+        # file (CONFIG_NAME) whose *presence* is the on/off switch, so it resolves
+        # as one object rather than through the scalar precedence chain. The three
+        # editable sub-fields follow as dotted specs.
+        name="hitl", tier="live", env_var=None, profile_key=None, label="HITL",
+    ),
+    FieldSpec(
+        name="hitl.autonomy_level", tier="live", choices=AUTONOMY_LEVELS,
+        default="guided", label="Autonomy level", settable=True,
+    ),
+    FieldSpec(
+        name="hitl.on_deny", tier="live", choices=ON_DENY_MODES,
+        default="halt", label="On deny", settable=True,
+    ),
+    FieldSpec(
+        name="hitl.interruption_policy", tier="live", choices=INTERRUPTION_POLICIES,
+        default="blocking", label="Interruption policy", settable=True,
+    ),
+    # --- pre-spinup-only (fixed at container start; shown read-only in /config) --
+    FieldSpec(
+        # profile_key=None: a mode picked per-invocation (one-shot JSON vs. REPL),
+        # not a standing preference.
+        name="headless", tier="prespinup", env_var="DEEPAGENTS_HEADLESS", profile_key=None,
+        cast=_to_bool, default=False, label="Headless",
+    ),
+    FieldSpec(
+        # profile_key=None: a debugging escape hatch (M4's removable contract), not
+        # a saveable default -- saving "masking off" is exactly the setting nobody
+        # should acquire by accident.
+        name="mask_enabled", tier="prespinup", env_var="DEEPAGENTS_MASK", profile_key=None,
+        cast=_mask_enabled_cast, default=True, label="Mask enabled",
+    ),
+    FieldSpec(
+        name="mask_mode", tier="prespinup", env_var="DEEPAGENTS_MASK_MODE", profile_key="mask_mode",
+        default="deny", choices=("deny", "allow"), label="Mask mode",
+    ),
+    FieldSpec(
+        name="jail", tier="prespinup", env_var="DEEPAGENTS_JAIL", profile_key="jail",
+        cast=_to_bool, default=False, label="Jail",
+    ),
+    FieldSpec(
+        # No `choices`: any host-loaded AppArmor profile name is legal, plus the
+        # special "unconfined". An open set, so validation would be wrong.
+        name="jail_apparmor", tier="prespinup", env_var="DEEPAGENTS_JAIL_APPARMOR",
+        profile_key="jail_apparmor", default=None, label="AppArmor profile",
+    ),
+    FieldSpec(
+        name="cpus", tier="prespinup", env_var="CPUS", profile_key="cpus",
+        default="2", label="CPU limit",
+    ),
+    FieldSpec(
+        name="memory", tier="prespinup", env_var="MEMORY", profile_key="memory",
+        default="4g", label="Memory limit",
+    ),
+    FieldSpec(
+        name="pids_limit", tier="prespinup", env_var="PIDS_LIMIT", profile_key="pids_limit",
+        default="512", label="PIDs limit",
+    ),
+    FieldSpec(
+        name="net_jail", tier="prespinup", env_var="NET_JAIL", profile_key="net_jail",
+        cast=_to_bool, default=False, wizard="confirm",
+        label="Enable NetJail (deny-all egress + allowlist)?",
+    ),
+)
+
+SPECS_BY_NAME: dict[str, FieldSpec] = {s.name: s for s in FIELD_SPECS}
+
+# Specs the scalar precedence chain walks: everything with an env var. The two
+# without one (`hitl` and its dotted sub-fields) are the whole-object file tier.
+_RESOLVED_SPECS = tuple(s for s in FIELD_SPECS if s.env_var is not None)
+
+# --- everything below is DERIVED; do not hand-maintain ------------------------
+
+PROFILE_SPECS = tuple(s for s in FIELD_SPECS if s.profile_key is not None)
+PROFILE_FIELDS = frozenset(s.profile_key for s in PROFILE_SPECS)
+_PROFILE_SPECS_BY_KEY = {s.profile_key: s for s in PROFILE_SPECS}
+# Field ordering for a written profile file = registry order.
+_PROFILE_WRITE_ORDER = tuple(s.profile_key for s in PROFILE_SPECS)
+
+# The pre-spinup/in-session split (milestone5.md §3's table) -- the single
+# source of truth both /config's editor and `harness doctor`'s report filter
+# on, so the table in the milestone doc and the code can't drift apart.
+LIVE_FIELDS = frozenset(s.name for s in FIELD_SPECS if s.tier == "live" and "." not in s.name)
+
+# The knobs `harness config`'s custom-posture screen asks about, in order: every
+# persisted pre-spinup field. A new one appears in the wizard for free.
+WIZARD_PRESPINUP_SPECS = tuple(
+    s for s in PROFILE_SPECS if s.tier == "prespinup"
 )
 
 
@@ -367,42 +543,72 @@ class SettingsSources:
     net_jail: str = "default"
 
 
-# The pre-spinup/in-session split (milestone5.md §3's table) -- the single
-# source of truth both /config's editor and `harness doctor`'s report filter
-# on, so the table in the milestone doc and the code can't drift apart.
-LIVE_FIELDS = frozenset({"model", "thread_id", "topic", "max_cost", "max_tokens", "hitl"})
+def _check_choices(spec: FieldSpec, value, *, prefix: str = ""):
+    """Reject a value outside an enum knob's declared ``choices``.
+
+    The M5 gap this closes (milestone5.1.md §3.1): nothing knew a field's legal
+    values, so `mask_mode: alow` persisted, resolved, and then silently yielded
+    **deny** -- fail-safe, but the operator got the opposite of what they asked
+    for plus a success message. One check, every enum knob, every entry point."""
+    if spec.choices is not None and value not in spec.choices:
+        raise SystemExit(
+            f"{prefix}{spec.name} must be one of {spec.choices}, got {value!r}"
+        )
+    return value
 
 
-def _to_bool(value) -> bool:
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in _TRUTHY
-
-
-def _mask_enabled_cast(value) -> bool:
-    """Mirrors the pre-M5 semantics: mask is on unless the value is literally
-    ``"0"`` (``os.environ.get("DEEPAGENTS_MASK", "1").strip() != "0"``)."""
-    if isinstance(value, bool):
-        return value
-    return str(value).strip() != "0"
-
-
-def _resolve(cli_val, env_raw: str | None, profile_val, default, *, cast=str, env_name: str = ""):
+def _resolve(spec: FieldSpec, cli_val, env_raw: str | None, profile_val):
     """One field's precedence: CLI > env > profile > default (milestone5_spec.md §4).
 
-    `env_name` is carried purely so a bad env value names *which* variable was
-    bad -- an unqualified "invalid value '3x'" leaves the operator hunting."""
+    The env var name is carried on the spec purely so a bad env value names
+    *which* variable was bad -- an unqualified "invalid value '3x'" leaves the
+    operator hunting. The profile tier is not re-checked here: ``load_profile``
+    already casts and validates it against the file it came from, so its errors
+    can name the path."""
+    cast = spec.cast
     if cli_val is not None:
-        return cast(cli_val), "cli"
+        return _check_choices(spec, cast(cli_val)), "cli"
     if env_raw:
         try:
-            return cast(env_raw), "env"
+            value = cast(env_raw)
         except ValueError:
-            prefix = f"{env_name}: " if env_name else ""
+            prefix = f"{spec.env_var}: " if spec.env_var else ""
             raise SystemExit(f"{prefix}invalid value {env_raw!r}")
+        return _check_choices(spec, value, prefix=f"{spec.env_var}: "), "env"
     if profile_val is not None:
         return cast(profile_val), "profile"
-    return default, "default"
+    return spec.resolved_default(), "default"
+
+
+def _parse_profile_value(spec: FieldSpec, value: str, source: str):
+    """Parse one profile-file scalar with the strategy its spec's ``cast`` implies.
+
+    Strict where the env tier is lenient, deliberately: a file the operator wrote
+    by hand (or `harness config set` wrote for them) should fail loudly on
+    garbage, whereas ``_to_bool`` on an env var has always been "anything not
+    truthy is false". Keying off ``cast`` is what keeps the two from drifting --
+    there is no second per-cast bucket list to forget to update."""
+    cast = spec.cast
+    if cast is _to_bool:
+        parsed = _parse_bool(value, source)
+    elif cast is float:
+        try:
+            parsed = float(_scalar(value))
+        except ValueError:
+            _fail(source, f"{spec.profile_key} must be a number, got {value!r}")
+    elif cast is int:
+        try:
+            parsed = int(_scalar(value))
+        except ValueError:
+            _fail(source, f"{spec.profile_key} must be an integer, got {value!r}")
+    elif cast is str:
+        parsed = _scalar(value)
+    else:  # pragma: no cover - no profile field uses another cast today
+        try:
+            parsed = cast(_scalar(value))
+        except ValueError:
+            _fail(source, f"{spec.profile_key} has an invalid value {value!r}")
+    return _check_choices(spec, parsed, prefix=f"{source}: ")
 
 
 def load_profile(path: Path) -> dict:
@@ -433,20 +639,7 @@ def load_profile(path: Path) -> dict:
             _fail(source, f"unknown key {key!r}")
         if not value:
             continue  # blank value => unset, falls through to the next tier
-        if key in _PROFILE_BOOL_FIELDS:
-            values[key] = _parse_bool(value, source)
-        elif key in _PROFILE_FLOAT_FIELDS:
-            try:
-                values[key] = float(_scalar(value))
-            except ValueError:
-                _fail(source, f"{key} must be a number, got {value!r}")
-        elif key in _PROFILE_INT_FIELDS:
-            try:
-                values[key] = int(_scalar(value))
-            except ValueError:
-                _fail(source, f"{key} must be an integer, got {value!r}")
-        else:
-            values[key] = _scalar(value)
+        values[key] = _parse_profile_value(_PROFILE_SPECS_BY_KEY[key], value, source)
     return values
 
 
@@ -462,11 +655,15 @@ def save_profile(path: Path, values: dict) -> None:
     """Merge `values` into the on-disk profile at `path` and write atomically.
 
     Read-modify-write, so saving one field never clobbers others a prior save
-    (or the wizard) set. Unknown keys are rejected like ``load_profile`` does."""
+    (or the wizard) set. Unknown keys -- and, since M5.1, values outside an enum
+    field's ``choices`` -- are rejected before anything is written, so no writer
+    can produce a file that ``load_profile`` would then refuse."""
     path = Path(path)
     unknown = set(values) - PROFILE_FIELDS
     if unknown:
         raise SystemExit(f"{path}: unknown key(s) {sorted(unknown)!r}")
+    for key, value in values.items():
+        _check_choices(_PROFILE_SPECS_BY_KEY[key], value, prefix=f"{path}: ")
 
     merged = load_profile(path)
     merged.update(values)
@@ -534,34 +731,17 @@ def resolve_settings(
     values: dict = {}
     sources: dict = {}
 
-    def field(name: str, env_name: str, *, cast=str, default=None):
+    # One loop over the registry, in registry order (milestone5.1.md §4 R1) --
+    # the hand-listed `field(...)` block this replaced was edit site #6 of ten.
+    for spec in _RESOLVED_SPECS:
         v, s = _resolve(
-            cli_val(name), env.get(env_name), profile.get(name), default,
-            cast=cast, env_name=env_name,
+            spec,
+            cli_val(spec.name),
+            env.get(spec.env_var),
+            profile.get(spec.profile_key) if spec.profile_key else None,
         )
-        values[name] = v
-        sources[name] = s
-
-    field(
-        "thread_id",
-        "DEEPAGENTS_THREAD_ID",
-        cast=str,
-        default=f"session-{datetime.now():%Y%m%d-%H%M%S}",
-    )
-    field("model", "DEEPAGENTS_MODEL", cast=str, default=None)
-    field("topic", "DEEPAGENTS_TOPIC", cast=str, default=None)
-    field("max_cost", "DEEPAGENTS_MAX_COST", cast=float, default=None)
-    field("max_tokens", "DEEPAGENTS_MAX_TOKENS", cast=int, default=None)
-
-    field("headless", "DEEPAGENTS_HEADLESS", cast=_to_bool, default=False)
-    field("mask_enabled", "DEEPAGENTS_MASK", cast=_mask_enabled_cast, default=True)
-    field("mask_mode", "DEEPAGENTS_MASK_MODE", cast=str, default="deny")
-    field("jail", "DEEPAGENTS_JAIL", cast=_to_bool, default=False)
-    field("jail_apparmor", "DEEPAGENTS_JAIL_APPARMOR", cast=str, default=None)
-    field("cpus", "CPUS", cast=str, default="2")
-    field("memory", "MEMORY", cast=str, default="4g")
-    field("pids_limit", "PIDS_LIMIT", cast=str, default="512")
-    field("net_jail", "NET_JAIL", cast=_to_bool, default=False)
+        values[spec.name] = v
+        sources[spec.name] = s
 
     # hitl resolves as a whole object, not per-field: presence-of-file still
     # means HITL-on, untouched by this milestone (milestone5_spec.md §4).
@@ -570,3 +750,68 @@ def resolve_settings(
     sources["hitl"] = "profile" if hitl_conf is not None else "default"
 
     return Settings(**values), SettingsSources(**sources)
+
+
+# --- the one display renderer (milestone5.1.md §4 R3) -------------------------
+#
+# `cli._config_display_lines` and `config_cli.format_settings_lines` used to
+# render the same data twice, at two widths, with one `[harness] ` prefix --
+# same logic, drifting independently. Both are now thin wrappers over this.
+
+def format_config_lines(
+    settings: Settings,
+    sources: SettingsSources,
+    *,
+    prefix: str = "",
+    width: int = 16,
+    prespinup_header: str = "--- pre-spinup (fixed at container start) ---",
+    overrides: Mapping | None = None,
+    edited=(),
+) -> list[str]:
+    """Every knob, source-tagged: live fields first (registry order), then the
+    pre-spinup half read-only.
+
+    `overrides` carries the REPL's *session* values -- the live model/thread/
+    budget the process is actually running with, which have moved on from what
+    `resolve_settings` saw at startup. A name in `edited` is tagged ``session``
+    rather than with its original tier. Pure -- no I/O -- so both callers stay
+    host-testable without a terminal."""
+    overrides = overrides or {}
+
+    def fmt(name: str, value, source: str) -> str:
+        shown = "(unset)" if value in (None, "") else value
+        return f"{prefix}{name:<{width}} = {str(shown):<28} ({source})"
+
+    def value_of(name, fallback):
+        return overrides[name] if name in overrides else fallback
+
+    def source_of(name, tier_source):
+        return "session" if name in edited else tier_source
+
+    hitl_obj = value_of("hitl", settings.hitl)
+    lines: list[str] = []
+    for spec in FIELD_SPECS:
+        if spec.tier != "live":
+            continue
+        if spec.name == "hitl":
+            if hitl_obj is None:
+                lines.append(fmt("hitl", "off", sources.hitl))
+            continue
+        if "." in spec.name:
+            if hitl_obj is None:
+                continue  # HITL off => no sub-fields to show
+            attr = spec.name.split(".", 1)[1]
+            lines.append(fmt(spec.name, getattr(hitl_obj, attr), source_of(spec.name, sources.hitl)))
+            continue
+        lines.append(fmt(
+            spec.name,
+            value_of(spec.name, getattr(settings, spec.name)),
+            source_of(spec.name, getattr(sources, spec.name)),
+        ))
+
+    lines.append(f"{prefix}{prespinup_header}")
+    for spec in FIELD_SPECS:
+        if spec.tier != "prespinup":
+            continue
+        lines.append(fmt(spec.name, getattr(settings, spec.name), getattr(sources, spec.name)))
+    return lines

@@ -397,3 +397,192 @@ def test_save_profile_falls_back_to_in_place_write_when_rename_fails(tmp_path, m
 
     assert cfg.load_profile(path)["topic"] == "after"
     assert not (tmp_path / (cfg.PROFILE_NAME + ".tmp")).exists()  # scratch cleaned up
+
+
+# =============================================================================
+# Milestone 5.1: the field registry is the single declaration
+# =============================================================================
+#
+# These are the guards that make every later derivation safe: if a structure
+# that USED to be hand-written gets hand-written again, one of these fails.
+
+
+def _scalar_specs():
+    """Registry specs that correspond 1:1 to a `Settings` attribute (i.e. not
+    the dotted `hitl.*` sub-fields, which live in the other config file)."""
+    return tuple(s for s in cfg.FIELD_SPECS if "." not in s.name)
+
+
+def test_settings_dataclass_exactly_matches_the_registry():
+    """R1's load-bearing guard. `Settings` stays an explicit frozen dataclass
+    (fork 1: static types + `dataclasses.fields()` introspection cli.py depends
+    on), so a test -- not codegen -- has to hold the two in step. Order matters:
+    the display renderers iterate the registry, so a reorder there silently
+    reorders `/config`'s output."""
+    import dataclasses
+
+    registry = tuple(s.name for s in _scalar_specs())
+    assert tuple(f.name for f in dataclasses.fields(cfg.Settings)) == registry
+    assert tuple(f.name for f in dataclasses.fields(cfg.SettingsSources)) == registry
+
+
+def test_profile_field_set_and_write_order_are_derived():
+    assert cfg.PROFILE_FIELDS == frozenset(
+        s.profile_key for s in cfg.FIELD_SPECS if s.profile_key
+    )
+    assert cfg._PROFILE_WRITE_ORDER == tuple(
+        s.profile_key for s in cfg.FIELD_SPECS if s.profile_key
+    )
+    # The M5 exclusions, still excluded -- each for the reason recorded in its
+    # own spec comment rather than a module-level note three hundred lines away.
+    for name in ("thread_id", "headless", "mask_enabled", "hitl"):
+        assert cfg.SPECS_BY_NAME[name].profile_key is None
+        assert name not in cfg.PROFILE_FIELDS
+
+
+def test_live_fields_is_derived_from_tier():
+    assert cfg.LIVE_FIELDS == frozenset(
+        s.name for s in cfg.FIELD_SPECS if s.tier == "live" and "." not in s.name
+    )
+
+
+def test_every_scalar_spec_is_walked_by_the_resolver():
+    """The resolver loop keys on `env_var is not None`; the only specs without
+    one must be the whole-object HITL tier."""
+    unwalked = [s.name for s in cfg.FIELD_SPECS if s.env_var is None]
+    assert unwalked == ["hitl", "hitl.autonomy_level", "hitl.on_deny", "hitl.interruption_policy"]
+
+
+def test_registry_entries_are_internally_coherent():
+    for spec in cfg.FIELD_SPECS:
+        assert spec.tier in ("live", "prespinup"), spec.name
+        assert spec.label, f"{spec.name} needs a label for the wizard/picker"
+        if spec.profile_key is not None:
+            # The two names are kept equal on purpose: `resolve_settings` looks
+            # the profile value up by key and assigns it by name.
+            assert spec.profile_key == spec.name
+        if spec.choices is not None:
+            # `choices` means "exactly these strings are legal" -- it drives
+            # validation, so it must never sit on a lenient cast like _to_bool
+            # (which accepts 1/true/on and would reject the launchers' spelling).
+            assert spec.cast is str, spec.name
+            assert spec.default is None or spec.default in spec.choices, spec.name
+        if "." in spec.name:
+            assert spec.env_var is None and spec.profile_key is None, spec.name
+
+
+# --- enum validation, the one sanctioned behaviour change (§3.1) --------------
+
+
+def test_profile_rejects_an_invalid_enum_value(tmp_path):
+    """M5 shipped this as a known bug: `mask_mode: alow` parsed (str cast),
+    persisted, and resolved -- and `mask.resolve` then took the `else` branch,
+    silently yielding **deny**. Fail-safe but silent; now loud."""
+    p = tmp_path / cfg.PROFILE_NAME
+    p.write_text("mask_mode: alow\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="must be one of"):
+        cfg.load_profile(p)
+
+
+def test_save_profile_rejects_an_invalid_enum_before_writing(tmp_path):
+    """The shared writer refuses too, so no writer -- wizard, `/config save`, or
+    `harness config set` -- can produce a file `load_profile` would then refuse."""
+    p = tmp_path / cfg.PROFILE_NAME
+    with pytest.raises(SystemExit, match="must be one of"):
+        cfg.save_profile(p, {"mask_mode": "alow"})
+    assert not p.exists()  # nothing written, not written-then-rolled-back
+
+
+def test_profile_accepts_every_declared_choice(tmp_path):
+    for value in cfg.SPECS_BY_NAME["mask_mode"].choices:
+        p = tmp_path / cfg.PROFILE_NAME
+        p.write_text(f"mask_mode: {value}\n", encoding="utf-8")
+        assert cfg.load_profile(p)["mask_mode"] == value
+
+
+def test_env_rejects_an_invalid_enum_value(tmp_path):
+    with pytest.raises(SystemExit, match="DEEPAGENTS_MASK_MODE: mask_mode must be one of"):
+        cfg.resolve_settings(
+            env={"DEEPAGENTS_MASK_MODE": "alow"},
+            profile_path=tmp_path / "none.yaml",
+            hitl_path=tmp_path / "none-hitl.yaml",
+        )
+
+
+def test_cli_rejects_an_invalid_enum_value(tmp_path):
+    with pytest.raises(SystemExit, match="must be one of"):
+        cfg.resolve_settings(
+            cli={"mask_mode": "alow"},
+            env={},
+            profile_path=tmp_path / "none.yaml",
+            hitl_path=tmp_path / "none-hitl.yaml",
+        )
+
+
+def test_bool_knobs_still_accept_every_launcher_spelling(tmp_path):
+    """Guard against "fixing" the gap by giving bools a `choices` tuple: the
+    launchers pass `1`, `.env` files carry `true`, the wizard writes `on`."""
+    for raw in ("1", "true", "TRUE", "yes", "on"):
+        settings, _ = cfg.resolve_settings(
+            env={"DEEPAGENTS_JAIL": raw},
+            profile_path=tmp_path / "none.yaml",
+            hitl_path=tmp_path / "none-hitl.yaml",
+        )
+        assert settings.jail is True, raw
+
+
+# --- one renderer, two presentations (R3) --------------------------------------
+
+
+def test_format_config_lines_prefix_and_width_are_parameters(tmp_path):
+    settings, sources = cfg.resolve_settings(
+        env={}, profile_path=tmp_path / "none.yaml", hitl_path=tmp_path / "none-hitl.yaml"
+    )
+    narrow = cfg.format_config_lines(settings, sources)
+    wide = cfg.format_config_lines(settings, sources, prefix="[harness] ", width=24)
+    assert len(narrow) == len(wide)
+    assert narrow[0].startswith("model")
+    assert wide[0].startswith("[harness] model")
+
+    def field_names(lines):
+        return [l.split("=")[0].strip().removeprefix("[harness]").strip() for l in lines]
+
+    # Same fields, same order, same source tags -- only the presentation differs.
+    assert field_names(narrow) == field_names(wide)
+
+
+def test_format_config_lines_overrides_and_session_tags(tmp_path):
+    settings, sources = cfg.resolve_settings(
+        env={}, profile_path=tmp_path / "none.yaml", hitl_path=tmp_path / "none-hitl.yaml"
+    )
+    lines = cfg.format_config_lines(
+        settings, sources, overrides={"model": "openai:gpt-6"}, edited={"model"}
+    )
+    assert "openai:gpt-6" in lines[0] and "(session)" in lines[0]
+
+
+# --- R7: every persisted pre-spinup knob is read by BOTH launchers -------------
+
+
+def test_prespinup_profile_keys_are_consumed_by_both_launchers():
+    """A profile key nothing consumes is exactly the M5 §0.1 bug class: the
+    wizard writes `cpus:`/`net_jail:` and `docker run` never sees them. The
+    launchers stay hand-written (fork 3 -- run-docker needs no host Python), so
+    the duplication is guarded rather than removed."""
+    scripts = Path(__file__).resolve().parent.parent.parent / "scripts"
+    ps1, sh = scripts / "run-docker.ps1", scripts / "run-docker.sh"
+    if not (ps1.is_file() and sh.is_file()):
+        pytest.skip("launchers are host-side only (scripts/ is not COPYed into the image)")
+    ps1_text, sh_text = ps1.read_text(encoding="utf-8"), sh.read_text(encoding="utf-8")
+    for spec in cfg.WIZARD_PRESPINUP_SPECS:
+        assert spec.profile_key in ps1_text, f"run-docker.ps1 never reads {spec.profile_key!r}"
+        assert spec.profile_key in sh_text, f"run-docker.sh never reads {spec.profile_key!r}"
+
+
+def test_wizard_prespinup_specs_are_the_persisted_prespinup_half():
+    assert cfg.WIZARD_PRESPINUP_SPECS == tuple(
+        s for s in cfg.FIELD_SPECS if s.tier == "prespinup" and s.profile_key
+    )
+    assert [s.name for s in cfg.WIZARD_PRESPINUP_SPECS] == [
+        "mask_mode", "jail", "jail_apparmor", "cpus", "memory", "pids_limit", "net_jail",
+    ]

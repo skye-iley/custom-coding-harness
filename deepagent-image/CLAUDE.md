@@ -967,21 +967,55 @@ the baseline record of defaults when nothing else overrides it.
   `scripts/lib/config.{ps1,sh}` (reverting `run-docker` to direct env reads) and the harness is
   byte-for-byte pre-Milestone-5.
 
-- **⚠️ Known gap — enum values are not validated.** `harness config set mask_mode <anything>` is
-  accepted, persisted, and resolved: `_cmd_set` validates by round-tripping through `load_profile`,
-  which checks only the **cast**, and `mask_mode` is a `str` field. A typo'd `alow` then silently
-  resolves to `deny` (`mask.resolve` compares `mode == MODE_ALLOW` and falls to the `else`). It
-  **fails safe** — the restrictive mode is the fallback, so no security consequence — but it fails
-  silently, giving the operator the opposite of what they asked for plus a success message.
-  **Deferred to M5.1 on purpose**, which closes it for every enum knob at once via a `choices` tuple
-  on each field, rather than adding a twelfth hand-maintained per-field constant here
-  (`docs/milestones/planned/milestone5.1.md` §3.1). Don't patch it locally without reading that —
-  and if M5.1 is shelved, fix it directly. Only `mask_mode` is reachable this way: the `hitl.*`
-  fields are validated by `cli._CONFIG_HITL_VALIDATORS`, and the rest are free-text or bools
-  (which `load_profile` already rejects when malformed).
-
 See `docs/milestones/complete/milestone5.md` §0.2 for the full write-up, and the rest of that doc
 for the design/rationale.
+
+### The field registry (Milestone 5.1) — one declaration per knob
+
+M5 unified how a knob *resolves*; it did not unify how a knob is *declared*. Adding one was a
+ten-site edit across `config.py`/`cli.py`/`config_cli.py` where nine sites failed **silently**
+(miss `LIVE_FIELDS` and the field is classified pre-spinup; miss `_PROFILE_WRITE_ORDER` and
+`/config save` drops it; miss `_CONFIG_SETTABLE_FIELDS` and `/config set` calls it unknown).
+`config.FIELD_SPECS` is now the single declaration and everything derives from it.
+
+**Adding a config field = one `FieldSpec` entry** — plus, for a field settable in-session, one
+entry in `cli._LIVE_APPLIERS`. Nothing else. A test fails if you hand-write anything derivable.
+
+What derives: `PROFILE_FIELDS` + the profile write order + each field's file-parse strategy (from
+its `cast` — the four `_PROFILE_{BOOL,FLOAT,INT,STR}_FIELDS` bucket sets are gone), `LIVE_FIELDS`,
+`resolve_settings`'s loop, `config.format_config_lines` (the **one** renderer both
+`cli._config_display_lines` and `config_cli.format_settings_lines` now wrap), `/config set`'s
+settable/pre-spinup/nullable lists and its validators, and `harness config`'s custom-posture screen
+(`WIZARD_PRESPINUP_SPECS` — a new persisted pre-spinup knob gets a wizard question for free).
+
+Two things stay hand-written on purpose, each with a coverage test instead:
+- **The appliers** (`cli._LIVE_APPLIERS`) — an applier mutates the `CostTrackerMiddleware`, the
+  archive connection, and the rebuilt agent, and `config.py` imports none of those. `FieldSpec.settable`
+  is the declaration; the map is the behaviour; a test asserts they match **both ways**.
+- **The launchers** — `run-docker.{ps1,sh}` need no host Python (deliberate), so they resolve each
+  pre-spinup knob in pure shell. `test_prespinup_profile_keys_are_consumed_by_both_launchers`
+  asserts every persisted pre-spinup key appears in both, which replaced the two hand-picked
+  `pids_limit`/`net_jail` markers in `check-parity`.
+
+**`choices` is enum-only, never on a bool.** It means "exactly these strings are legal" and drives
+validation at *every* tier, so putting `("off","on")` on `jail` would reject `DEEPAGENTS_JAIL=1` —
+the spelling both launchers pass. Bools get their off/on wizard menu from `cast is _to_bool`
+instead. `test_registry_entries_are_internally_coherent` pins this.
+
+**Enum values are now validated at every point of entry** (the one behavior change M5.1 makes, and
+the fix for M5's known `mask_mode` gap): `harness config set mask_mode alow` exits 1 and writes
+nothing, a hand-edited `mask_mode: alow` in the profile fails loudly at load, and
+`DEEPAGENTS_MASK_MODE=alow` fails at resolve. Previously all three persisted and silently resolved
+to the *opposite* mode (`mask.resolve` compares `mode == MODE_ALLOW` and takes the `else`) — fail-safe,
+but with a success message.
+
+**`/config set <enum-field>` with no value opens an arrow-key picker** over that field's `choices`
+(`cli._arrow_select`, widened from M3's `choose`-request menu). Esc, no `prompt_toolkit`, or a
+non-TTY falls back to the unchanged `usage: /config set <field> <value>` error. Free-text fields
+(`model`, `topic`, …) have no picker — a picker over arbitrary prior strings is a different feature.
+
+Full write-up: `docs/milestones/in-progress/milestone5.1.md`; the checkable properties (and which
+test pins each) are in `milestone5.1_invariants.md` beside it.
 
 ## Interactive REPL Commands (in-container)
 

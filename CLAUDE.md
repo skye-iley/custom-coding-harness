@@ -73,16 +73,23 @@ secret-safe containers.
     re-exec overmounts masked paths empty rather than raising an explicit denial, so every
     `PathGuardDenied` is still a true escape and still never approvable. Folds into `milestone4.md` on
     completion.)*
+    - `milestone5.1.md` (+ `milestone5.1_invariants.md`) — **Config Field Registry**: follow-on
+      refactor of Milestone 5. M5 unified *resolution* but not *declaration* — a knob was spelled
+      out in ten places, nine of which failed silently if missed, and no field carried its own
+      valid values, which is what blocked the arrow-key `/config` menu M5 scoped out. One
+      `FieldSpec` table (`harness/config.py`) is now the single declaration; `Settings`, profile
+      I/O, the resolver loop, both display renderers, `/config set` dispatch, the wizard screens,
+      and the picker all derive from it. **Built** — slices R1–R7 all landed. Behavior-preserving
+      by construction: the M5 suite was the oracle and passed **with zero test edits**, so an
+      edited test that isn't asserting a now-derived constant is a red flag. §0.1 records two
+      deliberate deviations (the applier map lives in `cli.py`, not on the spec, because an
+      applier touches the tracker/archive/agent that `config.py` must not import; and
+      `_handle_config` keeps its 3-tuple return as an adapter over the new `LiveContext`). The one
+      sanctioned behavior change: **every enum knob now rejects an invalid value at the point of
+      entry**, closing M5's known `mask_mode: alow` → silently-`deny` gap for profile, env, and CLI
+      at once. See the "Unified config" section in `deepagent-image/CLAUDE.md`.
   - `docs/milestones/planned/` — **not-yet-built** milestones (docs only). Wins over `design_doc.md`
-    for "what we build next."
-    - `milestone5.1.md` — **Config Field Registry**: follow-on refactor of Milestone 5. M5 unified
-      *resolution* but not *declaration* — a knob is spelled out in ten places, nine of which fail
-      silently if missed, and no field carries its own valid values, which is what actually blocks
-      the arrow-key `/config` menu M5 scoped out. One `FieldSpec` table becomes the single
-      declaration; `Settings`, profile I/O, the resolver loop, both display renderers, `/config
-      set` dispatch, the wizard screens, and the new picker all derive from it. Behavior-preserving
-      by construction — the M5 suite (604 host + 85 image tests) is the oracle and must pass
-      unchanged, so an edited test that isn't asserting a now-derived constant is a red flag.
+    for "what we build next." *(Currently empty — `milestone5.1.md` moved to `in-progress/`.)*
   - `docs/features/workspace_visibility.md` — **named feature plan** (not a numbered milestone): restrict
     which workspace paths an agent can see (`.agentignore` policy, designated-secret floor, docker-mask
     → bwrap fs-tool jail → optional overlayfs). **Planned** — summarized in `design_doc.md` §2.

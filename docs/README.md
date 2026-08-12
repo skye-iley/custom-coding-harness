@@ -35,12 +35,7 @@ A milestone moves through three folders. What each stage carries is deliberate:
 
 ## Planned milestones — `milestones/planned/`
 
-- **`milestone5.1.md`** — **Config Field Registry**: follow-on refactor of `milestone5.md`. M5 put
-  every run knob behind one precedence chain but not behind one *declaration* — adding a knob is a
-  ten-site edit where nine sites fail silently, and no field knows its own valid values, which is
-  what blocks the arrow-key `/config` menu M5 scoped out. Replaces the duplication with one
-  `FieldSpec` table everything derives from, then adds the picker on top. Behavior-preserving by
-  construction: the M5 test suite is the oracle and must pass unchanged.
+*(Empty — `milestone5.1.md` moved to `in-progress/` when its build started.)*
 
 ## In-progress milestones — `milestones/in-progress/`
 
@@ -67,6 +62,18 @@ A milestone moves through three folders. What each stage carries is deliberate:
 - **`milestone4_invariants.md`** — the checkable invariants the M4 boundary must satisfy
   (floor / mask / path-guard / interrupt / git-pr / state-isolation / regression / structural),
   the test-facing companion to `milestone4.md`. Folds into `milestone4.md` on completion.
+- **`milestone5.1.md`** — **Config Field Registry**: follow-on refactor of `milestone5.md`. M5 put
+  every run knob behind one precedence chain but not behind one *declaration* — adding a knob was a
+  ten-site edit where nine sites failed silently, and no field knew its own valid values, which is
+  what blocked the arrow-key `/config` menu M5 scoped out. One `FieldSpec` table is now the single
+  declaration; `Settings`, profile I/O, the resolver, both display renderers, `/config set`
+  dispatch, the wizard screens, and the new picker all derive from it. **Built — R1–R7 all landed**
+  on `feat/milestone5.1-config-field-registry`, with the M5 suite passing **unedited** (§0.2), plus
+  the one sanctioned behavior change: every enum knob now rejects an invalid value at the point of
+  entry, closing the M5 §0.2 gap where `mask_mode: alow` persisted and silently resolved to `deny`.
+- **`milestone5.1_invariants.md`** — the checkable properties behind that claim: derivation
+  (nothing that should derive is hand-written), behavior preservation, the enum-validation change,
+  and the picker's fallbacks. Test-facing companion; folds into `milestone5.1.md` on completion.
 
 ## Complete milestones — `milestones/complete/`
 

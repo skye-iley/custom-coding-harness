@@ -42,8 +42,11 @@ from harness.config import (
     CONFIG_NAME,
     PROFILE_FIELDS,
     PROFILE_NAME,
+    WIZARD_PRESPINUP_SPECS,
     Settings,
     SettingsSources,
+    _to_bool,
+    format_config_lines,
     load_profile,
     resolve_settings,
     save_profile,
@@ -52,31 +55,14 @@ from harness.providers import PROVIDERS, provider_available
 
 # --- pure formatting / parsing (host-testable, no I/O) ------------------------
 
-_DISPLAY_LIVE_FIELDS = ("model", "thread_id", "topic", "max_cost", "max_tokens")
-_DISPLAY_PRESPINUP_FIELDS = (
-    "headless", "mask_enabled", "mask_mode", "jail",
-    "jail_apparmor", "cpus", "memory", "pids_limit", "net_jail",
-)
-
-
 def format_settings_lines(settings: Settings, sources: SettingsSources) -> list[str]:
     """The lines `harness config show` prints: every `Settings` field,
-    source-tagged, live fields first then pre-spinup. Pure -- no I/O -- so
-    it's testable without touching the filesystem or a terminal."""
+    source-tagged, live fields first then pre-spinup.
 
-    def fmt(name: str, value, source: str) -> str:
-        shown = "(unset)" if value in (None, "") else value
-        return f"{name:<16} = {str(shown):<28} ({source})"
-
-    lines = [fmt(f, getattr(settings, f), getattr(sources, f)) for f in _DISPLAY_LIVE_FIELDS]
-    if settings.hitl is None:
-        lines.append(fmt("hitl", "off", sources.hitl))
-    else:
-        for f in ("autonomy_level", "on_deny", "interruption_policy"):
-            lines.append(fmt(f"hitl.{f}", getattr(settings.hitl, f), sources.hitl))
-    lines.append("--- pre-spinup (fixed at container start) ---")
-    lines.extend(fmt(f, getattr(settings, f), getattr(sources, f)) for f in _DISPLAY_PRESPINUP_FIELDS)
-    return lines
+    A thin wrapper over the one registry-driven renderer (milestone5.1.md §4
+    R3) -- this used to be a second implementation of `cli._config_display_lines`
+    at a different width, and the two drifted independently."""
+    return format_config_lines(settings, sources)
 
 
 # --- numbered-choice prompt primitives ----------------------------------------
@@ -340,6 +326,36 @@ def _wizard_model_step() -> str | None:
     return None if choice == options[-1] else choice
 
 
+def _ask_field(spec) -> object:
+    """One wizard question, rendered from the field's own spec (milestone5.1.md
+    §4 R5). Three shapes, all derived rather than hand-written per knob:
+
+    - ``wizard="confirm"``  -> a y/N question.
+    - enum (``choices``) or bool (``_to_bool`` cast) -> a numbered menu; the
+      answer goes back through the field's own cast, so ``"on"``/``"off"``
+      become real booleans by the same ``_TRUTHY`` rule every other tier uses.
+    - anything else -> a text prompt carrying its default in brackets, or
+      ``(blank = auto)`` where the default is "unset".
+
+    Returns the field's default on blank input, which for a ``default=None``
+    field means "not written" -- the caller drops it.
+    """
+    if spec.wizard == "confirm":
+        return _confirm(spec.label, default=bool(spec.default))
+    options = spec.choices or (("off", "on") if spec.cast is _to_bool else None)
+    if options is not None:
+        default_index = 0
+        current = spec.default
+        for i, opt in enumerate(options):
+            if spec.cast(opt) == current:
+                default_index = i
+                break
+        return spec.cast(_numbered_choice(f"{spec.label}:", list(options), default_index=default_index))
+    hint = f"[{spec.default}]" if spec.default is not None else "(blank = auto)"
+    raw = input(f"{spec.label} {hint}: ").strip()
+    return spec.cast(raw) if raw else spec.default
+
+
 def _wizard_security_step() -> dict:
     values: dict = {}
     posture = _numbered_choice(
@@ -351,6 +367,9 @@ def _wizard_security_step() -> dict:
         ],
         default_index=0,
     )
+    # The postures stay hand-written on purpose: they are opinions about
+    # *combinations* of knobs, which is exactly what a per-field registry can't
+    # express and shouldn't try to (milestone5.1.md §4 R5).
     if posture.startswith("default"):
         # Write the values explicitly rather than returning an empty diff: an
         # empty diff leaves a previously-saved `jail: true` in place, so the
@@ -362,15 +381,12 @@ def _wizard_security_step() -> dict:
         values["mask_mode"] = "deny"
         values["jail"] = True
     elif posture.startswith("custom"):
-        values["mask_mode"] = _numbered_choice("Mask mode:", ["deny", "allow"], default_index=0)
-        values["jail"] = _numbered_choice("Jail:", ["off", "on"], default_index=0) == "on"
-        apparmor = input("AppArmor profile (blank = auto): ").strip()
-        if apparmor:
-            values["jail_apparmor"] = apparmor
-        values["cpus"] = input("CPU limit [2]: ").strip() or "2"
-        values["memory"] = input("Memory limit [4g]: ").strip() or "4g"
-        values["pids_limit"] = input("PIDs limit [512]: ").strip() or "512"
-        values["net_jail"] = _confirm("Enable NetJail (deny-all egress + allowlist)?", default=False)
+        # Every persisted pre-spinup knob, in registry order. A new one appears
+        # here for free -- no edit to this function.
+        for spec in WIZARD_PRESPINUP_SPECS:
+            answer = _ask_field(spec)
+            if answer is not None:
+                values[spec.name] = answer
     return values
 
 
@@ -578,9 +594,13 @@ def _cmd_set(field: str, value: str) -> int:
         return 1
     profile_path = Path.cwd() / PROFILE_NAME
     before = profile_path.read_text(encoding="utf-8") if profile_path.exists() else None
-    save_profile(profile_path, {field: value})
     try:
-        load_profile(profile_path)  # re-validate the merged file round-trips cleanly
+        # `save_profile` rejects an out-of-`choices` value up front (nothing hits
+        # disk); `load_profile` then re-validates the merged file round-trips
+        # cleanly, which is what catches a bad cast. Both raise SystemExit, so
+        # one handler covers both and the rollback below is correct either way.
+        save_profile(profile_path, {field: value})
+        load_profile(profile_path)
     except SystemExit as exc:
         if before is None:
             profile_path.unlink(missing_ok=True)

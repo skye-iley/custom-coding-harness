@@ -55,12 +55,14 @@ markers=(
   "DEEPAGENTS_JAIL_APPARMOR"
   # M5: the profile file must be MOUNTED (it is gitignored, so it is not in the
   # image's COPY list -- without the mount the container's resolve_settings()
-  # never sees a profile tier and `/config save` writes to a throwaway layer),
-  # and the resource caps / NetJail must resolve THROUGH the profile (they were
-  # written by `harness config security` and read by nothing).
+  # never sees a profile tier and `/config save` writes to a throwaway layer).
+  #
+  # M5.1 R7: the "every pre-spinup profile key is actually READ by both
+  # launchers" half of this used to be two hand-picked markers here
+  # (pids_limit/net_jail). It is now derived from the field registry --
+  # test_config.py::test_prespinup_profile_keys_are_consumed_by_both_launchers
+  # checks ALL of them, so a new knob is covered without editing this list.
   "/project/.harness-profile.yaml"
-  "pids_limit"
-  "net_jail"
   # The caps are docker flags, not env vars, so the container can only report
   # them truthfully in `/config` if they are forwarded explicitly.
   "PIDS_LIMIT="
