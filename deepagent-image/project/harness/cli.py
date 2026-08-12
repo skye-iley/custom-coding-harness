@@ -33,12 +33,10 @@ from harness import (
     resilience,
 )
 from harness.config import (
-    AUTONOMY_LEVELS,
-    INTERRUPTION_POLICIES,
-    LIVE_FIELDS,
-    ON_DENY_MODES,
+    FIELD_SPECS,
     PROFILE_NAME,
-    Settings,
+    SPECS_BY_NAME,
+    format_config_lines,
     resolve_settings,
     save_profile,
 )
@@ -279,14 +277,19 @@ def _read_line(session, prompt_str: str) -> str:
     return session.prompt(prompt_str)
 
 
-def _arrow_select(request):
-    """S6 PR-b: an inline arrow-key menu over a `choose` request's options.
+def _arrow_select(options, *, header: str | None = None):
+    """S6 PR-b: an inline arrow-key menu over a plain list of options.
 
     Returns the picked option string, or ``None`` to fall back to typed input
     (menu cancelled with Esc/Ctrl-C, or prompt_toolkit unavailable). Non-full-screen
     so it renders in place above the prompt and leaves the scrollback intact. Only
     wired for an interactive TTY (see `_build_hitl_ctx`), so the None fallback also
-    covers the no-prompt_toolkit host."""
+    covers the no-prompt_toolkit host.
+
+    Milestone 5.1 R6 widened this from a `choose` `InterruptRequest` to a bare
+    options list, which is what lets `/config set <enum-field>` reuse it: M5
+    declined to, correctly, because no config field carried a value list --
+    `FieldSpec.choices` is that list."""
     try:
         from prompt_toolkit.application import Application
         from prompt_toolkit.key_binding import KeyBindings
@@ -296,11 +299,13 @@ def _arrow_select(request):
     except Exception:  # noqa: BLE001 - no prompt_toolkit => typed fallback
         return None
 
-    options = list(request.options)
+    options = list(options)
     state = {"idx": 0}
 
     def _menu():
         rows = []
+        if header:
+            rows.append(("", f"{header}\n"))
         for i, opt in enumerate(options):
             selected = i == state["idx"]
             rows.append((
@@ -660,25 +665,24 @@ def _handle_refresh(workspace: Path | None, line: str) -> None:
 
 # --- Milestone 5, C5: /config REPL command ------------------------------------
 #
-# Live subset only (config.LIVE_FIELDS + the three hitl.* sub-fields) -- the
-# pre-spinup half (mask/jail/caps/...) is fixed for this container's lifetime
-# and shown read-only; edit it via `harness config` before the *next* launch.
+# Live subset only (the registry's tier="live" specs) -- the pre-spinup half
+# (mask/jail/caps/...) is fixed for this container's lifetime and shown
+# read-only; edit it via `harness config` before the *next* launch.
+#
+# Milestone 5.1: every list below is DERIVED from config.FIELD_SPECS. They were
+# four separate hand-written tuples, three of which failed silently when a new
+# field missed them (milestone5.1.md §3).
 
-_CONFIG_SETTABLE_FIELDS = (
-    "model", "thread_id", "topic", "max_cost", "max_tokens",
-    "hitl.autonomy_level", "hitl.on_deny", "hitl.interruption_policy",
-)
-# Derived from LIVE_FIELDS + the Settings dataclass, not hand-duplicated, so the
-# pre-spinup/in-session split (milestone5.md §3's table) can't drift out of sync
-# with config.py's own single source of truth (milestone5_invariants.md #4).
-_CONFIG_PRESPINUP_FIELDS = tuple(
-    f.name for f in dataclasses.fields(Settings) if f.name not in LIVE_FIELDS
-)
+_CONFIG_SETTABLE_SPECS = tuple(s for s in FIELD_SPECS if s.settable)
+_CONFIG_SETTABLE_FIELDS = tuple(s.name for s in _CONFIG_SETTABLE_SPECS)
+_CONFIG_PRESPINUP_FIELDS = tuple(s.name for s in FIELD_SPECS if s.tier == "prespinup")
 _CONFIG_HITL_VALIDATORS = {
-    "hitl.autonomy_level": AUTONOMY_LEVELS,
-    "hitl.on_deny": ON_DENY_MODES,
-    "hitl.interruption_policy": INTERRUPTION_POLICIES,
+    s.name: s.choices for s in FIELD_SPECS if s.name.startswith("hitl.") and s.choices
 }
+# Live fields that are legitimately nullable, so a bare `/config set <field>`
+# means "clear it" rather than a usage error. `topic` is the only one: a session
+# could otherwise be tagged but never untagged.
+_CONFIG_UNSETTABLE_FIELDS = tuple(s.name for s in FIELD_SPECS if s.nullable)
 
 
 def _parse_config_command(line: str) -> tuple[str, list[str]]:
@@ -689,12 +693,6 @@ def _parse_config_command(line: str) -> tuple[str, list[str]]:
     if not tokens:
         return "", []
     return tokens[0], tokens[1:]
-
-
-# Live fields that are legitimately nullable, so a bare `/config set <field>`
-# means "clear it" rather than a usage error. `topic` is the only one: a session
-# could otherwise be tagged but never untagged.
-_CONFIG_UNSETTABLE_FIELDS = ("topic",)
 
 
 def _parse_config_set_args(args: list[str]) -> tuple[str, str | None]:
@@ -734,31 +732,30 @@ def _config_display_lines(
     "session" once `/config set` has touched a field this run, else whatever
     parse_args originally resolved it from), then the pre-spinup half
     read-only. Pure given plain values -- no I/O -- so it's host-testable
-    without a terminal or a real running agent."""
+    without a terminal or a real running agent.
 
-    def fmt(name: str, value, source: str) -> str:
-        shown = "(unset)" if value in (None, "") else value
-        return f"[harness] {name:<24} = {str(shown):<28} ({source})"
-
-    lines = [
-        fmt("model", current_model, "session" if "model" in edited else sources.model),
-        fmt("thread_id", thread_id, "session" if "thread_id" in edited else sources.thread_id),
-        fmt("topic", topic, "session" if "topic" in edited else sources.topic),
-        fmt("max_cost", max_cost, "session" if "max_cost" in edited else sources.max_cost),
-        fmt("max_tokens", max_tokens, "session" if "max_tokens" in edited else sources.max_tokens),
-    ]
-    if hitl_conf is None:
-        lines.append(fmt("hitl", "off", sources.hitl))
-    else:
-        for field in ("autonomy_level", "on_deny", "interruption_policy"):
-            key = f"hitl.{field}"
-            lines.append(fmt(key, getattr(hitl_conf, field), "session" if key in edited else sources.hitl))
-    lines.append(
-        "[harness] --- pre-spinup (fixed for this container; edit via `harness config` before next launch) ---"
+    A thin wrapper over the one registry-driven renderer (milestone5.1.md §4
+    R3); the REPL's live values are passed as `overrides` because they have
+    moved on from what `resolve_settings` saw at startup."""
+    return format_config_lines(
+        settings,
+        sources,
+        prefix="[harness] ",
+        width=24,
+        prespinup_header=(
+            "--- pre-spinup (fixed for this container; edit via `harness config` "
+            "before next launch) ---"
+        ),
+        overrides={
+            "model": current_model,
+            "thread_id": thread_id,
+            "topic": topic,
+            "max_cost": max_cost,
+            "max_tokens": max_tokens,
+            "hitl": hitl_conf,
+        },
+        edited=edited,
     )
-    for field in _CONFIG_PRESPINUP_FIELDS:
-        lines.append(fmt(field, getattr(settings, field), getattr(sources, field)))
-    return lines
 
 
 def _reprice_tracker(tracker: CostTrackerMiddleware | None, new_model: str) -> None:
@@ -784,6 +781,122 @@ def _reprice_tracker(tracker: CostTrackerMiddleware | None, new_model: str) -> N
         new_model[len(provider.prefix):] if provider else new_model,
         provider.rates_for(new_model) if provider else None,
     )
+
+
+@dataclasses.dataclass
+class LiveContext:
+    """What a live field's applier is allowed to touch: the objects the REPL
+    already holds. Mutating a context is what lets `_handle_config` stop
+    growing a return-tuple slot per field (milestone5.1.md §4 R4) -- the
+    3-tuple it still returns is an adapter over `current_model`/`new_agent`/
+    `topic`, not the place new fields have to be threaded through."""
+
+    config: dict
+    current_model: str
+    topic: str | None
+    tracker: CostTrackerMiddleware | None
+    hitl_conf: object
+    rebuild_agent: object
+    edited: set
+    archive_conn: object = None
+    run_id: str | None = None
+    new_agent: object = None
+
+
+def _apply_model(ctx: LiveContext, spec, value) -> None:
+    if ctx.rebuild_agent is None:
+        _stage("config: model switch unavailable in this context")
+        return
+    try:
+        new_agent = ctx.rebuild_agent(value)
+    except SystemExit as exc:
+        _stage(f"config: model switch to {value!r} failed: {exc}")
+        return
+    # Re-point the cost tracker at the new model's rates. The tracker caches
+    # pricing/rates/name at construction, so without this every post-switch
+    # turn would be billed at the launch model's rates and reported under the
+    # launch model's name.
+    _reprice_tracker(ctx.tracker, value)
+    # Re-tag the ledger row too, or the whole run stays attributed to the
+    # launch model. Split here, not in archive.py: that module imports
+    # neither providers nor cost (acyclic rule), so it takes plain strings --
+    # the same split main() does before start_session.
+    if ctx.archive_conn is not None and ctx.run_id is not None:
+        new_provider = provider_for(value)
+        archive.set_model(
+            ctx.archive_conn,
+            ctx.run_id,
+            new_provider.prefix.rstrip(":") if new_provider else None,
+            value[len(new_provider.prefix):] if new_provider else value,
+        )
+    old = ctx.current_model
+    ctx.current_model = value
+    ctx.new_agent = new_agent
+    ctx.edited.add("model")
+    _stage(f"config: model {old} -> {value} (this session only; /config save to persist)")
+
+
+def _apply_thread_id(ctx: LiveContext, spec, value) -> None:
+    old = ctx.config["configurable"]["thread_id"]
+    ctx.config["configurable"]["thread_id"] = value
+    ctx.edited.add("thread_id")
+    _stage(f"config: thread_id {old} -> {value} (takes effect on the next turn)")
+
+
+def _apply_topic(ctx: LiveContext, spec, value) -> None:
+    old = ctx.topic
+    # Same write `/topic` makes -- reused, not duplicated -- so the two paths
+    # to the same knob can't persist differently.
+    if ctx.archive_conn is not None and ctx.run_id is not None:
+        archive.set_topic(ctx.archive_conn, ctx.run_id, value)
+    ctx.topic = value
+    ctx.edited.add("topic")
+    shown = value if value is not None else "(unset)"
+    _stage(f"config: topic {old} -> {shown} (this session only; /config save to persist)")
+
+
+def _apply_budget(ctx: LiveContext, spec, value) -> None:
+    if ctx.tracker is None:
+        _stage("config: no cost tracker active this session -- restart with a budget or a priced model to enable one")
+        return
+    try:
+        parsed = spec.cast(value)
+    except ValueError:
+        _stage(f"config: {spec.name} must be a number, got {value!r}")
+        return
+    setattr(ctx.tracker, f"_{spec.name}", parsed)
+    ctx.edited.add(spec.name)
+    _stage(f"config: {spec.name} -> {parsed} (this session only; /config save to persist)")
+
+
+def _apply_hitl(ctx: LiveContext, spec, value) -> None:
+    # Mutate the live (frozen) HitlSection PauseMiddleware already holds a
+    # reference to, so it applies to the next gated call, no rebuild.
+    if ctx.hitl_conf is None:
+        _stage("config: HITL is off this run (no .harness-config.yaml) -- nothing to edit")
+        return
+    attr = spec.name.split(".", 1)[1]
+    old = getattr(ctx.hitl_conf, attr)
+    object.__setattr__(ctx.hitl_conf, attr, value)
+    ctx.edited.add(spec.name)
+    _stage(f"config: {spec.name} {old} -> {value} (this session only; /config save to persist)")
+
+
+# Behaviour, keyed by the registry's own field names. It lives here rather than
+# on the FieldSpec because an applier touches the tracker / archive / agent, and
+# `config.py` imports none of those (the acyclic rule). `test_cli` asserts the
+# two agree exactly in both directions, so a settable field with no applier --
+# or an applier naming no field -- fails CI rather than review.
+_LIVE_APPLIERS = {
+    "model": _apply_model,
+    "thread_id": _apply_thread_id,
+    "topic": _apply_topic,
+    "max_cost": _apply_budget,
+    "max_tokens": _apply_budget,
+    "hitl.autonomy_level": _apply_hitl,
+    "hitl.on_deny": _apply_hitl,
+    "hitl.interruption_policy": _apply_hitl,
+}
 
 
 def _handle_config(
@@ -885,90 +998,44 @@ def _handle_config(
         _stage(f"config: unknown subcommand {subcommand!r} (use /config, /config set, or /config save)")
         return current_model, None, topic
 
+    # A bare `/config set <field>` on an enum field opens the arrow-key picker
+    # (milestone5.1.md §4 R6). Esc, no prompt_toolkit, or a non-TTY returns None
+    # and falls through to the same usage error the typed path has always given.
+    if len(args) == 1:
+        spec = SPECS_BY_NAME.get(args[0])
+        if spec is not None and spec.settable and spec.choices:
+            picked = _arrow_select(list(spec.choices), header=f"{spec.label}:")
+            if picked is None:
+                _stage("config: usage: /config set <field> <value>")
+                return current_model, None, topic
+            args = [args[0], picked]
+
     try:
         field, value = _parse_config_set_args(args)
     except ValueError as exc:
         _stage(f"config: {exc}")
         return current_model, None, topic
 
-    if field == "model":
-        if rebuild_agent is None:
-            _stage("config: model switch unavailable in this context")
-            return current_model, None, topic
-        try:
-            new_agent = rebuild_agent(value)
-        except SystemExit as exc:
-            _stage(f"config: model switch to {value!r} failed: {exc}")
-            return current_model, None, topic
-        # Re-point the cost tracker at the new model's rates. The tracker caches
-        # pricing/rates/name at construction, so without this every post-switch
-        # turn would be billed at the launch model's rates and reported under the
-        # launch model's name.
-        _reprice_tracker(tracker, value)
-        # Re-tag the ledger row too, or the whole run stays attributed to the
-        # launch model. Split here, not in archive.py: that module imports
-        # neither providers nor cost (acyclic rule), so it takes plain strings --
-        # the same split main() does before start_session.
-        if archive_conn is not None and run_id is not None:
-            new_provider = provider_for(value)
-            archive.set_model(
-                archive_conn,
-                run_id,
-                new_provider.prefix.rstrip(":") if new_provider else None,
-                value[len(new_provider.prefix):] if new_provider else value,
-            )
-        edited.add("model")
-        _stage(f"config: model {current_model} -> {value} (this session only; /config save to persist)")
-        return value, new_agent, topic
-
-    if field == "thread_id":
-        old = config["configurable"]["thread_id"]
-        config["configurable"]["thread_id"] = value
-        edited.add("thread_id")
-        _stage(f"config: thread_id {old} -> {value} (takes effect on the next turn)")
+    spec = SPECS_BY_NAME[field]
+    # One validation, every enum knob -- the registry's `choices` is the only
+    # place valid values are written down now (milestone5.1.md §3.1).
+    if spec.choices is not None and value not in spec.choices:
+        _stage(f"config: {field} must be one of {spec.choices}, got {value!r}")
         return current_model, None, topic
 
-    if field == "topic":
-        old = topic
-        # Same write `/topic` makes -- reused, not duplicated -- so the two paths
-        # to the same knob can't persist differently.
-        if archive_conn is not None and run_id is not None:
-            archive.set_topic(archive_conn, run_id, value)
-        edited.add("topic")
-        shown = value if value is not None else "(unset)"
-        _stage(f"config: topic {old} -> {shown} (this session only; /config save to persist)")
-        return current_model, None, value
-
-    if field in ("max_cost", "max_tokens"):
-        if tracker is None:
-            _stage("config: no cost tracker active this session -- restart with a budget or a priced model to enable one")
-            return current_model, None, topic
-        try:
-            cast = float if field == "max_cost" else int
-            parsed = cast(value)
-        except ValueError:
-            _stage(f"config: {field} must be a number, got {value!r}")
-            return current_model, None, topic
-        setattr(tracker, f"_{field}", parsed)
-        edited.add(field)
-        _stage(f"config: {field} -> {parsed} (this session only; /config save to persist)")
-        return current_model, None, topic
-
-    # hitl.* -- mutate the live (frozen) HitlSection PauseMiddleware already
-    # holds a reference to, so it applies to the next gated call, no rebuild.
-    if hitl_conf is None:
-        _stage("config: HITL is off this run (no .harness-config.yaml) -- nothing to edit")
-        return current_model, None, topic
-    valid = _CONFIG_HITL_VALIDATORS[field]
-    if value not in valid:
-        _stage(f"config: {field} must be one of {valid}, got {value!r}")
-        return current_model, None, topic
-    attr = field.split(".", 1)[1]
-    old = getattr(hitl_conf, attr)
-    object.__setattr__(hitl_conf, attr, value)
-    edited.add(field)
-    _stage(f"config: {field} {old} -> {value} (this session only; /config save to persist)")
-    return current_model, None, topic
+    ctx = LiveContext(
+        config=config,
+        current_model=current_model,
+        topic=topic,
+        tracker=tracker,
+        hitl_conf=hitl_conf,
+        rebuild_agent=rebuild_agent,
+        edited=edited,
+        archive_conn=archive_conn,
+        run_id=run_id,
+    )
+    _LIVE_APPLIERS[field](ctx, spec, value)
+    return ctx.current_model, ctx.new_agent, ctx.topic
 
 
 def _cost_totals_for_row(tracker: CostTrackerMiddleware | None):
@@ -1092,7 +1159,7 @@ def _build_hitl_ctx(hitl_conf, workspace: Path, session, interactive: bool, head
         # index/name — the channel handles the fallback.
         channel = hitl.ReplChannel(
             read_line=lambda prompt: _read_line(session, prompt),
-            select=_arrow_select if session is not None else None,
+            select=(lambda req: _arrow_select(req.options)) if session is not None else None,
         )
     return hitl.HitlContext(
         config=hitl_conf, workspace=workspace, channel=channel, headless=headless

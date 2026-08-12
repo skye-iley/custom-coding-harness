@@ -1217,3 +1217,127 @@ def test_config_set_model_reprices_the_tracker(tmp_path, monkeypatch):
         edited=set(),
     )
     assert tracker.bare_model == "claude-haiku-4-5"
+
+
+# =============================================================================
+# Milestone 5.1: /config's lists and dispatch derive from the registry
+# =============================================================================
+
+
+def test_config_settable_fields_derived_from_registry():
+    assert cli._CONFIG_SETTABLE_FIELDS == tuple(
+        s.name for s in cfg.FIELD_SPECS if s.settable
+    )
+
+
+def test_config_hitl_validators_derived_from_choices():
+    """`_CONFIG_HITL_VALIDATORS` was the only place any field's valid values
+    were written down (milestone5.1.md §3.1). It is now a view of `choices`."""
+    assert cli._CONFIG_HITL_VALIDATORS == {
+        s.name: s.choices
+        for s in cfg.FIELD_SPECS
+        if s.name.startswith("hitl.") and s.choices
+    }
+
+
+def test_config_unsettable_fields_derived_from_nullable():
+    assert cli._CONFIG_UNSETTABLE_FIELDS == tuple(
+        s.name for s in cfg.FIELD_SPECS if s.nullable
+    )
+
+
+def test_every_settable_field_has_an_applier_and_vice_versa():
+    """The one hand-maintained pairing left after R4 (an applier mutates the
+    tracker/archive/agent, which config.py must not import), so it is guarded in
+    both directions: a settable field with no applier would KeyError at dispatch
+    time, and an applier naming no field is dead code."""
+    assert set(cli._LIVE_APPLIERS) == {s.name for s in cfg.FIELD_SPECS if s.settable}
+
+
+def test_non_settable_live_field_is_rejected_by_config_set():
+    """`hitl` itself is live but not individually settable -- it is a whole
+    file. Its dotted sub-fields are the settable surface."""
+    assert "hitl" not in cli._CONFIG_SETTABLE_FIELDS
+    with pytest.raises(ValueError, match="unknown field"):
+        cli._parse_config_set_args(["hitl", "guided"])
+
+
+# --- R6: the arrow-key picker for enum fields ----------------------------------
+
+
+def test_arrow_select_takes_a_plain_options_list(monkeypatch):
+    """R6 widened `_arrow_select` from an InterruptRequest to a bare list. The
+    HITL `choose` path still works because the caller now passes req.options."""
+    import inspect
+
+    params = list(inspect.signature(cli._arrow_select).parameters)
+    assert params[0] == "options"
+    assert "header" in params
+
+
+def test_config_set_bare_enum_field_opens_the_picker(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    hitl_conf = cfg.HitlSection(autonomy_level="guided")
+    seen = {}
+
+    def fake_select(options, *, header=None):
+        seen["options"] = list(options)
+        seen["header"] = header
+        return "strict"
+
+    monkeypatch.setattr(cli, "_arrow_select", fake_select)
+    edited = set()
+    cli._handle_config(
+        "/config set hitl.autonomy_level",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="m",
+        topic=None,
+        tracker=None,
+        hitl_conf=hitl_conf,
+        rebuild_agent=None,
+        edited=edited,
+    )
+    assert seen["options"] == list(cfg.AUTONOMY_LEVELS)
+    assert seen["header"] == "Autonomy level:"
+    assert hitl_conf.autonomy_level == "strict"
+    assert "hitl.autonomy_level" in edited
+
+
+def test_config_set_bare_enum_field_falls_back_when_picker_declines(tmp_path, monkeypatch, capsys):
+    """Esc / no prompt_toolkit / non-TTY => the picker returns None and the
+    typed path's usage error is unchanged."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_arrow_select", lambda options, header=None: None)
+    hitl_conf = cfg.HitlSection(autonomy_level="guided")
+    cli._handle_config(
+        "/config set hitl.autonomy_level",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="m",
+        topic=None,
+        tracker=None,
+        hitl_conf=hitl_conf,
+        rebuild_agent=None,
+        edited=set(),
+    )
+    assert hitl_conf.autonomy_level == "guided"
+    assert "usage: /config set <field> <value>" in capsys.readouterr().err
+
+
+def test_config_set_bare_free_text_field_does_not_open_the_picker(tmp_path, monkeypatch, capsys):
+    """`model` has no `choices` (an open set), so a bare set stays a usage
+    error rather than a picker over nothing (fork 4: no history picker)."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        cli, "_arrow_select", lambda *a, **k: pytest.fail("picker must not open for free text")
+    )
+    cli._handle_config(
+        "/config set model",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="m",
+        topic=None,
+        tracker=None,
+        hitl_conf=None,
+        rebuild_agent=None,
+        edited=set(),
+    )
+    assert "usage: /config set <field> <value>" in capsys.readouterr().err

@@ -38,17 +38,21 @@ foreach ($pair in $pairs) {
 # .ps1 twin - deliberately absent from the pairs list above.
 # M5 adds: the profile file must be MOUNTED (it is gitignored, so it is not in
 # the image's COPY list - without the mount the container's resolve_settings()
-# never sees a profile tier and `/config save` writes to a throwaway layer), the
-# resource caps / NetJail must resolve THROUGH the profile (they were written by
-# `harness config security` and read by nothing), and the caps must be forwarded
-# as env since they are docker flags the container cannot otherwise observe.
+# never sees a profile tier and `/config save` writes to a throwaway layer), and
+# the caps must be forwarded as env since they are docker flags the container
+# cannot otherwise observe.
+# M5.1 R7: the "every pre-spinup profile key is actually READ by both launchers"
+# half used to be two hand-picked markers here (pids_limit/net_jail). It is now
+# derived from the field registry -
+# test_config.py::test_prespinup_profile_keys_are_consumed_by_both_launchers
+# checks ALL of them, so a new knob is covered without editing this list.
 # The DEEPAGENTS_JAIL=1 / DEEPAGENTS_MASK_MODE= markers guard the third-pass F1 fix:
 # the seccomp relaxation and the in-container jail must be turned on by the SAME
 # decision (jail.jail_enabled() reads the env, not Settings), so a one-sided removal
 # would relax five syscalls container-wide, start no jail, and turn nsguard off.
 $markers = @("mask-scan", "refusing to launch unmasked", "DEEPAGENTS_MASK", "DEEPAGENTS_MASK_MODE",
              "deepagent-userns", "install-apparmor-profile", "DEEPAGENTS_JAIL_APPARMOR",
-             "/project/.harness-profile.yaml", "pids_limit", "net_jail",
+             "/project/.harness-profile.yaml",
              "PIDS_LIMIT=", "DEEPAGENTS_JAIL=1", "DEEPAGENTS_MASK_MODE=")
 $rdPs1 = Join-Path (Join-Path $Root "scripts") "run-docker.ps1"
 $rdSh  = Join-Path (Join-Path $Root "scripts") "run-docker.sh"

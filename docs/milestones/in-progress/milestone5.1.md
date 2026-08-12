@@ -2,9 +2,57 @@
 
 ## 0. Build status
 
-**Planned — docs only.** No code. Follows `milestone5.md` (Unified Config Surface, complete), which
-this refactors without changing any resolved value. Named `5.1` on the `milestone4.1.md` precedent:
-a follow-on slice of a shipped milestone, not a new capability.
+**Built — all seven slices (R1–R7) landed** on `feat/milestone5.1-config-field-registry`. Follows
+`milestone5.md` (Unified Config Surface, complete), which this refactors without changing any
+resolved value. Named `5.1` on the `milestone4.1.md` precedent: a follow-on slice of a shipped
+milestone, not a new capability. Checkable properties: `milestone5.1_invariants.md` (same folder).
+
+| Slice | What landed |
+|---|---|
+| **R1** | `FieldSpec` + `FIELD_SPECS` in `config.py` (19 entries: 15 `Settings` scalars + `hitl` + 3 dotted `hitl.*`). `resolve_settings`'s hand-listed `field(...)` block is one loop over the registry. `Settings`/`SettingsSources` stay explicit frozen dataclasses (fork 1) with a test asserting their field names **and order** equal the registry's. |
+| **R2** | `PROFILE_FIELDS`, `_PROFILE_WRITE_ORDER`, `LIVE_FIELDS`, and the four `_PROFILE_{BOOL,FLOAT,INT,STR}_FIELDS` cast buckets are all derived. The buckets are gone entirely — `_parse_profile_value` selects the strict file parser from the spec's own `cast`. The four M5 exclusions are `profile_key=None` with the reason in each entry's comment. |
+| **R3** | One renderer: `config.format_config_lines(settings, sources, *, prefix, width, prespinup_header, overrides, edited)`. `cli._config_display_lines` and `config_cli.format_settings_lines` are wrappers; both call sites' output is byte-identical. |
+| **R4** | `_handle_config`'s if-chain is a `LiveContext` + `_LIVE_APPLIERS` dispatch. `_CONFIG_HITL_VALIDATORS` is now a view of `choices`, and validation is one check for **every** enum field rather than a hitl-only branch. |
+| **R5** | The wizard's custom-posture branch is a loop over `WIZARD_PRESPINUP_SPECS`; `_ask_field` renders enum → numbered menu, bool → off/on menu, `wizard="confirm"` → y/N, else a text prompt carrying its default. Prompts are byte-identical (the M5 input-sequence test passes unchanged). The posture shortcuts stay hand-written — opinions about *combinations*, which a per-field registry can't express. |
+| **R6** | `_arrow_select` takes a plain options list + optional header. `/config set <field>` with no value opens the picker for any field with `choices`; Esc / no `prompt_toolkit` / non-TTY returns `None` and falls back to today's `usage:` error. |
+| **R7** | `test_prespinup_profile_keys_are_consumed_by_both_launchers` asserts every `tier="prespinup"` spec with a `profile_key` appears in **both** launchers. The ad-hoc `pids_limit`/`net_jail` markers M5 added to `check-parity.{sh,ps1}` are removed — the test covers all seven, and a new knob for free. |
+
+### 0.1 Deviations from the plan above
+
+Two, both recorded rather than quietly taken:
+
+1. **`FieldSpec.apply` is not on the spec** (§5 sketched it there). An applier mutates the
+   `CostTrackerMiddleware`, the `past.sqlite` connection, and the rebuilt agent — `config.py`
+   imports none of those and must not (the acyclic import rule `test_import_isolation` enforces
+   for `cost.py` is the same layering instinct). Instead `FieldSpec.settable` is the *declaration*
+   and `cli._LIVE_APPLIERS` holds the *behaviour*, keyed by the registry's own field names, with a
+   test asserting the two agree exactly **in both directions**. A settable field with no applier
+   fails CI; an applier naming no field is caught as dead code.
+2. **`_handle_config` keeps its `(model, agent, topic)` signature as an adapter.** R4's point —
+   the function stops growing a return-tuple slot per field — is achieved by the `LiveContext` the
+   appliers mutate; the three-value return is computed off the context at the end. Changing the
+   *public* shape would have meant editing ~20 M5 tests that call it, which §8's oracle rule
+   forbids for anything that isn't a now-derived constant. New fields are threaded through the
+   context, not the tuple, so the growth problem is gone either way.
+
+### 0.2 Result against §8's safety net
+
+The M5 suite is the oracle and it passed **with zero edits to any existing test**: the host tier was
+green at its pre-M5.1 count (630 passed / 13 skipped) after R1–R6 landed and before a single new
+test was added. Every test this milestone adds is either a derivation guard (for a structure that
+used to be hand-written) or a regression test for §3.1's validation gap. Final counts: **655 host
+(13 skipped), 785 in the `test` image (19 skipped)** — the one new skip is R7's launcher guard,
+which correctly skips in the image, where `scripts/` is not present, and runs in the host tier CI
+uses.
+
+Verified against a real container, not only the host:
+- `harness config show` renders byte-identically to M5.
+- `harness config set mask_mode alow` exits 1 with
+  `mask_mode must be one of ('deny', 'allow'), got 'alow'` and writes nothing;
+  `... mask_mode allow` exits 0 and the key lands in the profile.
+- The **live-model tier passes** (4/4 against a host `ollama serve`, not skipped), so the changed
+  startup path — `resolve_settings`'s loop now builds every `Settings` field — actually boots a real
+  agent and completes real turns, not just stubbed ones.
 
 ## 1. Goal & Definition of Done
 
@@ -159,30 +207,44 @@ The launchers stay hand-written (fork 3). Add a test asserting every spec with `
 
 ## 5. The `FieldSpec` shape
 
-Sketch, not final:
+**As shipped** (`harness/config.py`; the original sketch differed in two places, see §0.1):
 
 ```python
 @dataclass(frozen=True)
 class FieldSpec:
     name: str                     # "model", "hitl.autonomy_level" (dotted => nested)
     tier: str                     # "live" | "prespinup"
-    env_var: str | None           # None => not env-settable (hitl.* subfields)
-    profile_key: str | None       # None => deliberately not persisted; say why in a comment
-    cast: Callable = str          # str | int | float | _to_bool | _mask_enabled_cast
+    env_var: str | None = None    # None => not env-settable, and not walked by the resolver
+    profile_key: str | None = None  # None => deliberately not persisted; why, in a comment
+    cast: object = str            # str | int | float | _to_bool | _mask_enabled_cast
     default: object = None
-    choices: tuple[str, ...] | None = None   # the picker's reason to exist
+    default_factory: object = None  # thread_id's per-run `session-<ts>`
+    choices: tuple[str, ...] | None = None   # the picker's reason to exist, and the validator's
     label: str = ""               # wizard/menu prompt text
-    apply: Callable | None = None # live mutation; None => not settable in-session
+    wizard: str = "auto"          # "auto" (menu if enum/bool, else text) | "confirm"
+    settable: bool = False        # editable via /config set; behaviour in cli._LIVE_APPLIERS
+    nullable: bool = False        # a bare `/config set <field>` clears it (topic)
 ```
 
-`apply` takes a `LiveContext` holding what the REPL already has — the LangGraph `config` dict, the
-`CostTrackerMiddleware`, the live `HitlSection`, the `rebuild_agent` closure, and the mutable
-`current_model` / `topic`. Mutating a context is what lets `_handle_config` stop returning a tuple
-that grows with each field.
+`cast` does double duty on purpose: it is the env/CLI cast **and** it selects the profile-file
+parse strategy (`_parse_profile_value`), which is strict where the env tier is lenient. Keying the
+strict parser off the same attribute is what removed the four `_PROFILE_*_FIELDS` bucket sets —
+there is no second list to forget.
 
-Dotted names cover the `hitl.*` subfields without a second registry: `resolve_settings` skips any
-spec whose name contains a dot (they live in `.harness-config.yaml`, resolved as a whole object),
-while `/config`'s display and dispatch include them.
+`choices` means *exactly these strings are legal*, so it drives validation at every tier as well as
+the picker and the wizard menu. It is therefore **only** on `str`-cast fields: a bool carrying
+`("off","on")` would reject `DEEPAGENTS_JAIL=1`, which is what both launchers pass. Bool fields get
+their off/on menu from `cast is _to_bool` instead. A test asserts the invariant
+(`test_registry_entries_are_internally_coherent`).
+
+`_LIVE_APPLIERS[name](ctx, spec, value)` takes a `LiveContext` holding what the REPL already has —
+the LangGraph `config` dict, the `CostTrackerMiddleware`, the live `HitlSection`, the
+`rebuild_agent` closure, the archive handles, and the mutable `current_model` / `topic` / `new_agent`.
+Mutating a context is what lets `_handle_config` stop growing a tuple slot per field.
+
+Dotted names cover the `hitl.*` subfields without a second registry: `resolve_settings` walks only
+specs carrying an `env_var`, which excludes `hitl` (a whole-object file tier) and its three
+subfields, while `/config`'s display and dispatch include them.
 
 ## 6. Forks
 
