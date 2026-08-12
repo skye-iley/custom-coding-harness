@@ -75,13 +75,16 @@ A milestone moves through three folders. What each stage carries is deliberate:
   (nothing that should derive is hand-written), behavior preservation, the enum-validation change,
   and the picker's fallbacks. Test-facing companion; folds into `milestone5.1.md` on completion.
 - **`milestone6.md`** — **Telemetry** (`design_doc.md` §8 + §12.7): a durable per-turn sink
-  (`.agent_telemetry/usage.jsonl`), a derived session summary, that summary appended to the PR body
+  (`<state-dir>/usage.jsonl`), a derived session summary, that summary appended to the PR body
   `git-pr` opens, and keyless read access. Not a from-scratch build — M1 already computes per-turn
   tokens/cost/energy and throws them away, M2 persists only a session roll-up, and `audit.py`
   already has the jsonl-append + recursive-scrub substrate; this is the missing **sink** and
   **surface**. Picked as the next milestone because it is one of the two core-identity items with
   no dependency on the trust-boundary chain, so it cannot be blocked on the open AppArmor
-  measurement. **Planned — branch `feat/milestone6-telemetry` carries the docs only; no code yet.**
+  measurement. **Telemetry is treated as an audit surface** — the sink lives in the state dir with
+  `past.sqlite` / `denials.jsonl`, not in the agent-writable workspace, because the subject of the
+  audit must not be able to edit the record (§5a). **Planned — branch `feat/milestone6-telemetry`
+  carries the docs only; no code yet.**
 - **`milestone6_invariants.md`** — the checkable properties, written before the code on purpose:
   capture (one record per turn, failed turns included, never breaks a turn), derivation (the summary
   is derived and must agree with the `past.sqlite` row, which stays authoritative), containment (no

@@ -89,16 +89,21 @@ secret-safe containers.
       entry**, closing M5's known `mask_mode: alow` → silently-`deny` gap for profile, env, and CLI
       at once. See the "Unified config" section in `deepagent-image/CLAUDE.md`.
     - `milestone6.md` (+ `milestone6_invariants.md`) — **Telemetry** (`design_doc.md` §8 + §12.7):
-      per-turn `.agent_telemetry/usage.jsonl` sink, a derived session summary, that summary appended
+      per-turn `<state-dir>/usage.jsonl` sink, a derived session summary, that summary appended
       to the PR body `git-pr` opens, and keyless read access. **Planned — docs only on
       `feat/milestone6-telemetry`, no code yet.** Not a from-scratch build: M1 already computes
       per-turn tokens/cost/energy and discards them, M2 persists only a session roll-up, and
-      `audit.py` already has the jsonl-append + recursive-scrub + git-pr-excluded-dir substrate. The
-      milestone is the missing sink and surface. Chosen as next because it is one of the two
-      core-identity items independent of the trust-boundary chain, so it cannot stall on the open
-      AppArmor measurement. Read §5 (forks) before writing code — sink placement, the
-      one-authority rule against `past.sqlite`, and which §8 metrics are deferred *by dependency*
-      are all decided there.
+      `audit.py` already has the jsonl-append + recursive-scrub substrate. The milestone is the
+      missing sink and surface. Chosen as next because it is one of the two core-identity items
+      independent of the trust-boundary chain, so it cannot stall on the open AppArmor measurement.
+      **Telemetry is an audit surface** (§5a): the sink lives in the **state dir**, beside
+      `past.sqlite` / `denials.jsonl` and outside the workspace mount, because the subject of the
+      audit must not be able to rewrite the record — same reasoning M4 slice D applied to
+      `denials.jsonl`. Tamper-resistance is file-tool-proof always, shell-proof only under
+      `DEEPAGENTS_JAIL=1`; say it that way, don't round it up. Read §5/§5a before writing code —
+      sink placement, the one-authority rule against `past.sqlite`, and which §8 metrics are
+      deferred *by dependency* are all decided there. Defaults **on**
+      (`DEEPAGENTS_TELEMETRY=0` disables); PR summary goes in the body.
   - `docs/milestones/planned/` — **not-yet-built** milestones (docs only). Wins over `design_doc.md`
     for "what we build next." *(Currently empty — `milestone5.1.md` moved to `in-progress/`.)*
   - `docs/features/workspace_visibility.md` — **named feature plan** (not a numbered milestone): restrict

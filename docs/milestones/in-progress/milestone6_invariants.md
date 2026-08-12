@@ -10,8 +10,14 @@
 > construction, so the numbers get pinned before they exist.
 
 M6 = the data the harness already computes becomes durable, derivable, and publishable **without
-becoming a leak**. The invariants split four ways: **capture**, **derivation** (one authority),
-**containment** (nothing sensitive escapes), and **removability**.
+becoming a leak, and without the agent being able to edit its own record**. The invariants split
+four ways: **capture**, **derivation** (one authority), **containment** (nothing sensitive escapes,
+and the sink is agent-unreachable), and **removability**.
+
+The load-bearing one is 14: telemetry is an **audit surface**, so it lives in the state dir with
+`past.sqlite` and `denials.jsonl`, not in the workspace. `milestone6.md` §5a has the argument;
+invariants 15–16 state exactly how much tamper-resistance that buys (file tools: always; shell:
+only under `DEEPAGENTS_JAIL=1`) so the claim can't quietly inflate.
 
 ## Capture
 
@@ -70,26 +76,49 @@ becoming a leak**. The invariants split four ways: **capture**, **derivation** (
     or no `gh`/`GH_TOKEN` ⇒ the PR body is byte-identical to the current hardcoded one, and the step
     still exits 0. A telemetry failure must never be the reason a PR does not open.
 
-14. **The sink stays inside `.agent_telemetry/`**, which is git-ignored and git-pr-excluded — so no
-    telemetry file is ever staged into the agent's commit. *(Regression guard: M4 already had to fix
-    a masked `.env` being committed; the same class of mistake writes telemetry into a PR diff.)*
+14. **Every telemetry file resolves under `archive.state_dir(workspace)`, never inside the
+    workspace.** Asserted on the resolved paths, not on a string prefix. This is the fork-1 decision
+    (§5a) in checkable form: telemetry is an audit surface, so the audited party must not be able to
+    address it.
 
-15. **The sink placement is a recorded decision, not an accident.** It is in the workspace, so the
-    agent's own tools can rewrite it. The test that pins this is a *documentation* test in spirit:
-    if telemetry ever needs to be tamper-evident, it moves to the state dir like M4 slice D's
-    `denials.jsonl`, and this invariant changes with it.
+15. **The agent's file tools cannot reach the sink.** A `write_file`/`read_file` aimed at the
+    resolved `usage.jsonl` path is refused by the path guard, exactly as for
+    `<state-dir>/denials.jsonl` (M4 slice D). *(This is the leg that holds unconditionally.)*
+
+16. **The shell leg is claimed only under the jail.** With `DEEPAGENTS_JAIL=1` the shell tool cannot
+    see the state dir (M4 invariant 17a) and therefore cannot edit telemetry; **with the jail off it
+    can**, by absolute path. The test asserts the jail-on case and the docs state the jail-off case
+    plainly — an invariant that overclaims is worse than one that is narrow, which is the lesson M4
+    slice H already paid for.
+
+17. **Telemetry survives an ephemeral run.** Under `-Ephemeral` the workspace copy is discarded on
+    close while the state dir is keyed to the real workspace path; a run's `usage.jsonl` and
+    `session.json` must still be there afterwards. *(The second defect of the original workspace
+    placement — evidence that evaporates in the mode most likely to be used for risky runs.)*
+
+18. **No telemetry file ever enters the git index.** Structural under invariant 14 (the sink is
+    outside the commit tree entirely), so this needs no git-pr exclusion rule to hold — and the test
+    asserts the *absence of the need*: a run with telemetry on leaves `git status --porcelain`
+    identical to a run with it off. *(Regression guard: M4 already had to stop a masked `.env` from
+    being committed; the same class of mistake writes telemetry into a PR diff.)*
+
+19. **The in-workspace state-dir fallback is caught, not re-checked.** `state_dir()` falls back to
+    `<workspace>/.deepagents` when `DEEPAGENTS_STATE_DIR` is unset, which would put the sink back
+    inside the mount. Telemetry adds **no** check of its own — `harness doctor` already errors when
+    an in-container state dir resolves inside the workspace, and the test asserts telemetry inherits
+    that path rather than growing a second, divergent guard.
 
 ## Removability
 
-16. **`DEEPAGENTS_TELEMETRY=0` ⇒ Milestone 5.1, byte-for-byte.** No sink file created, no summary,
+20. **`DEEPAGENTS_TELEMETRY=0` ⇒ Milestone 5.1, byte-for-byte.** No sink file created, no summary,
     no PR block, no middleware appended, no new stderr line. *(The contract every milestone since M1
     has kept.)*
 
-17. **Telemetry adds no sibling import to `cost.py`.** `test_import_isolation`'s acyclic guard still
+21. **Telemetry adds no sibling import to `cost.py`.** `test_import_isolation`'s acyclic guard still
     passes: `telemetry.py` may import `harness.audit` and nothing else from the package; `cli.py`
     feeds it, exactly as it feeds `archive.py`.
 
-18. **The keyless path stays keyless.** `harness telemetry show` routes through `dispatch` without
+22. **The keyless path stays keyless.** `harness telemetry show` routes through `dispatch` without
     importing `cli.py` — the property M5 §0.1 F6 established for `config`/`doctor`. A new
     subcommand that re-drags the runtime stack in silently undoes it.
 
