@@ -8,6 +8,14 @@
 > **Status: none of these are implemented or tested yet.** They are written first, on purpose — a
 > telemetry milestone whose correctness is "the numbers look about right" is untestable by
 > construction, so the numbers get pinned before they exist.
+>
+> **Amended in the pre-build pass** that also amended `milestone6_spec.md` (see its header table):
+> **22** was restated because the version first written could not hold — `harness/__init__.py`
+> imports `cli` unconditionally, so no subcommand is stdlib-weight; **2a** was added so an operator
+> deny is not counted as a turn failure; **7** and **8** gained the two notes that make them
+> checkable at all (which token split, and which side of the `archive_conn` guard); **20** records
+> that the knob is env-only. No property was weakened to fit an implementation — 22 was narrowed to
+> fit a *fact about the tree*, which is the distinction that matters.
 
 M6 = the data the harness already computes becomes durable, **decomposable**, derivable, and
 publishable — without becoming a leak, and without the agent being able to edit its own record. The
@@ -32,7 +40,14 @@ Two are load-bearing and pull in opposite directions, so neither can be quietly 
 
 2. **A failed turn is still recorded.** A turn that raises after burning tokens produces a record
    with `failed: true` — the case an operator most wants and the one an exception path most easily
-   drops.
+   drops. Pinned on **both** turn paths: `run_repl` and `run_batch` each carry their own general
+   `except`, so a test that only exercises the REPL leaves headless — the benchmark path — unproven
+   (`milestone6_spec.md` §3.2).
+
+2a. **An operator deny is not a failure.** A turn the HITL gate halts (`hitl.HaltTurn`, `on_deny:
+    halt`) records `failed: false` with whatever tool counts it accrued. Conflating "the human said
+    no" with "the turn broke" would put a governance signal in the reliability column, and a
+    benchmark sweep reading `turns_failed` would be measuring the operator.
 
 3. **The sink never breaks a turn.** An unwritable sink, a full disk, or a serialization error
    degrades to a stderr warning; it never propagates into `run_turn`. *(Same rule `audit.py` and the
@@ -99,9 +114,21 @@ Two are load-bearing and pull in opposite directions, so neither can be quietly 
    (`input_tokens`, `output_tokens`, `cost_usd`), the file equals the `sessions` row. The row stays
    authoritative; a mismatch is a failure of the file, not of the row.
 
+   **`input` must mean the same thing on both sides**, or this fails as arithmetic rather than as a
+   bug. `cost._split_tokens` splits cache-read tokens *out of* `input`, and that split is what
+   `UsageAccumulator` stores and `cli._cost_totals_for_row` writes to the row — so telemetry must
+   use the same helper rather than reading `usage["input_tokens"]` raw
+   (`milestone6_spec.md` §8). The test asserts the equality; this note is why it can hold at all.
+
 8. **The summary is written after totals are final and before `session.end` workflows run.** Pinned
    by ordering, not by timing: `_finalize_session` → summary → `_pr_approval` → `run_hook`. A
    summary written after git-pr is a summary the PR cannot contain.
+
+   **And it is written whether or not the archive is on.** In `cli.main` the `_finalize_session`
+   call sits inside `if archive_conn is not None:`; the summary write must sit *outside* that guard
+   at the same point in the sequence, or `DEEPAGENTS_ARCHIVE=0` silently produces no summary —
+   which the failure table explicitly forbids (`milestone6_spec.md` §9, §13). The test runs the
+   ordering assertion with the archive both on and off.
 
 9. **A run with zero turns still produces a valid summary** (zeros and an empty model mix), because
    "the operator opened a session and typed `/exit`" must not yield a half-written file that the
@@ -163,14 +190,31 @@ Two are load-bearing and pull in opposite directions, so neither can be quietly 
     no PR block, no middleware appended, no new stderr line. *(The contract every milestone since M1
     has kept.)*
 
+    The env var is the whole off switch: the knob is a registry field with `profile_key=None` and no
+    CLI flag, the same shape `mask_enabled` and `headless` already have
+    (`milestone6_spec.md` §7). So this invariant is checked exactly one way, and `.env` —
+    which reaches the container through `--env-file` — is where an operator sets it. Every parameter
+    the milestone adds to an existing signature defaults to the inert value (§15.1), which is what
+    makes "no middleware appended" structural instead of a thing the test has to police.
+
 21. **Telemetry adds no sibling import to `cost.py`.** `test_import_isolation`'s acyclic guard still
     passes: `telemetry.py` may import `harness.scrub` (the leaf module the scrub moves into — see
     `milestone6_spec.md` §1) and nothing else from the package; `cli.py` feeds it, exactly as it
     feeds `archive.py`.
 
-22. **The keyless path stays keyless.** `harness telemetry show` routes through `dispatch` without
-    importing `cli.py` — the property M5 §0.1 F6 established for `config`/`doctor`. A new
-    subcommand that re-drags the runtime stack in silently undoes it.
+22. **`harness telemetry` needs no key, no network, and no model — and adds no import cost that
+    `config`/`doctor` do not already pay.** Asserted two ways: `harness.telemetry` itself imports
+    nothing from the package but `harness.scrub` (so the module is stdlib-weight), and the `dispatch`
+    route imports it lazily, inside the branch.
+
+    **Stated this narrowly on purpose.** An earlier draft said "routes through `dispatch` without
+    importing `cli.py`", which is not achievable and never was: `harness/__init__.py` does
+    `from harness.cli import main` **unconditionally**, so every `python3 -m harness <subcommand>`
+    — `config` and `doctor` included — already pulls in langchain/langgraph/deepagents before
+    `dispatch` runs. That is M5 §0.1 F6's known, deferred limitation (the fix is a lazy `__init__`
+    plus an entry-point change), and M6 does not fix it. An invariant asserting the unachievable
+    version would have to be weakened the first time it was run, which is the failure mode invariant
+    16 exists to warn about. The checkable property is the one above.
 
 ## Joinability (a sweep must be able to aggregate)
 

@@ -2,12 +2,19 @@
 
 ## 0. Build status
 
-**Planned — nothing built yet.** Branch `feat/milestone6-telemetry` carries these two docs only.
-Checkable properties: `milestone6_invariants.md` (same folder), also unimplemented.
+**Planned — nothing built yet.** Branch `feat/milestone6-telemetry` carries three docs only: this
+plan, `milestone6_invariants.md` (the checkable properties), and `milestone6_spec.md` (the
+implementation-level doc — **build from that one**). All three unimplemented.
 
 This doc is the plan, written before the code so the code has something to be wrong against. Every
 claim below about *existing* behaviour was read off the tree at `6e0c104`; every claim about new
 behaviour is a proposal until a slice lands and this §0 says so.
+
+**A pre-build pass re-checked every seam the spec names against the tree** and found five claims
+that did not hold plus five decisions left unmade. All ten are settled in `milestone6_spec.md`
+(header table lists them) and the two that reach this doc are corrected in place: §3 T3's summary
+placement, and §3 T1's scrub-extraction naming. The spec is the doc that changed; nothing about the
+plan's scope, forks, or §5a placement argument moved.
 
 Chosen over the `HarnessProfile` chain deliberately: telemetry is one of the two core-identity items
 with **no dependency on the trust-boundary chain** (`design_doc.md` → Product Identity → "Core
@@ -67,7 +74,10 @@ New stdlib-only module. `record_turn(path, record)` appends one scrubbed JSON ob
 **`<state-dir>/usage.jsonl`** — `archive.state_dir(workspace)`, the same root as `past.sqlite`,
 `checkpoints.sqlite`, `session.env` and `denials.jsonl`. **Outside the workspace mount** (§5a — the
 load-bearing placement decision). Reuses `audit.py`'s scrub, **extracted to a shared helper, not
-copy-pasted** (`tests/_bootstrap.py` exists because two test modules had duplicated a loader).
+copy-pasted** (`tests/_bootstrap.py` exists because two test modules had duplicated a loader) —
+`scrub` / `scrub_deep` move to `harness/scrub.py` **under those exact names**, re-exported from
+`audit`, because the existing `test_audit.py` scrub cases are the oracle for the move and must pass
+unedited (`milestone6_spec.md` §1).
 
 Record fields, v1:
 
@@ -112,7 +122,8 @@ At session end, derive `<state-dir>/session.json` from the turn records: totals,
 count, failed-turn count, wall-clock duration and its decomposition, interrupt count, retry/trim
 counts. Written in `cli.main`'s end sequence **after** `_finalize_session` (so numbers match stderr
 and the `past.sqlite` row) and **before** `_pr_approval` / `run_hook("session.end")` (so git-pr can
-read it).
+read it) — but **outside** the `if archive_conn is not None:` block that `_finalize_session` call
+sits inside, or `DEEPAGENTS_ARCHIVE=0` would silently produce no summary (`milestone6_spec.md` §9).
 
 `past.sqlite` stays **authoritative** for session totals; `session.json` is derived. Two files
 disagreeing is worse than one file missing, so the invariants pin the derivation, not the values.
@@ -276,6 +287,10 @@ per run and try to open a PR; against a benchmark checkout they are safe no-ops 
   (invariant 20) is what makes defaulting on safe. A record that exists only when someone remembered
   to enable it is not much of an audit surface — the run you want telemetry for is the one you did
   not expect to go wrong.
+- **The off switch is env-only** — an M5.1 registry field with `profile_key=None` and no CLI flag,
+  the same shape `mask_enabled` and `headless` have. Persisting it would oblige both launchers to
+  forward it and would put "do you want telemetry?" in the security wizard, which contradicts
+  defaulting on. Reasoning in full: `milestone6_spec.md` §7.
 - **The PR summary goes in the body**, not a comment. One artifact, no second API call, survives
   with the PR.
 - **The sink is agent-unreachable** (§5a) — telemetry is an audit surface, not a metrics
