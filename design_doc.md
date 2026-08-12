@@ -17,18 +17,31 @@
 ## Implementation Status — Built vs. Planned
 
 > **Read this first.** This document is the *target design*, not a description of current code.
-> Most of it is **not built yet**. The table below is the source of truth for what exists today;
+> Much of it is **not built yet** — including most of what makes it a *multi-agent* harness
+> (routing, funnel, per-agent isolation, telemetry, compression). The table below is the source of
+> truth for what exists today;
 > everything else is aspirational. Where a section below is not ✅ here, read it as a spec to build
 > against. Status legend: ✅ Built · 🟡 Partial · ⬜ Planned · 🔬 Research.
 
-**Built today (the MVP):** a single Docker image (`deepagent-harness`: Ubuntu 24.04 + uv venv +
-Miniforge) that runs **one** `create_deep_agent` against a bind-mounted workspace. Model selection
-is the `PROVIDERS` registry in `project/harness/providers.py`, loaded at import time from the
-on-disk `project/providers/` TOML registry (explicit, or auto-selected by which API key is set —
-**there is no classifier**). It loads MCP tools (`.mcp.json`), runs lifecycle shell hooks
-(`hooks.json`), persists conversation state to a per-workspace SqliteSaver checkpoint (keyed by
-thread id), isolates workspace dependencies in a workspace-local conda env, and receives secrets via
-`--env-file` at run time. That is roughly the §1/§4 provider layer + the built parts of §2/§3.
+**Built today:** a single Docker image (`deepagent-harness`: Ubuntu 24.04 + uv venv + Miniforge)
+that runs **one** `create_deep_agent` against a bind-mounted workspace. Model selection is the
+`PROVIDERS` registry in `project/harness/providers.py`, loaded at import time from the on-disk
+`project/providers/` TOML registry (explicit, or auto-selected by which API key is set — **there is
+no classifier**). It loads MCP tools (`.mcp.json`), runs lifecycle shell hooks (`hooks.json`) and
+`workflows/` folders, persists conversation state to a SqliteSaver checkpoint (keyed by thread id),
+isolates workspace dependencies in a workspace-local conda env, and receives secrets via
+`--env-file` at run time. That is the §1/§4 provider layer + the built parts of §2/§3.
+
+On top of that MVP baseline, six milestones have shipped — cost/energy tracking + budgets (M1),
+present/past memory (M2), human-in-the-loop (M3), the workspace trust boundary: masking, path
+guard, bwrap jail, `doctor`, CI, security suite (M4/M4.1), and the unified config surface + its
+field registry (M5/M5.1). **Still one agent, one trust boundary, no routing and no telemetry sink**
+— which is what the Core-vs-Peripheral section below is about.
+
+> **Keeping this table honest.** It drifts silently: a milestone lands, the row it makes obsolete
+> is three screens away, and nothing fails. When a milestone completes, re-read this table before
+> closing it out — a ⬜ row for something that shipped is worse than no row, because it is read as
+> a decision not to build.
 
 | § | Capability | Status | Notes |
 |---|------------|--------|-------|
@@ -40,30 +53,35 @@ thread id), isolates workspace dependencies in a workspace-local conda env, and 
 | 2 | Workspace conda env isolation | ✅ Built | workspace-local `.conda/env`, `run-in-env.sh` |
 | 2 | Secret provisioning (`--env-file`) | ✅ Built | `.env` gitignored, never baked into image |
 | 2 | Persistent workspace + gitconfig mount | ✅ Built | `run-docker` bind-mounts workspace; mounts `~/.gitconfig` read-only |
-| 2 | Conversation checkpoint (SqliteSaver) | ✅ Built | per-workspace `.deepagents/checkpoints.sqlite`, thread-keyed |
+| 2 | Conversation checkpoint (SqliteSaver) | ✅ Built | `checkpoints.sqlite` in the harness **state dir**, thread-keyed. Defaults to `<workspace>/.deepagents/`; `DEEPAGENTS_STATE_DIR` relocates it and `run-docker` points it at `/project/state`, outside the workspace mount (M2) |
 | 2 | Dual-container (orchestrator + executor) | ⬜ Planned | One container today |
-| 2 | Bubblewrap executor jail | 🟡 Partial | `scripts/sandbox-exec.sh` + `bwrap` installed in image, but **not wired into agent shell calls** and unverified at runtime (no `--security-opt` in `run-docker`) |
+| 2 | Workspace visibility / secret masking | ✅ Built (Milestone 4) | `harness/mask.py`: `.agentignore` (gitignore-parity), 3-tier policy, deny/allow modes, un-negatable designated-secret floor, docker mount-mask (masked paths present-but-empty). `DEEPAGENTS_MASK=0` ⇒ M3 parity. See `docs/milestones/in-progress/milestone4.md` |
+| 2 | Bubblewrap fs-tool jail | ✅ Built, **opt-in** (Milestone 4 slice H) | `DEEPAGENTS_JAIL=1` re-execs the harness into a bwrap mount namespace (`harness/jail.py`), so every fs tool — shell included — inherits an allow-list bind whitelist; `/project` read-only, floor overmounted empty, state dir out of reach. **Off by default:** needs `--security-opt seccomp=seccomp/userns.json` (docker-default + 5 relaxed syscalls) on the outer container, an operator's trade. `harness/nsguard.py` is the shell-seam tripwire for those syscalls. Gate verified on Docker Desktop/WSL2 |
+| 2 | AppArmor profile for the jail | 🟡 Partial (Milestone 4.1) | `apparmor/deepagent-userns` = moby's `docker-default` with only its `deny mount,` narrowed; `apparmor-sync --check`, installer, and `run-docker`/`doctor` wiring all built. **Not yet measured on a live AppArmor host** — the mount rule set is derived, not confirmed; CI's non-gating `apparmor-load-probe` carries that measurement. Without it the jail does not start on Ubuntu/Debian Docker. SELinux untested |
 | 2 | `HarnessProfile` dynamic bind mounts | ⬜ Planned | Fixed bind list; no per-agent profile |
-| 2 | Path Guard middleware (`validate_path`) | ⬜ Planned | Snippet only; not in `main.py` |
+| 2 | Path Guard middleware (`validate_path`) | ✅ Built (Milestone 4 slice C/D) | `harness/pathguard.py` commonpath traversal guard on the fs tools. A denial always prints `path-guard DENIED` to stderr (HITL or not) and, under HITL, appends to `<state-dir>/denials.jsonl` — outside the workspace, so the agent can't truncate the record. **Audit-only:** never offers an interactive approve, because every denial it can currently raise is a true workspace escape |
 | 2 | Resource limits (`--cpus`/`--pids-limit`/mem) | ✅ Built | `run-docker.{sh,ps1}` set `--cpus`/`--memory`/`--pids-limit` (defaults 2/4g/512, overridable). Docker host-boundary control, not a sandbox |
 | 2 | NetJail — container-wide deny-all egress jail (opt-in) | ✅ Built | `run-docker -NetJail` / `NET_JAIL=1`: agent on an `--internal` net, socat host-service forwarders (`host-services.txt`) + domain-allowlisted tinyproxy egress (`allowed-domains.txt`), **fail-closed** if the proxy config doesn't load. `smoke -NetJail` exercises it. Verified on Docker Desktop; see `netjail/README.md` |
 | 2 | Per-agent network policy (`HarnessProfile.network`) | ⬜ Planned | NetJail is all-or-nothing per run; no per-agent *subtractive* egress / host-service / net-tool gating (Tier-1 env-based; §2) |
 | 2 | Config-driven allowlist selection (`@group` + `enabled.txt`) | ⬜ Planned | Entries enabled by hand-uncommenting; no group tags / machine-written selection for a startup menu (§2) |
 | 3 | Workflow engine — folder format + deterministic gates + side-effect steps | ✅ Built | `harness/workflows.py`: `workflows/<name>/` folders (`workflow.md` + `trigger.py`/`trigger.sh` gate + ordered steps), `WorkflowMiddleware`. `hooks.json` is the flat always-gate precursor, adapted into the same path |
-| 3 | Classifier-gated triggers + context-mutation / control-flow / pause (HITL) action tiers | 🟡 Partial | Deterministic predicate gates + the side-effect action tier are built; the **pause tier ships in Milestone 3** (as `hitl.PauseMiddleware`, not a `workflows.py` step — steps can't suspend the graph). The classifier gate and the context-rewrite / control-flow tiers are still not built |
+| 3 | Classifier-gated triggers + context-mutation / control-flow / pause (HITL) action tiers | 🟡 Partial | Deterministic predicate gates + the side-effect action tier are built, and the **pause tier shipped in Milestone 3** (as `hitl.PauseMiddleware`, not a `workflows.py` step — steps can't suspend the graph). The classifier gate and the context-rewrite / control-flow tiers are still not built |
 | — | MCP tool loading (`.mcp.json`) | ✅ Built | `load_mcp_tools` (not a separate doc section) |
 | 3 | Git branch/commit/push/PR lifecycle | ✅ Built | `workflows/git-branch` (session.start) + `workflows/git-pr` (session.end): branch → persist session id → commit/push → `gh pr create`, never auto-merged. Safe no-op without a repo/remote/`GH_TOKEN` |
 | 5 | Multi-agent funnel (classifier→orchestrator→worker) | ⬜ Planned | Single `create_deep_agent` today |
 | 6 | Token/cost tracker | ✅ Built (Milestone 1) | `harness/cost.py` (`CostTrackerMiddleware`); pricing in the `providers/` TOML registry (`[pricing]` per model, strategy per provider), not a `prices.json`. Optional energy estimate + budgets. See `docs/milestones/complete/milestone1.md` |
 | 7 | Headroom / Caveman / caching pipeline | ⬜ Planned | Nothing integrated |
-| 8 | Observability, telemetry, telemetry-to-PR | ⬜ Planned | No trace/metrics files written |
-| 9 | In-container interactive REPL (multi-turn session) | 🟡 MVP | Persistent `docker run -it` prompt loop in `harness/cli.py`: multi-turn on one `thread_id`, deterministic `/exit`, stage output — see `docs/milestones/complete/mvp.md` §1a |
-| 9 | Host CLI frontend (Typer/Rich) + TUI | ⬜ Planned | No `harness` CLI/TUI; interactive use is the in-container REPL above |
-| 9 | Human-in-the-loop (interrupt spine + `ask_human` tool + `.harness-config.yaml`) | ✅ Built (Milestone 3) | LangGraph `interrupt()` over the SqliteSaver checkpoint; one human channel, all 3 trigger sources (deterministic pause middleware, `ask_human` tool, system `provider_error`). Off unless `.harness-config.yaml` exists. **Not implemented:** `missing_price`/`permission_denied` system events, `shadow` policy, clock-pause, host TUI. See §9 + `docs/milestones/complete/milestone3.md` |
-| 10 | Security verification test suite | ⬜ Planned | Risk analysis is design-only |
+| — | Rate limiting / request pacing | ✅ Built | Two layers: reactive server-honoured backoff (`resilience.retry_after_seconds` reads `Retry-After`/`retry_delay`) and proactive pacing of **every** model call via `harness/ratelimit.py` + langchain's `InMemoryRateLimiter`, from `provider.toml` `[limits]`. **Inert until a tier is selected** (`tier` in TOML or `DEEPAGENTS_PROVIDER_TIER`) |
+| — | Ephemeral workspace + live refresh | ✅ Built | `run-docker -Ephemeral`/`EPHEMERAL=1` mounts a throwaway copy (revert on close, `-SaveWorkspace` snapshots first); `harness/refresh.py` pulls live host edits into it mid-run via `/refresh` or the `refresh_workspace` tool. Inert on a normal run |
+| 8 | Observability, telemetry, telemetry-to-PR | ⬜ Planned | No `usage.jsonl`/`.agent-metrics.json` sink, no trace file, nothing appended to PR descriptions. The **data** exists — M1's tracker computes per-turn tokens/cost/energy and M2 persists a per-session ledger on the `past.sqlite` `sessions` row; this row is the missing sink + PR surface. Do not confuse with the HITL audit trails (`interrupts.jsonl`, `denials.jsonl`), which are built but are an approval record, not telemetry |
+| 9 | In-container interactive REPL (multi-turn session) | 🟡 Partial | MVP-scope loop, since extended. Persistent `docker run -it` prompt in `harness/cli.py`: multi-turn on one `thread_id`, deterministic `/exit`, stage output (`docs/milestones/complete/mvp.md` §1a), plus `/config`, `/recall`, `/topic`, `/refresh`, `/show` and the HITL prompts. Not the §9 TUI |
+| 9 | Host CLI frontend (Typer/Rich) + TUI | 🟡 Partial | No Typer/Rich CLI and **no TUI**; interactive use is the in-container REPL above. What does exist is a set of keyless argparse subcommands usable from the host — `harness config` / `config security` / `doctor` / `threads` / `past` / `mask-scan` — routed by `dispatch`. Running those on a host *without* the runtime stack installed is M5 §0.1 F6 (`fix/f6-lazy-entrypoints`, PR #44) |
+| 9 | Unified config surface (flags + `/config` + wizard, one precedence chain) | ✅ Built (Milestones 5 + 5.1) | One resolver (`harness/config.py`): CLI flag > env > `.harness-profile.yaml` > default, provenance-tagged. In-session `/config` for live knobs, `harness config` wizard for the ones fixed at container start. M5.1 made one `FieldSpec` registry the single declaration everything derives from, and validates enum values at every point of entry. See `docs/milestones/complete/milestone5.md` |
+| 9 | Human-in-the-loop (interrupt spine + `ask_human` tool + `.harness-config.yaml`) | ✅ Built (Milestone 3) | LangGraph `interrupt()` over the SqliteSaver checkpoint; one human channel, all 3 trigger sources (deterministic pause middleware, `ask_human` tool, system `provider_error`). Off unless `.harness-config.yaml` exists. `permission_denied` shipped **audit-only** in M4 slice D (see Path Guard above). **Still not implemented:** `missing_price` system event, `shadow` policy, clock-pause on interrupt, host TUI. See §9 + `docs/milestones/complete/milestone3.md` |
+| 10 | Security verification test suite | ✅ Built (Milestone 4 slice G) | `test_mask`, `test_pathguard`, `test_jail`, `test_nsguard`, `test_seccomp`, `test_apparmor`, `test_doctor` — the boundary invariants of `milestone4_invariants.md`, run in CI. The committed seccomp/AppArmor artifacts are asserted offline, so a widened profile fails the host tier |
 | 11 | Future extensions & roadmap | 🔬 Research | By definition |
-| 12 | CI pipeline for the harness repo | ⬜ Planned | Suite exists (`pytest`/`verify`/`smoke`) but nothing runs it on push/PR; no `.github/workflows/` |
-| 12 | Config-validate / `harness doctor` | ⬜ Planned | `verify` checks imports only; no pre-flight check that the registry / `.mcp.json` / `hooks.json` / `workflow.md` are coherent |
+| 12 | CI pipeline for the harness repo | ✅ Built (Milestone 4 slice F) | `.github/workflows/ci.yml`: `host-tests`, `image-tests`, `smoke`, `parity` (the `.ps1`↔`.sh` guard), plus a deliberately **non-gating** `apparmor-load-probe` that exists to produce the M4.1 measurement no dev host can |
+| 12 | Config-validate / `harness doctor` | ✅ Built (Milestone 4 slice E) | `harness/doctor.py`: pre-flight validation of the resolved config, mask policy, state-dir placement (errors when an in-container state dir lands inside the workspace), and the seccomp/AppArmor artifacts + a live bwrap unshare probe |
 | 12 | Headless one-shot-to-PR mode | ✅ Built (Milestone 3) | `cli.run_batch` / `--headless` (`DEEPAGENTS_HEADLESS`): run task(s) to completion, emit one JSON result on stdout, meaningful exit code. **PR URL not yet in the JSON** (git-pr logs it to stderr at session.end). Pulled in as M3 prereq P2 |
 | 12 | Provider resilience (retry/backoff + context-overflow fallback) | ✅ Built (Milestone 3) | `harness/resilience.py` + `cli._invoke_resilient`: bounded jittered backoff on 429/5xx/reset (`DEEPAGENTS_MAX_RETRIES`/`_RETRY_BASE`) + one-shot context-overflow trim (pre-§7 stopgap). Pulled in as M3 prereq P1 |
 | 12 | Thread / checkpoint management | 🟡 Partial | **Shipped in Milestone 2** (`docs/milestones/complete/milestone2.md`): fresh-by-default present thread + separate on-demand `past.sqlite` archive, **and** the `harness threads`/`harness past` list/show/rm/prune lifecycle CLI (§2.6). Automatic/policy-based GC still deferred (manual prune only) |
@@ -121,7 +139,12 @@ thread id), isolates workspace dependencies in a workspace-local conda env, and 
 ---
 
 ## 2. Sandboxing Strategy & Container Layout
-> **Status:** 🟡 Partial — single container + conda isolation + secret provisioning + persistent workspace + resource limits + opt-in container-wide NetJail (deny-all egress + allowlist) built; dual-container, bubblewrap jail (built but not wired in), `HarnessProfile` binds + per-agent network policy + config-driven allowlist selection, and path guard **planned**. See the status matrix above.
+> **Status:** 🟡 Partial — built: single container + conda isolation + secret provisioning +
+> persistent workspace + resource limits + opt-in container-wide NetJail (deny-all egress +
+> allowlist) + workspace masking + path guard + the **opt-in bwrap fs-tool jail** (M4 slice H,
+> `DEEPAGENTS_JAIL=1`, with the AppArmor half unmeasured on a live LSM host). Still **planned**:
+> dual-container, `HarnessProfile` binds, per-agent network policy, config-driven allowlist
+> selection. See the status matrix above.
 
 ### Dual-Container Boundary
 *   **Orchestrator Container**: Hosts Deep Agents runtime and coordinates agent execution. No mount to host Docker socket (`/var/run/docker.sock`).
@@ -180,7 +203,7 @@ bwrap \
 
 ### Per-Agent Network Policy
 
-> **Status:** 🔵 Planned. Extends the container-wide NetJail (`deepagent-image/netjail/`, opt-in
+> **Status:** ⬜ Planned. Extends the container-wide NetJail (`deepagent-image/netjail/`, opt-in
 > `NET_JAIL=1` / `-NetJail`) with a *subtractive* per-agent layer.
 
 The container-wide NetJail (egress allowlist + host-service forwarders) is the **outer bound**:
@@ -226,7 +249,7 @@ network: NetworkPolicy = NetworkPolicy()
 
 ### Config-Driven Allowlist Selection
 
-> **Status:** 🔵 Planned. Makes the container-wide NetJail allowlist toggleable programmatically
+> **Status:** ⬜ Planned. Makes the container-wide NetJail allowlist toggleable programmatically
 > (e.g. from a startup menu) instead of by hand-editing comments in `allowed-domains.txt` /
 > `host-services.txt`.
 
@@ -274,6 +297,11 @@ startup menu is the writer of `enabled.txt`; the four scripts (`run-docker` / `s
 are the readers and must stay in sync.
 
 ### Path Guard Middleware
+> **Status:** ✅ Built (Milestone 4 slice C/D) — `harness/pathguard.py`, on the fs tools. A denial
+> always prints to stderr and, under HITL, is recorded to `<state-dir>/denials.jsonl` (outside the
+> workspace, so the agent cannot truncate the evidence). Audit-only: never interactively approvable.
+> The sketch below is the original spec; the shipped guard follows it. See the status matrix above.
+
 Pre-flight check in Python tool execution class prevents symlink escapes and directory traversal:
 ```python
 import os
@@ -293,7 +321,12 @@ def validate_path(target_path: str, base_dir: str = "/workspace") -> str:
 > resolve-and-hold a file descriptor rather than re-deriving the path after the check.
 
 ### Workspace Visibility & Secret Masking
-> **Status:** ⬜ Planned. Full spec: **`docs/features/workspace_visibility.md`**.
+> **Status:** ✅ Built (Milestone 4 slices A–C) — `harness/mask.py`: `.agentignore` with
+> gitignore-parity matching, the 3-tier policy, deny/allow modes, the un-negatable
+> designated-secret floor, and the docker mount-mask that makes masked paths present-but-empty.
+> `DEEPAGENTS_MASK=0` restores M3 behaviour byte-for-byte. Full spec:
+> **`docs/features/workspace_visibility.md`**; shipped scope in
+> `docs/milestones/in-progress/milestone4.md`.
 
 The bind mount exposes the *whole* workspace tree — including secrets the user's own repo carries
 (`.env`, `id_rsa`, `.aws/credentials`) — to the agent's file **and** shell tools. A policy +
@@ -489,7 +522,7 @@ always-gate workflow so both run on one path. The git lifecycle below is the fir
 this way.
 
 ### Multi-stage workflows (`stages:`) — planned
-> **Status:** 🔴 Planned. Bundle with the **context-mutation action tier** above — it is the tier
+> **Status:** ⬜ Planned. Bundle with the **context-mutation action tier** above — it is the tier
 > that makes multi-stage necessary (in-memory hand-off between stages), and it requires the same
 > middleware change (hooks that *return* a value the engine applies). Until it lands, the
 > paired-folder pattern below is the stopgap.
@@ -834,7 +867,13 @@ Local dictionary for calculating financial cost of session:
 ---
 
 ## 8. Observability & Metrics
-> **Status:** ⬜ Planned — no trace/metrics files are written and no telemetry is appended to PRs. See the status matrix above.
+> **Status:** ⬜ Planned — no `usage.jsonl` / `.agent-metrics.json` / trace file is written and
+> nothing is appended to PR descriptions. Note what *does* exist, so this is not rebuilt from
+> scratch: M1's tracker already computes per-turn tokens/cost/energy, and M2 persists a per-session
+> ledger on the `past.sqlite` `sessions` row — this section is the missing **sink** and **PR
+> surface** over data that is already collected. The HITL audit trails (`interrupts.jsonl`,
+> `denials.jsonl`) are built but are an approval/boundary record, not telemetry. See the status
+> matrix above.
 
 ### Logging Architecture
 *   **System Logs**: Docker container stdout/stderr for runtime health and harness errors.
@@ -861,8 +900,11 @@ Local dictionary for calculating financial cost of session:
 ## 9. CLI Frontend & User Interface
 > **Status:** 🟡 Partial — an **in-container interactive REPL** is now in MVP scope (persistent
 > `docker run -it` prompt loop in `harness/cli.py`: multi-turn on one `thread_id`, deterministic
-> `/exit`, lifecycle stage output — see `docs/milestones/complete/mvp.md` §1a). The **host-side** Typer/Rich
-> `harness` CLI, the TUI, and `.harness-config.yaml` below remain ⬜ Planned. See the status matrix above.
+> `/exit`, lifecycle stage output — see `docs/milestones/complete/mvp.md` §1a), since grown to
+> carry `/config`, `/recall`, `/topic`, `/refresh` and the HITL prompts. `.harness-config.yaml`
+> **shipped in Milestone 3** (HITL), and Milestone 5 added the `harness config` wizard plus
+> `.harness-profile.yaml`. Still ⬜ Planned: the **host-side Typer/Rich `harness` CLI and the TUI** —
+> today's host surface is plain argparse subcommands. See the status matrix above.
 
 ### MVP precursor: in-container interactive loop
 Before the host `harness` CLI exists, the MVP delivers a minimal version of `harness interact`
@@ -908,10 +950,14 @@ Sandbox Stream and Cost Ticker panels below.
 >   `hitl.PauseMiddleware`. The `session.end` PR gate **is** a blocking approval (`cli._pr_approval`
 >   ahead of the git-pr workflow) for the strict/guided presets — an interactive veto; headless and
 >   the autonomous preset let the PR proceed (git-pr never auto-merges).
-> - **System-event source 3, two of three:** `missing_price` and `permission_denied` are recognized
->   `.harness-config.yaml` keys but **not enforced** (`missing_price` is blocked by the cost-module
->   no-sibling-import guard; `permission_denied` needs the §2/§10 path-guard/NetJail integration).
->   `provider_error` is built (retry/abort; `switch provider` not offered — needs an agent rebuild).
+> - **System-event source 3, one of three still open:** `missing_price` is a recognized
+>   `.harness-config.yaml` key but **not enforced** — blocked by the cost-module no-sibling-import
+>   guard, so it belongs in a separate reader middleware. `permission_denied` **shipped in Milestone
+>   4 slice D, audit-only**: a path-guard denial prints to stderr always and appends to
+>   `<state-dir>/denials.jsonl` under HITL, but never offers an interactive approve — every denial
+>   it can currently raise is a true workspace escape, which must not be waveable-through by a
+>   mis-click. `provider_error` is built (retry/abort; `switch provider` not offered — needs an
+>   agent rebuild).
 > - **`interruption_policy: shadow`** — not built; only `blocking` ships (the shadow-mode ordering/
 >   resume UX is the one open fork, milestone3 §6).
 > - **Budget/clock pause-on-interrupt** ("pause the clock") — not wired; M1 caps still tick while a
@@ -988,7 +1034,10 @@ system_interrupts:                # which harness events raise (vs. log/crash)
 ---
 
 ## 10. Security, Verification, & Testing Plan
-> **Status:** ⬜ Planned — this is a risk analysis and test *plan*; the verification suite is not built. See the status matrix above.
+> **Status:** 🟡 Partial — the **security verification suite is built** (Milestone 4 slice G:
+> `test_mask`, `test_pathguard`, `test_jail`, `test_nsguard`, `test_seccomp`, `test_apparmor`,
+> `test_doctor`, driven by `milestone4_invariants.md` and run in CI). The risk analysis below and
+> the automation-validation tests remain a plan. See the status matrix above.
 
 ### Risk Analysis & Mitigation
 *   **Classifier Misrouting**:
@@ -1070,13 +1119,19 @@ system_interrupts:                # which harness events raise (vs. log/crash)
 ---
 
 ## 12. Operational Hardening & Automation Roadmap
-> **Status:** ⬜ Planned — these are the gaps surfaced by an audit of the built MVP + Milestone 1
-> against the full vision: the loop works and is config-driven, but it is not yet *operated* like a
-> product (no CI, no pre-flight validation, no headless/automation entrypoint, no resilience, no
-> lifecycle management of the state it accumulates). Each item below is independently shippable and
-> ordered roughly by leverage. Several are bridges to already-planned sections — cross-refs noted.
+> **Status:** 🟡 Partial — these were the gaps surfaced by an audit of the built MVP + Milestone 1
+> against the full vision. **Most have since shipped:** CI (12.1, M4 slice F), `harness doctor`
+> (12.2, M4 slice E), headless one-shot (12.3, M3 P2), provider resilience (12.4, M3 P1), and
+> thread/checkpoint management (12.5, M2). Still open: deepagents-native skills/memories wiring
+> (12.6) and telemetry persistence beyond the M2 ledger row (12.7). Each item below carries its own
+> status. Several are bridges to already-planned sections — cross-refs noted.
 
 ### 12.1 CI pipeline for the harness repo
+> **Status:** ✅ Built (Milestone 4 slice F) — `.github/workflows/ci.yml` runs `host-tests`,
+> `image-tests`, `smoke` and `parity` on push/PR, plus a non-gating `apparmor-load-probe`. The
+> rationale below is kept as the record of why; the job list there is the plan, the workflow file
+> is the truth.
+
 *Why.* The harness already ships a real test suite — `project/tests/` (pytest, host-runnable +
 image-only tiers), `scripts/verify.{ps1,sh}`, `scripts/smoke.{ps1,sh}` — but nothing runs it
 automatically. Every change to provider routing, the cost math, or the workflow engine can regress
@@ -1100,6 +1155,11 @@ silently until a human remembers to build + run locally. There is no `.github/wo
 fails if a `.ps1`/`.sh` pair drifts.
 
 ### 12.2 Config validation — `harness doctor`
+> **Status:** ✅ Built (Milestone 4 slice E) — `harness/doctor.py`, reachable as
+> `python3 -m harness doctor`. It also grew beyond this section's original scope: the resolved-config
+> summary (M5), mask-policy and state-dir placement checks, and the seccomp/AppArmor artifact +
+> live bwrap unshare probes (M4/M4.1).
+
 *Why.* `verify` proves the venv imports; it does **not** prove the on-disk config is coherent. A
 `provider.toml` whose `default_model` names a missing model TOML, a `rate_table` provider missing a
 `[pricing]` table, a malformed `.mcp.json`, or a bad `workflow.md` manifest are only discovered at
