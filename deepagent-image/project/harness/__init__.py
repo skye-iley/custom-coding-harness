@@ -20,17 +20,38 @@ Split out of the original single-file main.py for navigation:
   audit.py      Milestone 3 S7: scrubbed interrupt audit trail (interrupts.jsonl)
   hitl.py       Milestone 3 glue: interrupt resume loop, pause gate, ask_human
   cli.py        argparse + main() (the run loop, checkpointer, session workflows)
+  entry.py      subcommand routing for both entry points; stdlib-only, so a
+                keyless subcommand never imports cli.py (Milestone 5 §0.1 F6)
   mask.py       Milestone 4 resolver: gitignore-parity matcher, 3-tier policy,
                 designated-secret floor, snapshot + protection-reduction checks
   mask_scan.py  Milestone 4 CLI wrapper for mask resolution (mask-scan subcommand)
   pathguard.py  Milestone 4 defense-in-depth traversal check (commonpath guard)
   doctor.py     Milestone 4 pre-flight config validation (doctor subcommand)
 
-Entry points (both run cli.main from WORKDIR /project):
+Entry points (both route through entry.dispatch from WORKDIR /project):
   python3 main.py        thin shim at the package parent
   python3 -m harness     via __main__.py
 """
 
-from harness.cli import main
-
 __all__ = ["main"]
+
+
+def __getattr__(name: str):
+    """Resolve `harness.main` lazily (Milestone 5 §0.1 F6).
+
+    This used to be a module-level `from harness.cli import main`, which made
+    *any* `harness.*` import execute cli.py and therefore load dotenv, langgraph
+    and deepagents -- so `harness config` / `harness doctor`, which need none of
+    them, could not run on a host without the full runtime stack, and the test
+    suite had to route around this file entirely (see tests/_bootstrap.py).
+
+    Must raise AttributeError for everything else, not return a placeholder:
+    `from harness import config` asks the package for the attribute first and
+    only falls back to importing the submodule when that raises AttributeError.
+    Swallowing the miss here would break every sibling import in the package.
+    """
+    if name == "main":
+        from harness.cli import main
+
+        return main
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -482,8 +482,10 @@ layered by dependency so most of it also runs on a bare host with just pytest:
 
 - **Host-runnable (stdlib + harness.cost only):** `test_cost`, `test_sync_models`,
   `test_providers` (model routing), `test_loaders` (optional-config IO),
-  `test_import_isolation` (cost-↛-sibling acyclic guard). These import harness
-  submodules via `tests/_bootstrap._load` (by file path, skipping
+  `test_import_isolation` (the cost-↛-sibling acyclic guard, **plus** M5 §0.1 F6's
+  keyless-path guard: `harness`, `harness.entry`, `harness.config_cli` and
+  `harness.doctor` must each import without pulling `cli`/`agent`/deepagents/dotenv).
+  These import harness submodules via `tests/_bootstrap._load` (by file path, skipping
   `harness/__init__`) and never need keys, network, or the runtime stack.
 - **Image-only (need deepagents/langchain/langgraph):** `test_agent` (workspace
   trust boundary, shell-env secret scrub, final-message extraction, AGENTS.md
@@ -907,10 +909,13 @@ the baseline record of defaults when nothing else overrides it.
     resolved relative to `config_cli.py`'s own path since `netjail/` isn't copied into the image,
     so this only works run on the host, same pre-spinup context every other knob here assumes).
     It adds **no langchain/deepagents dependency of its own** (stdlib + `harness.config` +
-    `harness.providers` only) -- that is why it is a separate module from `cli.py`. It does
-    **not** mean the wizard runs on a host without the runtime stack: `harness/__init__.py`
-    imports `cli` unconditionally, so any `harness.*` import still loads langgraph. Making
-    that true needs a lazy `__init__` + an entry-point change, deferred (§0.1 F6).
+    `harness.providers` only) -- that is why it is a separate module from `cli.py`. Since
+    §0.1 F6 that also means what it sounds like: **the wizard runs on a host with no runtime
+    stack installed.** `harness/__init__.py` resolves `main` through a lazy `__getattr__`
+    instead of importing `cli` eagerly, and subcommand routing lives in the stdlib-only
+    `harness/entry.py`, so `python3 -m harness config` / `doctor` never import `cli.py`.
+    Both halves were needed -- a lazy route inside an eager module is still eager.
+    Guarded by `tests/test_import_isolation.py`.
     Both write paths (`set` and the wizard) **refuse to run from a cwd with no `providers/`
     directory** and name the right one: they write `Path.cwd()/.harness-profile.yaml`, so run
     from the repo root they'd produce a profile `run-docker` never mounts and report success.

@@ -53,6 +53,26 @@ branch; each behavioural one carries a regression test.
 | **F8** — `/config save` could evaporate silently, or take down the REPL | With no host `.harness-profile.yaml`, `run-docker` mounts nothing (both launchers are `if exists`), so the write landed in the `--rm` layer under a success message. And under `DEEPAGENTS_JAIL=1` `/project` is read-only, so `save_profile`'s in-place fallback raised a **second**, uncaught `OSError` — from a branch sitting outside `run_repl`'s per-turn `try`, ending the session. | In-container + no file ⇒ **refuse and say why**: a write that cannot persist has no upside, and the file wouldn't change the current run either (`Settings` resolved at startup). `OSError` around `save_profile` is caught and staged. Belt and braces, the whole `/config` dispatch is wrapped — a REPL command must never be able to end the session, the rule `run_repl` already follows for turns. |
 | **F9** — wizard side-effect edits sat outside the save confirmation | `.agentignore`/NetJail edits write the moment they're answered; the Summary listed only the profile `values`, so answering **no** to "Save?" printed `not saved.` with those edits already on disk and unmentioned. | Both steps return what they applied; the summary lists them under "Already applied (not part of the profile save)", and the decline message names them. One writer per file, honest summary — the actual defect, without restructuring into a deferred-write transaction. |
 | **F4/F5/F6** — docs outran the code | `ENV_VARS.md` had prose inserted mid-table (two rows rendering as literal pipes) and `DEEPAGENTS_JAIL_APPARMOR` listed twice; root `CLAUDE.md` still named three scope-downs after two of them shipped; and `config_cli.py`'s "importing it doesn't need the runtime stack" claim is false at package level — `harness/__init__.py` imports `cli` unconditionally, so any `harness.*` import loads langgraph. | Table repaired (one contiguous table, one `DEEPAGENTS_JAIL_APPARMOR` row carrying the `-JailApparmor` param); summary corrected; the dependency claim narrowed to what's true (no langchain/deepagents dependency **of its own**, the reason it's a separate module) with the package-level caveat stated. Making it *true* — lazy `__init__` + an entry-point change so `config`/`doctor` route before `cli` is imported — is real work, filed for M5.1 if host-side wizard use is a goal. This repo has been bitten once by a capability claim outrunning the code (M4 slice H/AppArmor); make the doc match the code now, widen the code deliberately later. |
+
+> **F6's deferred half is now built** (after M5.1 merged; branch `fix/f6-lazy-entrypoints`). Both
+> halves were required and neither works alone: `harness/__init__.py` resolves `main` through a
+> lazy `__getattr__` (it must raise `AttributeError` on a miss, or the package's own
+> `from harness import archive, …` submodule imports break), and subcommand routing moved out of
+> `cli.py` into the stdlib-only `harness/entry.py` — the routes were always lazy, but reaching
+> them meant importing `cli.py` first, which is what made them moot. `cli.dispatch` re-exports
+> `entry.dispatch`, so the name and every existing test that calls it are unchanged.
+>
+> Measured, not asserted: on a bare Windows host with no langgraph/deepagents/dotenv installed,
+> `python -m harness config show` previously died with
+> `ModuleNotFoundError: No module named 'langgraph'` and now prints the resolved config. Two
+> side effects worth recording — (1) `test_git_pr_excludes_masked_secret_from_staging` (M4's
+> secret-blanking regression guard) had been **silently skipping on every dev host**, because its
+> `python3 -c "import harness.mask"` probe hit the same eager import; it now runs. (2) The
+> keyless-path guard in `tests/test_import_isolation.py` cannot forbid `langgraph`, because
+> `cost.py`'s documented soft langchain import reaches it transitively wherever langchain is
+> installed; it forbids what the harness controls (`harness.cli`, `harness.agent`, `deepagents`,
+> `dotenv`) and relies on the bare host's missing-langgraph crash for the rest. Host tier
+> 655→661 passed (+5 new, +1 un-skipped), image tier 785→790.
 | **F10** — assorted | Dead `_env_int` (went with `_env_defaults` in C2); `_resolve`'s bad-env-value error named no field; the profile path is cwd-anchored, so `harness config` from the repo root wrote a `.harness-profile.yaml` `run-docker` never reads while reporting success; `harness/__init__.py`'s inventory was stale; `/config set topic` could set a topic but never clear it. | Deleted; error names the env var; both write paths **refuse** a cwd with no `providers/` and name the expected one (refusing keeps the documented "reads `Path.cwd()`" contract `cli.main` relies on, rather than silently re-anchoring); inventory updated; a bare `/config set topic` now unsets. |
 
 ### 0.2 Known gap — enum values are not validated (deferred to M5.1, **not** fixed here)

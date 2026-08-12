@@ -56,6 +56,7 @@ from harness.cost import (
     ReportedCost,
     format_session_total,
 )
+from harness.entry import dispatch  # noqa: F401  (re-export: cli.dispatch is a public name)
 from harness.loaders import load_hooks, load_mcp_tools
 from harness.providers import (
     choose_model,
@@ -1506,49 +1507,6 @@ def run_batch(
     print(json.dumps(_batch_payload(final_message, config, tracker, workspace, exit_code)))
     _stage("session closed")
     return exit_code
-
-
-def dispatch(argv: list[str]) -> int:
-    """Shared entry for both `python3 main.py` and `python3 -m harness`.
-
-    Routes the optional dev-time `sync-models` subcommand; anything else runs
-    the agent loop. Kept in one place so the two entry points can't drift —
-    previously only `-m harness` handled `sync-models` and `main.py sync-models`
-    silently swallowed it as an agent task.
-    """
-    if argv and argv[0] == "sync-models":
-        from harness.sync_models import sync_models_main
-
-        return sync_models_main(argv[1:])
-    if argv and argv[0] in ("threads", "past"):
-        # Keyless lifecycle admin over the two sqlite stores (Milestone 2 §2.6).
-        from harness.memadmin import memadmin_main
-
-        return memadmin_main(argv)
-    if argv and argv[0] == "mask-scan":
-        from harness.mask_scan import mask_scan_main
-
-        return mask_scan_main(argv[1:])
-    if argv and argv[0] == "doctor":
-        from harness.doctor import doctor_main
-
-        return doctor_main(argv[1:])
-    if argv and argv[0] == "config":
-        # Milestone 5, C6/C7: keyless pre-spinup config wizard. A separate module
-        # (not cli.py's REPL-side /config) so it stays dependency-light -- no
-        # deepagents/langgraph/langchain pulled in just to run the wizard.
-        from harness.config_cli import config_main
-
-        return config_main(argv[1:])
-    if argv and argv[0] == "seccomp-sync":
-        from harness.seccomp import seccomp_sync_main
-
-        return seccomp_sync_main(argv[1:])
-    if argv and argv[0] == "apparmor-sync":
-        from harness.apparmor import apparmor_sync_main
-
-        return apparmor_sync_main(argv[1:])
-    return main()
 
 
 def main() -> int:
