@@ -22,10 +22,12 @@ secret-safe containers.
       in-session `/config` command for live knobs (model, budgets, HITL preset) and a pre-spinup
       wizard (`harness config` / `harness config security`) for knobs fixed at container start
       (mask mode, jail/AppArmor, resource caps, NetJail), resolved through one `harness/config.py`
-      precedence chain (CLI flag > env > profile file > default). **Built** — §4 records three
-      deliberate scope-downs from the original plan (no `-Autonomy` host flag, no arrow-key
-      `/config` menu, no NetJail list editor in `harness config security`) and a real
-      `PauseMiddleware` caching bug the build surfaced and fixed along the way. See the "Unified
+      precedence chain (CLI flag > env > profile file > default). **Built** — §4 records one
+      deliberate deviation from the original plan (no arrow-key `/config` menu — most settable
+      fields are free text, so a picker doesn't fit them) and a real `PauseMiddleware` caching bug
+      the build surfaced and fixed along the way; §0.1 records the pre-merge review fixes (two
+      passes, including the launcher forwarding `-e DEEPAGENTS_JAIL` so the seccomp relaxation and
+      the in-container jail can't come apart). See the "Unified
       config" section in `deepagent-image/CLAUDE.md`.
   - `docs/milestones/in-progress/` — **being built** milestones (doc + separate invariants doc + code
     on a feature branch). *(`milestone4.md` — **Real Trust Boundary**, merged to `main`,
@@ -119,6 +121,30 @@ secret-safe containers.
 
 Per the global "confirm outward-facing actions" rule, pushing and PR creation are outward-facing:
 do them when the work is complete or the user asks, not speculatively mid-session.
+
+### Worktrees — copy `.env` in as part of setup
+
+`deepagent-image/project/.env` is gitignored, so `git worktree add` produces a tree where the
+harness cannot run: no API keys, no `OLLAMA_HOST`, no `DEEPAGENTS_MODEL`. Copy it over from the
+main worktree in the same step that creates the worktree:
+
+```powershell
+rtk git worktree add ..\wt-<name> -b <type>/<short-description>
+rtk Copy-Item deepagent-image\project\.env ..\wt-<name>\deepagent-image\project\.env
+```
+```bash
+rtk git worktree add ../wt-<name> -b <type>/<short-description>
+rtk cp deepagent-image/project/.env ../wt-<name>/deepagent-image/project/.env
+```
+
+**Copy it with a file command — never by reading the file and writing its contents back out.**
+A copy moves the bytes without either end seeing them; a read-then-write pulls live secrets into
+the agent's context, which is both wasted tokens and a leak path. Same reason applies to `cat`ing
+or diffing it to "check" — confirm with a path/size test instead. This is the "secrets live in
+`.env` only, never echoed into logs" hard rule below, applied to worktree setup.
+
+Removing a worktree: `rtk git worktree remove <path>` (it refuses if the tree is dirty — check
+`git status --porcelain` in it first, and confirm the branch is pushed before deleting anything).
 
 ## Build & run (PowerShell primary on this machine)
 

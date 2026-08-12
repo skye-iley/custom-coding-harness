@@ -10,19 +10,23 @@ folded in on completion per the repo's milestone lifecycle. One deliberate devia
 original spec sketch remains: C5 drops the planned arrow-key `/config` menu for typed commands
 (see its §4 note — most settable fields are free text, not a fixed choice list, so a picker UI
 doesn't fit most of them anyway). One real bug the build surfaced and fixed along the way: §4 C5's
-`PauseMiddleware` caching note.
+`PauseMiddleware` caching note. §0.1 records the pre-merge review fixes (two passes, 16 items);
+§0.2 the one gap that ships open, deferred to M5.1 on purpose.
 
-**Follow-on: `docs/milestones/planned/milestone5.1.md` (Config Field Registry).** The review that
+**Follow-on: `docs/milestones/planned/milestone5.1.md` (Config Field Registry).** The reviews that
 produced §0.1 also found the *structural* reason the C5 menu was dropped: a knob is declared in ten
 places and none of them records its valid values, so no field can render a picker. 5.1 replaces that
 duplication with one `FieldSpec` table everything derives from, then adds the menu on top. It is a
-behavior-preserving refactor — this milestone's test suite is its oracle.
+behavior-preserving refactor — this milestone's test suite is its oracle — and it is where §0.2's
+enum-validation gap gets closed.
 
-### 0.1 Second-pass review fixes
+### 0.1 Pre-merge review fixes (two passes)
 
-A review of the completed branch found the resolver and both wizards correct in isolation but
-**under-plumbed at the edges** — six fields were written and read by nothing. All fixed on the
-same branch; each carries a regression test.
+Two reviews of the completed branch found the same shape of defect twice: the resolver and both
+wizards are correct in isolation, but values were **under-plumbed at the edges** — resolved
+correctly, then not reaching the thing that acts on them. The second pass found six fields written
+and read by nothing; the third found ten more, two merge-blocking. All fixed on the same branch;
+each carries a regression test.
 
 | Bug | Why it mattered | Fix |
 |---|---|---|
@@ -35,6 +39,67 @@ same branch; each carries a regression test.
 
 `check-parity.{sh,ps1}` gained markers for the profile mount, the cap/NetJail profile keys, and
 the cap env forward, so a one-sided edit to either launcher fails CI instead of drifting.
+
+**Third-pass fixes (final pre-merge review).** Ten further items, the same shape one round later:
+a value resolving correctly and then not reaching the thing that acts on it. All applied on this
+branch; each behavioural one carries a regression test.
+
+| Bug | Why it mattered | Fix |
+|---|---|---|
+| **F1 (security, blocking)** — a profile/flag/host-env `jail` applied the seccomp relaxation but never started the jail | `harness config` → "hardened" writes `jail: true`; `run-docker` resolved it and passed `--security-opt seccomp=userns.json` — but neither launcher forwarded the value as `-e`, and `jail.jail_enabled()` reads the **environment**, not `Settings`. So anything other than a `project/.env` entry (which `--env-file` carries) launched with `clone`/`unshare`/`mount`/`umount2`/`pivot_root` relaxed container-wide, **no** bwrap re-exec, and `nsguard` off (it defaults to tracking `DEEPAGENTS_JAIL`) — strictly worse than jail-off, while `/config` read the mounted profile and printed `jail = True (profile)`, confirming the false belief. Pre-existing for the host-env path (M4); M5 widened it with two new tiers and made the profile the advertised way to turn the jail on. | Forward `-e DEEPAGENTS_JAIL=1` from **inside the block that already decided the jail is on**, so the `-e` cannot drift from the `--security-opt`. Normalized to the literal `1`: the host side accepts `true`/`yes`/`on` and the container has its own truthiness set; only the boolean matters. `check-parity` guards the marker on both platforms — the real property (relaxation ⇒ jail) is only observable in a live container, so it was also **measured**: with `jail: true` in the profile and `DEEPAGENTS_JAIL` absent from `.env`, `run-docker` printed `Jail: bwrap fs jail ON` *and* the container printed `[harness] fs jail: re-exec into bwrap (DEEPAGENTS_JAILED=1)` — the line that was absent before the fix, and the same env read `nsguard` keys on. (Docker Desktop/WSL2, no LSM in force; an AppArmor host still needs slice J, unchanged by this.) Same class, lower stakes: the resolved `DEEPAGENTS_MASK_MODE` reached only the *scan* container, so an in-container `harness doctor` re-ran `mask.resolve` and reported `deny` on an `allow` launch (enforcement was unaffected — the jail's overmounts read the frozen `mask-snapshot.txt`). Mask mode now resolves **once** at the top of each launcher and both containers consume it. |
+| **F2 (blocking)** — `-Autonomy` wrote a UTF-8 BOM the parser rejected | `Set-Content -Encoding utf8` emits a BOM on Windows PowerShell 5.1 (this repo's documented primary shell). `parse_config` read with `encoding="utf-8"`, so the first key parsed as `﻿autonomy_level` and hit the unknown-key branch: `SystemExit`, container dead at startup. The flag this branch added bricked the run it was asked to configure. `check-parity.ps1`'s own fixtures write BOMs and pass, because `Select-String` strips them during decode — only the Python readers ever saw it, which is why parity didn't catch it. | Both ends. The launcher writes via `UTF8Encoding($false)` + `[System.IO.File]::WriteAllText` (and `` `n `` endings, for parity with the `.sh`); `load_config`/`load_profile` read `utf-8-sig`, which strips a BOM when present and is a no-op otherwise — the durable half, since a file hand-edited in Notepad hits the identical failure with no launcher involved. Writers stay on plain `utf-8`: tolerate BOMs, never emit them. |
+| **F3 (security)** — the `.agentignore` quick-edit inverted under `mask_mode: allow` | "add a path to mask" appended a bare pattern, which in allow mode **is the allow-list entry** — so an operator typing `config/secrets.yaml` to hide it made it one of the few *visible* paths. Reachable directly after `_wizard_security_step`, where they may have just picked `allow`. Unlike F1 and the §0.2 enum gap, this one **fails open**, which is why it doesn't get a deferral. | The step is mode-aware: it reads the file's own `#!mode:` header through M4's parser (falling back to the resolved `mask_mode`), relabels the option to "add a path to ALLOW", and names the inversion, pointing at the floor as the right answer for "hide this". It does **not** silently reroute a mask request to the floor — promoting an ordinary mask to a permanent, un-negatable floor entry behind the operator's back is its own surprise. |
+| **F7** — `/config set topic`/`set model` never reached the `past.sqlite` row | `/topic` called `archive.set_topic`; `/config set topic` only rebound the in-memory value, so the ledger row kept the launch topic and `harness past list --topic` filed the run in the wrong lane. Same for the model: the row was written once before `run_repl`, so a mid-session switch attributed the whole run to the launch model — undercutting the spend-ledger role M2 gives the archive. | `_handle_config` takes the archive handles and reuses `archive.set_topic`; `archive.set_model` is new, taking plain strings so `archive.py` still imports neither `providers` nor `cost` (the caller splits the prefix, exactly as `main()` does before `start_session`). |
+| **F8** — `/config save` could evaporate silently, or take down the REPL | With no host `.harness-profile.yaml`, `run-docker` mounts nothing (both launchers are `if exists`), so the write landed in the `--rm` layer under a success message. And under `DEEPAGENTS_JAIL=1` `/project` is read-only, so `save_profile`'s in-place fallback raised a **second**, uncaught `OSError` — from a branch sitting outside `run_repl`'s per-turn `try`, ending the session. | In-container + no file ⇒ **refuse and say why**: a write that cannot persist has no upside, and the file wouldn't change the current run either (`Settings` resolved at startup). `OSError` around `save_profile` is caught and staged. Belt and braces, the whole `/config` dispatch is wrapped — a REPL command must never be able to end the session, the rule `run_repl` already follows for turns. |
+| **F9** — wizard side-effect edits sat outside the save confirmation | `.agentignore`/NetJail edits write the moment they're answered; the Summary listed only the profile `values`, so answering **no** to "Save?" printed `not saved.` with those edits already on disk and unmentioned. | Both steps return what they applied; the summary lists them under "Already applied (not part of the profile save)", and the decline message names them. One writer per file, honest summary — the actual defect, without restructuring into a deferred-write transaction. |
+| **F4/F5/F6** — docs outran the code | `ENV_VARS.md` had prose inserted mid-table (two rows rendering as literal pipes) and `DEEPAGENTS_JAIL_APPARMOR` listed twice; root `CLAUDE.md` still named three scope-downs after two of them shipped; and `config_cli.py`'s "importing it doesn't need the runtime stack" claim is false at package level — `harness/__init__.py` imports `cli` unconditionally, so any `harness.*` import loads langgraph. | Table repaired (one contiguous table, one `DEEPAGENTS_JAIL_APPARMOR` row carrying the `-JailApparmor` param); summary corrected; the dependency claim narrowed to what's true (no langchain/deepagents dependency **of its own**, the reason it's a separate module) with the package-level caveat stated. Making it *true* — lazy `__init__` + an entry-point change so `config`/`doctor` route before `cli` is imported — is real work, filed for M5.1 if host-side wizard use is a goal. This repo has been bitten once by a capability claim outrunning the code (M4 slice H/AppArmor); make the doc match the code now, widen the code deliberately later. |
+| **F10** — assorted | Dead `_env_int` (went with `_env_defaults` in C2); `_resolve`'s bad-env-value error named no field; the profile path is cwd-anchored, so `harness config` from the repo root wrote a `.harness-profile.yaml` `run-docker` never reads while reporting success; `harness/__init__.py`'s inventory was stale; `/config set topic` could set a topic but never clear it. | Deleted; error names the env var; both write paths **refuse** a cwd with no `providers/` and name the expected one (refusing keeps the documented "reads `Path.cwd()`" contract `cli.main` relies on, rather than silently re-anchoring); inventory updated; a bare `/config set topic` now unsets. |
+
+### 0.2 Known gap — enum values are not validated (deferred to M5.1, **not** fixed here)
+
+**Ships in M5 as a known bug.** `harness config set <enum-field> <garbage>` is accepted, persisted,
+and resolved:
+
+```
+$ harness config set mask_mode definitely-not-a-mode
+[harness] wrote .harness-profile.yaml: mask_mode=definitely-not-a-mode     # rc=0
+```
+
+`_cmd_set` validates by round-tripping the merged file through `load_profile`, which checks only the
+**cast**. `mask_mode` is a `str` field, so any string parses. The value persists and resolves into
+`Settings.mask_mode`; `mask.resolve` then compares `mode == MODE_ALLOW` and takes the `else` branch,
+so a typo'd `alow` silently yields **deny** mode.
+
+**Severity: low — it fails safe, but silently.** The restrictive mode is the fallback, so this
+under-permits rather than under-masks; there is no security consequence. The cost is that an
+operator who typos gets the opposite of what they asked for, with a success message and no warning.
+
+**Deliberately not fixed in M5.** The only fix that fits here is a one-off
+`if value not in ("deny", "allow")` bolted onto `_cmd_set` — a twelfth hand-maintained per-field
+constant, in a milestone whose follow-up exists specifically to delete the other eleven. M5.1 closes
+it structurally for *every* enum knob at once by giving each field a `choices` tuple in one registry
+(`docs/milestones/planned/milestone5.1.md` §3.1, and its §1 done-when). If M5.1 is dropped or
+deferred indefinitely, fix this directly instead of leaving it open.
+
+Only `mask_mode` is reachable through `harness config set` today; the three `hitl.*` fields are
+already validated (`cli._CONFIG_HITL_VALIDATORS`) and every other profile field is free-text or a
+bool, which `load_profile` already rejects when malformed.
+
+Two corrections to the above, verified during the third-pass review:
+
+- **`harness config set` is not the only writer, and the unvalidated *read* is M4's.** A
+  hand-edited `.harness-profile.yaml` reaches the same path (`load_profile` casts and does not
+  validate), and `.harness-profile.yaml.example` ships `mask_mode: deny        # deny | allow`,
+  inviting exactly that edit. Separately, `DEEPAGENTS_MASK_MODE` in `.env` or the host env has been
+  unvalidated since M4: `mask.py` takes the value verbatim and never checks it against `MODES`, the
+  frozenset already defined and unused in that file. M5 adds two *write* paths into a pre-existing
+  hole; the text above reads as if M5 introduced it.
+- **The typo reaches the enforcement layer, not just storage.** Both launchers forward the resolved
+  value as `-e DEEPAGENTS_MASK_MODE=alow` into the **scan** container — the process that computes
+  the actual docker overlay set. Still deny, still fail-safe, but "persisted and resolved"
+  undersells where it lands.
+
+Fold both into M5.1's write-up when it lands.
 
 ## 1. Goal & Definition of Done
 

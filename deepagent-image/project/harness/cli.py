@@ -156,16 +156,6 @@ def _env_float(name: str) -> float | None:
         raise SystemExit(f"{name}={raw!r} is not a valid number.")
 
 
-def _env_int(name: str) -> int | None:
-    raw = os.getenv(name)
-    if not raw:
-        return None
-    try:
-        return int(raw)
-    except ValueError:
-        raise SystemExit(f"{name}={raw!r} is not a valid integer.")
-
-
 EXIT_TOKENS = {"/exit", "/quit"}
 
 # Slash commands offered in the interactive prompt's completion menu, each with a
@@ -701,11 +691,20 @@ def _parse_config_command(line: str) -> tuple[str, list[str]]:
     return tokens[0], tokens[1:]
 
 
-def _parse_config_set_args(args: list[str]) -> tuple[str, str]:
+# Live fields that are legitimately nullable, so a bare `/config set <field>`
+# means "clear it" rather than a usage error. `topic` is the only one: a session
+# could otherwise be tagged but never untagged.
+_CONFIG_UNSETTABLE_FIELDS = ("topic",)
+
+
+def _parse_config_set_args(args: list[str]) -> tuple[str, str | None]:
     """`<field> <value...>` -> (field, value), or raises ValueError with a
     human-readable message ('/config set' with too few args, or a field
     outside _CONFIG_SETTABLE_FIELDS -- the pre-spinup half is never settable
-    here). Pure -- host-testable."""
+    here). A bare field in `_CONFIG_UNSETTABLE_FIELDS` yields `(field, None)`
+    = clear it. Pure -- host-testable."""
+    if len(args) == 1 and args[0] in _CONFIG_UNSETTABLE_FIELDS:
+        return args[0], None
     if len(args) < 2:
         raise ValueError("usage: /config set <field> <value>")
     field, value = args[0], " ".join(args[1:])
@@ -799,6 +798,8 @@ def _handle_config(
     edited: set[str],
     settings=None,
     sources=None,
+    archive_conn=None,
+    run_id: str | None = None,
 ) -> tuple[str, object | None, str | None]:
     """Handle one `/config`, `/config set <field> <value>`, or `/config save`
     line. Returns `(current_model, new_agent_or_None, current_topic)` --
@@ -812,6 +813,13 @@ def _handle_config(
     here, or every field passed as a flag would report its provenance as
     env/profile/default and the source tags -- the whole point of the display --
     would be wrong. Optional only so the host-side tests can call this bare.
+
+    `archive_conn`/`run_id` are the past-archive handles, so a `/config set
+    topic|model` re-tags the run's `past.sqlite` row the same way `/topic` does.
+    Without them the row keeps the *launch* topic/model for the whole session --
+    `harness past list --topic` files the run in the wrong lane, and the spend
+    ledger attributes every post-switch turn to the launch model. Optional
+    (None => archive off, or a bare host-side test call).
     """
     subcommand, args = _parse_config_command(line)
 
@@ -846,7 +854,30 @@ def _handle_config(
             _stage("config: nothing session-edited to save (pre-spinup fields aren't touched by /config)")
             return current_model, None, topic
         profile_path = Path.cwd() / PROFILE_NAME
-        save_profile(profile_path, values)
+        # A profile that doesn't exist in-container was never bind-mounted:
+        # run-docker mounts it only `if exists` on the host. Writing anyway lands
+        # in the --rm container layer and is gone at exit -- a success message for
+        # a write that cannot persist. Refuse instead: the file it would create
+        # changes nothing about this run either (Settings resolved at startup).
+        if os.environ.get("DEEPAGENTS_IN_CONTAINER") == "1" and not profile_path.exists():
+            _stage(
+                f"config: WARNING - no {PROFILE_NAME} is mounted, so this write would land in "
+                "the throwaway container layer and be lost on exit. Nothing written. Create it "
+                "on the host first (cp project/.harness-profile.yaml.example "
+                "project/.harness-profile.yaml) and relaunch."
+            )
+            return current_model, None, topic
+        try:
+            save_profile(profile_path, values)
+        except OSError as exc:
+            # /project is bound read-only under DEEPAGENTS_JAIL=1 (M4 slice H), so
+            # save_profile's in-place fallback raises too. A REPL command must not
+            # take the session down with it.
+            _stage(
+                f"config: could not write {PROFILE_NAME} ({exc}) - /project is read-only under "
+                "DEEPAGENTS_JAIL=1; save from the host with `harness config set` instead."
+            )
+            return current_model, None, topic
         _stage(f"config: wrote {PROFILE_NAME}: {', '.join(f'{k}={v}' for k, v in values.items())}")
         return current_model, None, topic
 
@@ -874,6 +905,18 @@ def _handle_config(
         # turn would be billed at the launch model's rates and reported under the
         # launch model's name.
         _reprice_tracker(tracker, value)
+        # Re-tag the ledger row too, or the whole run stays attributed to the
+        # launch model. Split here, not in archive.py: that module imports
+        # neither providers nor cost (acyclic rule), so it takes plain strings --
+        # the same split main() does before start_session.
+        if archive_conn is not None and run_id is not None:
+            new_provider = provider_for(value)
+            archive.set_model(
+                archive_conn,
+                run_id,
+                new_provider.prefix.rstrip(":") if new_provider else None,
+                value[len(new_provider.prefix):] if new_provider else value,
+            )
         edited.add("model")
         _stage(f"config: model {current_model} -> {value} (this session only; /config save to persist)")
         return value, new_agent, topic
@@ -887,8 +930,13 @@ def _handle_config(
 
     if field == "topic":
         old = topic
+        # Same write `/topic` makes -- reused, not duplicated -- so the two paths
+        # to the same knob can't persist differently.
+        if archive_conn is not None and run_id is not None:
+            archive.set_topic(archive_conn, run_id, value)
         edited.add("topic")
-        _stage(f"config: topic {old} -> {value} (this session only; /config save to persist)")
+        shown = value if value is not None else "(unset)"
+        _stage(f"config: topic {old} -> {shown} (this session only; /config save to persist)")
         return current_model, None, value
 
     if field in ("max_cost", "max_tokens"):
@@ -1174,18 +1222,30 @@ def run_repl(
             # Always available (unlike /recall/topic above), since every field it
             # touches -- model, budgets, HITL posture, topic -- makes sense even
             # without the archive on.
-            current_model, new_agent, current_topic = _handle_config(
-                line,
-                config=config,
-                current_model=current_model,
-                topic=current_topic,
-                tracker=tracker,
-                hitl_conf=hitl_conf,
-                rebuild_agent=rebuild_agent,
-                edited=config_edited,
-                settings=settings,
-                sources=settings_sources,
-            )
+            #
+            # Belt and braces: this branch sits OUTSIDE the per-turn try below, so
+            # an unexpected exception here would propagate out of the loop and end
+            # the session. A REPL command must never be able to do that -- same
+            # rule the turn handler already follows.
+            try:
+                current_model, new_agent, current_topic = _handle_config(
+                    line,
+                    config=config,
+                    current_model=current_model,
+                    topic=current_topic,
+                    tracker=tracker,
+                    hitl_conf=hitl_conf,
+                    rebuild_agent=rebuild_agent,
+                    edited=config_edited,
+                    settings=settings,
+                    sources=settings_sources,
+                    archive_conn=archive_conn,
+                    run_id=run_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _stage(f"config: command failed: {_err_detail(exc)}")
+                _dump_error(exc)
+                continue
             if new_agent is not None:
                 agent = new_agent
             continue

@@ -64,6 +64,14 @@ markers=(
   # The caps are docker flags, not env vars, so the container can only report
   # them truthfully in `/config` if they are forwarded explicitly.
   "PIDS_LIMIT="
+  # The seccomp relaxation and the in-container jail must be turned on by the same
+  # decision: jail.jail_enabled() reads the env, not Settings, so dropping this -e
+  # on one platform relaxes five syscalls container-wide, starts no jail, and turns
+  # nsguard off. Strictly worse than jail-off, and silent. The real property
+  # (relaxation ⇒ jail) is only observable in a live container; this is the cheap
+  # guard against a one-sided removal.
+  "DEEPAGENTS_JAIL=1"
+  "DEEPAGENTS_MASK_MODE="
 )
 rd_ps1="$ROOT/scripts/run-docker.ps1"
 rd_sh="$ROOT/scripts/run-docker.sh"

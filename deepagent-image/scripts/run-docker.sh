@@ -33,6 +33,12 @@ MEMORY="$(_resolve_host_setting "${MEMORY:-}" MEMORY memory "4g")"
 PIDS_LIMIT="$(_resolve_host_setting "${PIDS_LIMIT:-}" PIDS_LIMIT pids_limit "512")"
 CAP_FLAGS=(--cpus "$CPUS" --memory "$MEMORY" --pids-limit "$PIDS_LIMIT")
 
+# Mask mode resolves ONCE here, not inside mask_scan(), because it has two
+# consumers: the scan container (which computes the overlay set) and the agent
+# container (whose in-container `harness doctor` / mask.resolve re-read the env).
+# One resolution, two consumers — the point of lib/config. Mirror of run-docker.ps1.
+RESOLVED_MASK_MODE="$(_resolve_host_setting "${DEEPAGENTS_MASK_MODE:-}" DEEPAGENTS_MASK_MODE mask_mode "")"
+
 # NetJail on/off resolves the same way, so a saved `net_jail: true` launches the
 # jail without re-typing NET_JAIL=1. Normalized to 1/"" here because everything
 # downstream tests `[[ "$NET_JAIL" == "1" ]]`.
@@ -372,11 +378,10 @@ mask_scan() {
   # resolver honours it — the scan gets no --env-file, so without this the env
   # knob is silently ignored and `allow` degrades to `deny` (under-masking).
   # Milestone 5, C3: .harness-profile.yaml's mask_mode now layers on top of the
-  # same host-env / .env fallback this always had.
-  local scan_mode
-  scan_mode="$(_resolve_host_setting "${DEEPAGENTS_MASK_MODE:-}" DEEPAGENTS_MASK_MODE mask_mode "")"
+  # same host-env / .env fallback this always had. Resolved once at the top of the
+  # script (RESOLVED_MASK_MODE), shared with the agent container.
   local mode_env=()
-  [[ -n "$scan_mode" ]] && mode_env=(-e "DEEPAGENTS_MASK_MODE=$scan_mode")
+  [[ -n "${RESOLVED_MASK_MODE:-}" ]] && mode_env=(-e "DEEPAGENTS_MASK_MODE=$RESOLVED_MASK_MODE")
   local scan_output scan_err
   scan_err="$(mktemp)"
   scan_output="$(docker run --rm \
@@ -431,6 +436,11 @@ jail_setup() {
     exit 1
   fi
   JAIL_ARGS=(--security-opt "seccomp=$profile")
+  # Same decision must turn on the relaxation AND the in-container jail — see the
+  # comment in run-docker.ps1. jail.jail_enabled() reads the env, not Settings, so
+  # without this a profile/env-resolved jail relaxes five syscalls container-wide,
+  # starts no bwrap re-exec, and leaves nsguard (which tracks DEEPAGENTS_JAIL) off.
+  JAIL_ARGS+=(-e "DEEPAGENTS_JAIL=1")
   echo "Jail: bwrap fs jail ON (narrow seccomp profile)" >&2
 
   # M4 slice J (§11.6): seccomp is only ONE of the two gates. On an AppArmor host
@@ -530,6 +540,15 @@ MODEL_ARGS=()
 RESOLVED_MODEL="$(_resolve_host_setting "${DEEPAGENTS_MODEL:-}" DEEPAGENTS_MODEL model "")"
 [[ -n "$RESOLVED_MODEL" ]] && MODEL_ARGS=(-e "DEEPAGENTS_MODEL=$RESOLVED_MODEL")
 
+# Same for the resolved mask mode: the scan container already gets it (it computes
+# the overlay set), but the AGENT container never did, so an in-container
+# `harness doctor` re-ran mask.resolve against an unset env and reported `deny` on
+# an `allow` launch. Enforcement is unaffected either way — the jail's overmounts
+# read the frozen mask-snapshot.txt, not a fresh resolve — this is about the two
+# halves reporting the same mode.
+MASK_MODE_ARGS=()
+[[ -n "${RESOLVED_MASK_MODE:-}" ]] && MASK_MODE_ARGS=(-e "DEEPAGENTS_MASK_MODE=$RESOLVED_MASK_MODE")
+
 # Assemble the agent `docker run` invocation into an array. NET_ARGS / PROXY_ENV
 # are set either by netjail_up (jail mode) or to the bridge defaults below.
 build_agent_run() {
@@ -550,6 +569,7 @@ build_agent_run() {
     ${PROFILE_MOUNT[@]+"${PROFILE_MOUNT[@]}"}
     ${MASK_ARGS[@]+"${MASK_ARGS[@]}"}
     ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}
+    ${MASK_MODE_ARGS[@]+"${MASK_MODE_ARGS[@]}"}
     "${CAP_ENV[@]}"
     deepagent-harness)
   if [[ $# -gt 0 ]]; then

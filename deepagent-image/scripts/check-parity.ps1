@@ -42,10 +42,14 @@ foreach ($pair in $pairs) {
 # resource caps / NetJail must resolve THROUGH the profile (they were written by
 # `harness config security` and read by nothing), and the caps must be forwarded
 # as env since they are docker flags the container cannot otherwise observe.
+# The DEEPAGENTS_JAIL=1 / DEEPAGENTS_MASK_MODE= markers guard the third-pass F1 fix:
+# the seccomp relaxation and the in-container jail must be turned on by the SAME
+# decision (jail.jail_enabled() reads the env, not Settings), so a one-sided removal
+# would relax five syscalls container-wide, start no jail, and turn nsguard off.
 $markers = @("mask-scan", "refusing to launch unmasked", "DEEPAGENTS_MASK", "DEEPAGENTS_MASK_MODE",
              "deepagent-userns", "install-apparmor-profile", "DEEPAGENTS_JAIL_APPARMOR",
              "/project/.harness-profile.yaml", "pids_limit", "net_jail",
-             "PIDS_LIMIT=")
+             "PIDS_LIMIT=", "DEEPAGENTS_JAIL=1", "DEEPAGENTS_MASK_MODE=")
 $rdPs1 = Join-Path (Join-Path $Root "scripts") "run-docker.ps1"
 $rdSh  = Join-Path (Join-Path $Root "scripts") "run-docker.sh"
 foreach ($m in $markers) {

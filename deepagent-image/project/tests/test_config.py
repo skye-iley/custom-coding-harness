@@ -253,6 +253,52 @@ def test_resolve_settings_hitl_whole_object(tmp_path):
     assert sources.hitl == "profile"
 
 
+def test_resolve_settings_jail_from_profile_with_no_env(tmp_path):
+    """The container-side half of the F1 contract.
+
+    `harness config` -> "hardened" writes `jail: true` to the profile and no
+    DEEPAGENTS_JAIL anywhere. Settings must still resolve jail True from the
+    profile tier -- the launcher then has to forward it as `-e DEEPAGENTS_JAIL=1`,
+    because `jail.jail_enabled()` reads the environment and never consults
+    Settings. Without that forward the seccomp relaxation lands and the jail
+    doesn't, which is strictly worse than jail-off.
+    """
+    profile = tmp_path / ".harness-profile.yaml"
+    profile.write_text("jail: true\n", encoding="utf-8")
+
+    settings, sources = cfg.resolve_settings(
+        env={}, profile_path=profile, hitl_path=tmp_path / "no-hitl.yaml"
+    )
+    assert settings.jail is True
+    assert sources.jail == "profile"
+
+
+# --- BOM tolerance (F2) -------------------------------------------------------
+
+
+def test_load_config_tolerates_utf8_bom(tmp_path):
+    """A BOM-prefixed .harness-config.yaml parses instead of dying on key 1.
+
+    Windows PowerShell 5.1's `Set-Content -Encoding utf8` writes a BOM, as does
+    Notepad; read with plain "utf-8" the first key becomes "﻿autonomy_level"
+    and parse_config SystemExits on the unknown-key branch, so the harness
+    refuses to start.
+    """
+    path = tmp_path / ".harness-config.yaml"
+    path.write_text("﻿autonomy_level: strict\n", encoding="utf-8")
+
+    section = cfg.load_config(path)
+    assert section is not None
+    assert section.autonomy_level == "strict"
+
+
+def test_load_profile_tolerates_utf8_bom(tmp_path):
+    path = tmp_path / ".harness-profile.yaml"
+    path.write_text("﻿model: x\n", encoding="utf-8")
+
+    assert cfg.load_profile(path) == {"model": "x"}
+
+
 def test_resolve_settings_removable_contract_matches_pre_m5_defaults(tmp_path):
     """No profile, no CLI => same defaults _env_defaults()/load_config() produced pre-M5."""
     settings, sources = cfg.resolve_settings(

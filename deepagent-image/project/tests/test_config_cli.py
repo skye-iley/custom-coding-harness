@@ -21,6 +21,17 @@ def _input_sequence(monkeypatch, answers):
     monkeypatch.setattr("builtins.input", lambda prompt="": next(it))
 
 
+@pytest.fixture(autouse=True)
+def _project_shaped_tmp_path(tmp_path):
+    """Give every `tmp_path` a `providers/` dir.
+
+    The write paths refuse to run from a cwd that isn't the harness project dir
+    (detected by `providers/`), because a `.harness-profile.yaml` written
+    anywhere else is one `run-docker` never mounts. Tests that `chdir(tmp_path)`
+    are standing in for that directory, so they have to look like it."""
+    (tmp_path / "providers").mkdir(exist_ok=True)
+
+
 def _no_provider_detected(monkeypatch):
     """Force `_wizard_model_step` down its "nothing detected" branch.
 
@@ -479,6 +490,118 @@ def test_wizard_netjail_step_add_then_delete(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "added 'ollama 11434'" in out
     assert "removed 'ollama 11434'" in out
+
+
+# --- write paths refuse a cwd run-docker never reads (F10) ---------------------
+
+
+def test_cmd_set_refuses_outside_the_project_dir(tmp_path, monkeypatch, capsys):
+    """A profile written from the repo root is one run-docker never mounts, so
+    `harness config set` there would report success and change nothing."""
+    elsewhere = tmp_path / "repo-root"
+    elsewhere.mkdir()  # deliberately no providers/
+    monkeypatch.chdir(elsewhere)
+    rc = cc._cmd_set("jail", "true")
+    assert rc == 1
+    assert "refusing to write" in capsys.readouterr().out
+    assert not (elsewhere / cfg.PROFILE_NAME).exists()
+
+
+# --- .agentignore quick-edit is mode-aware (F3) --------------------------------
+
+
+def _agentignore_step_in(monkeypatch, workspace, answers):
+    monkeypatch.setenv("AGENT_WORKSPACE", str(workspace))
+    monkeypatch.delenv("DEEPAGENTS_MASK_MODE", raising=False)
+    _input_sequence(monkeypatch, answers)
+
+
+def test_agentignore_step_warns_and_relabels_in_allow_mode(tmp_path, monkeypatch, capsys):
+    """In allow mode a plain pattern is the ALLOW-list entry, not a mask -- so
+    "add a path to mask" would make a secret visible. The step has to name that
+    before the operator can type a path into it."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / ".agentignore").write_text("#!mode:allow\nsrc/\n", encoding="utf-8")
+    _agentignore_step_in(monkeypatch, workspace, [
+        "2",                    # the plain-pattern option
+        "config/secrets.yaml",  # pattern
+        "n",                    # add another? no
+    ])
+    applied = cc._wizard_agentignore_step()
+    out = capsys.readouterr().out
+    assert "allow mode" in out
+    assert "VISIBLE" in out
+    assert "add a path to ALLOW" in out
+    assert applied and "config/secrets.yaml" in applied[0]
+
+
+def test_agentignore_step_unchanged_in_deny_mode(tmp_path, monkeypatch, capsys):
+    """The allow-mode warning must not leak into the deny path, and the appended
+    line must land exactly as it did before the fix."""
+    monkeypatch.chdir(tmp_path)  # no .harness-profile.yaml here => mask_mode default
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _agentignore_step_in(monkeypatch, workspace, [
+        "2",
+        "config/secrets.yaml",
+        "n",
+    ])
+    cc._wizard_agentignore_step()
+    out = capsys.readouterr().out
+    assert "allow mode" not in out
+    assert "VISIBLE" not in out
+    assert "add a path to mask" in out
+    assert (workspace / ".agentignore").read_text(encoding="utf-8") == "config/secrets.yaml\n"
+
+
+def test_agentignore_effective_mode_reads_header_over_setting(tmp_path, monkeypatch):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.setenv("DEEPAGENTS_MASK_MODE", "deny")
+    (workspace / ".agentignore").write_text("#!mode:allow\n", encoding="utf-8")
+    assert cc.agentignore_effective_mode(workspace) == "allow"
+
+
+def test_agentignore_effective_mode_falls_back_to_setting(tmp_path, monkeypatch):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DEEPAGENTS_MASK_MODE", "allow")
+    (workspace / ".agentignore").write_text("src/\n", encoding="utf-8")  # no header
+    assert cc.agentignore_effective_mode(workspace) == "allow"
+
+
+# --- side-effect edits are named in the summary (F9) ---------------------------
+
+
+def test_wizard_decline_still_names_applied_netjail_edits(tmp_path, monkeypatch, capsys):
+    """`.agentignore`/NetJail edits are written the moment they are answered, so
+    declining the profile save must not leave them silent and unmentioned."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cc.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setenv("AGENT_WORKSPACE", str(tmp_path / "ws"))
+    net_dir = tmp_path / "netjail"
+    net_dir.mkdir()
+    monkeypatch.setattr(cc, "netjail_dir", lambda: net_dir)
+    _input_sequence(monkeypatch, [
+        "1",             # security posture: default
+        "1",             # .agentignore quick-edit: skip
+        "2",             # netjail: host-services.txt
+        "2",             # action: add
+        "ollama 11434",  # new entry
+        "1",             # netjail: done
+        "n",             # save to profile? NO
+    ])
+    rc = cc._run_wizard(security_only=True, auto_save=False)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Already applied (not part of the profile save)" in out
+    assert "ollama 11434" in out
+    assert "profile not saved" in out
+    # ...and the edit really is on disk, which is the whole point of saying so.
+    assert cc.netjail_list_entries(net_dir / "host-services.txt") == ["ollama 11434"]
+    assert not (tmp_path / cfg.PROFILE_NAME).exists()
 
 
 def test_config_main_dispatches_show(tmp_path, monkeypatch, capsys):

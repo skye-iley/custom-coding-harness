@@ -80,7 +80,8 @@ def test_parse_args_cli_budget_overrides_env(monkeypatch):
     assert cli.parse_args().max_cost == 9.0
 
 
-# --- _env_float / _env_int -------------------------------------------------
+# --- _env_float ------------------------------------------------------------
+# (`_env_int` went with `_env_defaults` in M5 C2 -- Settings casts int fields now.)
 
 def test_env_float_present(monkeypatch):
     monkeypatch.setenv("X", "1.5")
@@ -94,23 +95,10 @@ def test_env_float_absent_or_empty(monkeypatch):
     assert cli._env_float("X") is None
 
 
-def test_env_int_present_and_absent(monkeypatch):
-    monkeypatch.setenv("N", "42")
-    assert cli._env_int("N") == 42
-    monkeypatch.delenv("N", raising=False)
-    assert cli._env_int("N") is None
-
-
 def test_env_float_malformed_raises_systemexit(monkeypatch):
     monkeypatch.setenv("X", "abc")
     with pytest.raises(SystemExit):
         cli._env_float("X")
-
-
-def test_env_int_malformed_raises_systemexit(monkeypatch):
-    monkeypatch.setenv("N", "1.5")
-    with pytest.raises(SystemExit):
-        cli._env_int("N")
 
 
 # --- dispatch (shared entry for main.py and -m harness) --------------------
@@ -936,6 +924,11 @@ def test_handle_config_set_hitl_invalid_value_rejected(tmp_path, monkeypatch, ca
 
 def test_handle_config_save_writes_profile(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    # Host-side save: with DEEPAGENTS_IN_CONTAINER unset there is no mount to
+    # reason about, so a missing profile is just a first write. (In the test
+    # image the var IS set, hence the explicit delenv -- see
+    # test_handle_config_save_without_mount_refuses for that path.)
+    monkeypatch.delenv("DEEPAGENTS_IN_CONTAINER", raising=False)
     edited = {"model", "topic"}
     cli._handle_config(
         "/config save",
@@ -966,6 +959,161 @@ def test_handle_config_save_nothing_edited_is_a_noop(tmp_path, monkeypatch, caps
     )
     assert not (tmp_path / cfg.PROFILE_NAME).exists()
     assert "nothing session-edited" in capsys.readouterr().err
+
+
+def test_handle_config_save_without_mount_refuses(tmp_path, monkeypatch, capsys):
+    """In-container with no profile file => run-docker never mounted one (it
+    mounts only `if exists` on the host), so the write would land in the --rm
+    layer and vanish. Refuse and say so, rather than print success."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DEEPAGENTS_IN_CONTAINER", "1")
+    cli._handle_config(
+        "/config save",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="openai:gpt-6",
+        topic="my-topic",
+        tracker=None,
+        hitl_conf=None,
+        rebuild_agent=None,
+        edited={"model", "topic"},
+    )
+    assert not (tmp_path / cfg.PROFILE_NAME).exists()
+    err = capsys.readouterr().err
+    assert "no .harness-profile.yaml is mounted" in err
+    assert "wrote" not in err
+
+
+def test_handle_config_save_with_mount_still_writes_in_container(tmp_path, monkeypatch):
+    """The refusal keys on *no mount*, not on being in a container -- a mounted
+    profile must still be writable from the REPL (that's what the read-write
+    mount is for)."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DEEPAGENTS_IN_CONTAINER", "1")
+    (tmp_path / cfg.PROFILE_NAME).write_text("model: openai:gpt-5.5\n", encoding="utf-8")
+    cli._handle_config(
+        "/config save",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="openai:gpt-6",
+        topic=None,
+        tracker=None,
+        hitl_conf=None,
+        rebuild_agent=None,
+        edited={"model"},
+    )
+    assert cfg.load_profile(tmp_path / cfg.PROFILE_NAME)["model"] == "openai:gpt-6"
+
+
+def test_handle_config_save_readonly_target_is_reported_not_raised(tmp_path, monkeypatch, capsys):
+    """Under DEEPAGENTS_JAIL=1 /project is read-only, so save_profile's in-place
+    fallback raises OSError too. A REPL command must never end the session."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DEEPAGENTS_IN_CONTAINER", raising=False)
+
+    def boom(path, values):
+        raise OSError("Read-only file system")
+
+    monkeypatch.setattr(cli, "save_profile", boom)
+    model, new_agent, topic = cli._handle_config(
+        "/config save",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="openai:gpt-6",
+        topic=None,
+        tracker=None,
+        hitl_conf=None,
+        rebuild_agent=None,
+        edited={"model"},
+    )
+    assert (model, new_agent, topic) == ("openai:gpt-6", None, None)
+    err = capsys.readouterr().err
+    assert "could not write" in err and "read-only" in err
+
+
+# --- /config set reaches the past.sqlite row (F7) ------------------------------
+
+
+def test_handle_config_set_topic_updates_archive_row(tmp_path, monkeypatch):
+    """`/topic` and `/config set topic` change the same knob, so they must
+    persist the same way -- otherwise `harness past list --topic` files the run
+    under the launch topic."""
+    monkeypatch.chdir(tmp_path)
+    conn = archive.connect(tmp_path / "past.sqlite")
+    archive.start_session(conn, "run-1", "t", "openai", "gpt-5.5", topic="launch-topic")
+
+    cli._handle_config(
+        "/config set topic new-lane",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="openai:gpt-5.5",
+        topic="launch-topic",
+        tracker=None,
+        hitl_conf=None,
+        rebuild_agent=None,
+        edited=set(),
+        archive_conn=conn,
+        run_id="run-1",
+    )
+    assert archive.get_topic(conn, "run-1") == "new-lane"
+
+
+def test_handle_config_set_model_updates_archive_row(tmp_path, monkeypatch):
+    """Otherwise the ledger attributes every post-switch turn to the launch model."""
+    monkeypatch.chdir(tmp_path)
+    conn = archive.connect(tmp_path / "past.sqlite")
+    archive.start_session(conn, "run-1", "t", "openai", "gpt-5.5")
+
+    cli._handle_config(
+        "/config set model openai:gpt-6",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="openai:gpt-5.5",
+        topic=None,
+        tracker=None,
+        hitl_conf=None,
+        rebuild_agent=lambda spec: f"agent-for-{spec}",
+        edited=set(),
+        archive_conn=conn,
+        run_id="run-1",
+    )
+    row = conn.execute("SELECT provider, model FROM sessions WHERE run_id='run-1'").fetchone()
+    assert (row["provider"], row["model"]) == ("openai", "gpt-6")
+
+
+def test_handle_config_set_topic_bare_clears_it(tmp_path, monkeypatch):
+    """A topic could be set but never cleared: `_parse_config_set_args` rejected
+    a bare field outright."""
+    monkeypatch.chdir(tmp_path)
+    conn = archive.connect(tmp_path / "past.sqlite")
+    archive.start_session(conn, "run-1", "t", "openai", "gpt-5.5", topic="launch-topic")
+
+    _model, _agent, topic = cli._handle_config(
+        "/config set topic",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="openai:gpt-5.5",
+        topic="launch-topic",
+        tracker=None,
+        hitl_conf=None,
+        rebuild_agent=None,
+        edited=set(),
+        archive_conn=conn,
+        run_id="run-1",
+    )
+    assert topic is None
+    assert archive.get_topic(conn, "run-1") is None
+
+
+def test_handle_config_without_archive_conn_still_works(tmp_path, monkeypatch):
+    """Archive off (or a bare host-side call) => the archive writes are skipped,
+    not attempted."""
+    monkeypatch.chdir(tmp_path)
+    _model, _agent, topic = cli._handle_config(
+        "/config set topic solo",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="m",
+        topic=None,
+        tracker=None,
+        hitl_conf=None,
+        rebuild_agent=None,
+        edited=set(),
+    )
+    assert topic == "solo"
 
 
 def test_handle_config_unknown_subcommand(tmp_path, monkeypatch, capsys):
