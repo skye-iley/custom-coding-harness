@@ -47,8 +47,10 @@ on user code inside a separate **workspace** conda env. `project/main.py` is the
   `git-pr` (the git session lifecycle). See "Custom workflows" below.
 - `project/workspace/` — seed workspace (environment.yml, run-in-env.sh). Copied to
   `/project/workspace-seed/` in the image; the real workspace is bind-mounted at run time.
-- `scripts/` — `build`, `run-docker`, `verify`, `smoke`, `sync-models` in both `.ps1` (Windows)
-  and `.sh`. `sync-models` is a dev-time registry refresh (see Model routing).
+- `scripts/` — `build`, `run-docker`, `verify`, `smoke`, `sync-models`, `dev-setup` in both `.ps1`
+  (Windows) and `.sh`. `sync-models` is a dev-time registry refresh (see Model routing);
+  `dev-setup` builds the optional host venv (see "Host dev venv" below) and is the one script
+  that touches nothing in the image.
   `jail-check.py` is the odd one out: a single cross-platform Python script (no `.ps1`/`.sh` pair)
   driven by `smoke` to verify the M4 slice H bwrap jail actually holds in the built image. It lives
   here rather than in `tests/` because it only means anything when the container was started with
@@ -480,17 +482,27 @@ shape; only the graph-side `interrupt()`/`ask_human` suspend/resume is image-onl
 `smoke` runs `python3 -m pytest tests/` in the `test` image stage. The suite is
 layered by dependency so most of it also runs on a bare host with just pytest:
 
-- **Host-runnable (stdlib + harness.cost only):** `test_cost`, `test_sync_models`,
-  `test_providers` (model routing), `test_loaders` (optional-config IO),
-  `test_import_isolation` (cost-↛-sibling acyclic guard). These import harness
-  submodules via `tests/_bootstrap._load` (by file path, skipping
-  `harness/__init__`) and never need keys, network, or the runtime stack.
-- **Image-only (need deepagents/langchain/langgraph):** `test_agent` (workspace
-  trust boundary, shell-env secret scrub, final-message extraction, AGENTS.md
-  append), `test_hooks` (lifecycle hook dispatch), `test_cli` (arg parsing,
-  budgets, the null=MVP cost-tracker contract). Each guards its module with
-  `pytest.importorskip(...)`, so on a bare host the module is reported skipped
-  instead of erroring; in the `test` image it runs.
+- **Host-runnable (stdlib only — the default, and most of the suite):** anything
+  that does not touch the runtime stack. These import harness submodules via
+  `tests/_bootstrap._load` (by file path, skipping `harness/__init__`) and never
+  need keys, network, or langchain. **Do not maintain a list of them** — CI runs
+  `pytest tests/` with pytest and nothing else, so membership is decided by whether
+  a module imports cleanly, not by an enumeration someone has to remember to
+  extend. (It used to be enumerated in `ci.yml`, the list drifted, and 246 tests
+  quietly stopped running in that job.)
+- **Runtime-dependent (need deepagents/langchain/langgraph):** guarded with
+  `pytest.importorskip(...)` so a bare host reports SKIPPED instead of erroring,
+  and the `test` image runs them for real. Guard at **module** level when the whole
+  file needs the stack (`test_agent` — workspace trust boundary, shell-env secret
+  scrub, final-message extraction, AGENTS.md append; `test_cli` — arg parsing,
+  budgets, the null=MVP cost-tracker contract; `test_hooks`), or **per test** when
+  the rest of the module is pure (`test_hitl`, where only the two cases that build
+  a real `ToolMessage` need `langchain_core`). Prefer per-test: a module-level guard
+  over one impure case costs the host tier every other test in the file.
+
+  **A missing guard turns the host CI job red**, by design — that is the signal
+  that a new test reached for the runtime stack. Add the guard; never narrow what
+  CI collects to route around it.
 - **Live-model (needs a reachable model):** `test_live_model` — real prompts to a
   real model, real replies asserted. **Off unless `DEEPAGENTS_LIVE_MODEL=1`**
   (marker + gate in `conftest.py`), so the two tiers above stay hermetic and CI is
@@ -500,6 +512,54 @@ layered by dependency so most of it also runs on a bare host with just pytest:
   `choose_model` → `validate_credentials` → `resolve_chat_model` path (so a routing
   regression fails here too) and **skips** — never fails — when the stack or the
   model is unreachable.
+
+### Host dev venv (`scripts/dev-setup.{ps1,sh}`) — optional, and deliberately so
+
+Everything above assumes a bare host has nothing but pytest, which is exactly what
+CI does (`.github/workflows/ci.yml`: `pip install pytest`, then an explicit list of
+host-tier files). That property — **the suite runs with nothing installed** — is
+load-bearing and does not change.
+
+But it left no way to run anything langchain-touching *outside* Docker: the
+image-only tiers (`test_cli`, `test_agent`, `test_hooks`), the keyless admin
+commands this file documents as host-side, and any throwaway probe against real
+middleware. The admin-commands section below has always said "requires the harness
+venv: `source deepagent-image/.venv/bin/activate`" — and nothing created that venv.
+
+```powershell
+.\scripts\dev-setup.ps1              # create deepagent-image\.venv + install
+.\scripts\dev-setup.ps1 -Recreate    # rebuild from scratch
+```
+```bash
+./scripts/dev-setup.sh
+./scripts/dev-setup.sh --recreate
+```
+
+Installs `project/requirements.txt` + pytest into `deepagent-image/.venv`
+(gitignored). Four things to hold onto:
+
+- **It is not a third stack.** It mirrors the *image's* harness venv (`/opt/venv`)
+  from the same `requirements.txt`. The two-stack rule is untouched: harness deps
+  here, the agent's deps in `<workspace>/.conda/env`, never mixed. Do not install a
+  workspace dependency into it.
+- **It is not required, and no guard may be dropped because it exists.** Every
+  `pytest.importorskip(...)` in the image-only modules stays. Removing one because
+  "langchain is installed anyway" breaks the CI job that installs only pytest, and
+  breaks it silently — the tests would *error*, not skip, on a bare checkout.
+- **It changes what a local `pytest tests/` means.** With langchain present the
+  `importorskip` guards stop skipping, so the image-only tiers now run on the host.
+  Good for feedback speed; it also means a local green no longer proves anything
+  about the *image*. Same caveat the bind-mount loop below carries — a missing
+  `COPY`, a stale layer, or an image-only dep is invisible from here.
+- **It can drift from the image.** No lockfile, so wheels resolve to whatever is
+  current for your platform and Python minor (the image is ubuntu:24.04 ⇒ 3.12; the
+  script warns when yours differs). `smoke` builds clean and stays the check before
+  a PR.
+
+Related but separate: the keyless admin commands are dragged into langchain by
+`harness/__init__.py` importing `cli` unconditionally, so this venv makes them
+*work* without fixing *why* they need it. The real fix is a lazy `__init__` plus an
+entry-point change — Milestone 5 §0.1 F6, still deferred.
 
 ### Fast dev loop — run the image tiers without rebuilding
 
@@ -1058,7 +1118,15 @@ harness config set <field> <value>          # one-shot, non-interactive
 harness config security                     # security-only wizard + .agentignore/NetJail quick-edit
 ```
 
-(Requires the harness venv: `source deepagent-image/.venv/bin/activate` or install locally)
+**Requires the host dev venv** — create it with `scripts/dev-setup.{ps1,sh}`, then
+`source deepagent-image/.venv/bin/activate` (`.venv\Scripts\Activate.ps1` on Windows).
+See "Host dev venv" above.
+
+"Keyless" here means these commands need no API key, no network, and no model — not
+that they are dependency-free. `harness/__init__.py` imports `cli` unconditionally,
+so any `harness <subcommand>` pulls in langchain/langgraph/deepagents even though
+`config_cli.py` and `memadmin.py` add no such dependency of their own. That is
+Milestone 5 §0.1 F6, deferred; until it is fixed, host-side admin needs the venv.
 
 ## Feature Toggles & Removable Contracts
 

@@ -15,6 +15,7 @@ $pairs = @(
     @("smoke.ps1", "smoke.sh"),
     @("verify.ps1", "verify.sh"),
     @("sync-models.ps1", "sync-models.sh"),
+    @("dev-setup.ps1", "dev-setup.sh"),
     @("lib\config.ps1", "lib\config.sh")
 )
 

@@ -203,6 +203,13 @@ cd deepagent-image
                                           #   when unreachable, so read the -ra recap.
 .\scripts\run-docker.ps1                  # opens a persistent interactive session (you> prompt)
 .\scripts\run-docker.ps1 "your task"      # runs that task first, then drops to the prompt
+.\scripts\dev-setup.ps1                   # OPTIONAL host dev venv at deepagent-image\.venv
+                                          #   (requirements.txt + pytest). Lets the image-only
+                                          #   test tiers and the keyless admin commands run
+                                          #   outside Docker. Never required — CI installs
+                                          #   pytest alone and the host tier must keep working
+                                          #   that way. smoke stays the pre-PR authority.
+                                          #   See deepagent-image/CLAUDE.md → "Host dev venv".
 ```
 
 `run-docker` is a persistent multi-turn session, not a one-shot: the container stays up across
@@ -218,6 +225,7 @@ This repo maintains **parallel PowerShell and Bash scripts** for cross-platform 
 - `verify.ps1` ↔ `verify.sh`
 - `smoke.ps1` ↔ `smoke.sh`
 - `run-docker.ps1` ↔ `run-docker.sh`
+- `dev-setup.ps1` ↔ `dev-setup.sh`
 
 **Sync rule:** When you edit one, **keep the pair in sync**. Both must implement the 
 same logic and support the same flags. This is a known maintenance burden; a 
