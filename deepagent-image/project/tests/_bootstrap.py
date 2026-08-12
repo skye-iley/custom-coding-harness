@@ -1,9 +1,12 @@
 """Shared lazy harness-module loader for the test suite.
 
 Imports a single `harness.*` submodule by file path WITHOUT triggering
-`harness/__init__.py` (which pulls cli -> dotenv/langgraph/deepagents). Even in
-the test image (FROM runtime, all deps present) this stays useful because it is
-*lazy*: `test_providers_load_pricing_from_registry` must import
+`harness/__init__.py`. That used to be load-bearing on a bare host --
+`__init__.py` did an eager `from harness.cli import main`, so any package import
+pulled dotenv/langgraph/deepagents -- until M5 §0.1 F6 made `main` lazy. The
+remaining reason is the same one that always applied in the test image (FROM
+runtime, all deps present): this loader is *lazy* in import **timing**.
+`test_providers_load_pricing_from_registry` must import
 `harness.providers` only AFTER the `provider_registry` fixture sets
 `DEEPAGENTS_PROVIDERS_DIR` (the registry loads at import time). A module-top
 `import harness.providers` would bind the live registry before the fixture runs.
