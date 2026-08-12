@@ -1,12 +1,17 @@
-# Ollama: local, keyless (requires_key = false). No default model pinned yet,
-# so it is never auto-selected — set DEEPAGENTS_MODEL=ollama:<model> explicitly.
+# Ollama: local, keyless (requires_key = false), and the DEFAULT auto-selection
+# for this repo — priority 0 puts it ahead of every cloud provider, so an
+# unconfigured run pins a local model instead of burning a free-tier cloud quota.
+# Keyless means "always available" to auto-select (there is no credential to
+# detect), so a host without an Ollama daemon fails at connect time rather than
+# with "No model configured" — set DEEPAGENTS_MODEL=<provider>:<model> to
+# override, same as any other provider.
 # Local/self-hosted: no API charge (cost=0). Energy is still trackable per-model
 # via a models/<model>.toml [energy] table; measured device energy is specced
 # (not built) in docs/milestones/ENERGY_SPEC.md — set [energy] source = "nvidia_smi"|"rapl"|...
 api_key_env = "OLLAMA_API_KEY"
 requires_key = false
-priority = 5
-# default_model =
+priority = 0
+default_model = "gemma4"
 # prefix =
 # base_url_env =
 pricing = "free"

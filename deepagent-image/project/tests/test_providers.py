@@ -38,6 +38,7 @@ def _write_provider(
     pricing=None,
     omit_field=None,
     models=(),
+    extra_toml="",
 ):
     """Write a <name>/provider.toml (+ models/*.toml) under `root`.
 
@@ -62,7 +63,8 @@ def _write_provider(
         fields["pricing"] = f'"{pricing}"'
     fields.pop(omit_field, None)
     (pdir / "provider.toml").write_text(
-        "".join(f"{k} = {v}\n" for k, v in fields.items()), encoding="utf-8"
+        "".join(f"{k} = {v}\n" for k, v in fields.items()) + extra_toml,
+        encoding="utf-8",
     )
     for stem, body in models:
         (pdir / "models" / f"{stem}.toml").write_text(
@@ -170,10 +172,13 @@ def test_rates_for_keys_on_bare_id(tmp_path):
 # --- choose_model ----------------------------------------------------------
 
 def _two_provider_registry(tmp_path):
-    _write_provider(tmp_path, "alpha", api_key_env="ALPHA_API_KEY", priority=1,
-                    default_model="a1", models=[("a1", "")])
-    _write_provider(tmp_path, "beta", api_key_env="BETA_API_KEY", priority=2,
-                    default_model="b1", models=[("b1", "")])
+    # Both keyed: these cases are about the api_key_env gate, and only a keyed
+    # provider is gated on it (a keyless one is always available -- see the
+    # keyless auto-select cases below).
+    _write_provider(tmp_path, "alpha", api_key_env="ALPHA_API_KEY", requires_key=True,
+                    priority=1, default_model="a1", models=[("a1", "")])
+    _write_provider(tmp_path, "beta", api_key_env="BETA_API_KEY", requires_key=True,
+                    priority=2, default_model="b1", models=[("b1", "")])
     return providers._load_providers(tmp_path)
 
 
@@ -215,6 +220,155 @@ def test_choose_model_none_available_raises(tmp_path, monkeypatch):
     monkeypatch.delenv("BETA_API_KEY", raising=False)
     with pytest.raises(SystemExit):
         providers.choose_model(None)
+
+
+# --- keyless auto-selection (ollama as the shipped default) -----------------
+#
+# Regression guard: auto-selection used to gate on `os.getenv(api_key_env)` for
+# every provider, so a keyless one (requires_key = false) could never be picked
+# no matter what -- there is no credential to detect. That is why ollama had to
+# stay `default_model`-less. The gate now consults requires_key first.
+
+def test_provider_available_keyless_needs_no_key(tmp_path, monkeypatch):
+    _write_provider(tmp_path, "local", api_key_env="LOCAL_API_KEY",
+                    requires_key=False, models=[("m1", "")])
+    [p] = providers._load_providers(tmp_path)
+    monkeypatch.delenv("LOCAL_API_KEY", raising=False)
+    assert providers.provider_available(p) is True
+
+
+def test_provider_available_keyed_needs_key(tmp_path, monkeypatch):
+    _write_provider(tmp_path, "acme", api_key_env="ACME_API_KEY",
+                    requires_key=True, models=[("m1", "")])
+    [p] = providers._load_providers(tmp_path)
+    monkeypatch.delenv("ACME_API_KEY", raising=False)
+    assert providers.provider_available(p) is False
+    monkeypatch.setenv("ACME_API_KEY", "k")
+    assert providers.provider_available(p) is True
+
+
+def test_choose_model_autoselects_keyless_provider_without_key(tmp_path, monkeypatch):
+    _write_provider(tmp_path, "local", api_key_env="LOCAL_API_KEY", requires_key=False,
+                    priority=0, default_model="m1", models=[("m1", "")])
+    _write_provider(tmp_path, "cloud", api_key_env="CLOUD_API_KEY", requires_key=True,
+                    priority=1, default_model="c1", models=[("c1", "")])
+    monkeypatch.setattr(providers, "PROVIDERS", providers._load_providers(tmp_path))
+    monkeypatch.delenv("DEEPAGENTS_MODEL", raising=False)
+    monkeypatch.delenv("LOCAL_API_KEY", raising=False)
+    monkeypatch.setenv("CLOUD_API_KEY", "k")  # cloud is available too...
+    # ...but the keyless local provider is lower priority, so it wins.
+    assert providers.choose_model(None) == "local:m1"
+
+
+def test_choose_model_keyless_still_skipped_without_default_model(tmp_path, monkeypatch):
+    # requires_key=false alone is not enough: no default_model => never auto-picked
+    # (lmstudio/openrouter stay in that state).
+    _write_provider(tmp_path, "local", api_key_env="LOCAL_API_KEY", requires_key=False,
+                    priority=0, models=[("m1", "")])
+    _write_provider(tmp_path, "cloud", api_key_env="CLOUD_API_KEY", requires_key=True,
+                    priority=1, default_model="c1", models=[("c1", "")])
+    monkeypatch.setattr(providers, "PROVIDERS", providers._load_providers(tmp_path))
+    monkeypatch.delenv("DEEPAGENTS_MODEL", raising=False)
+    monkeypatch.setenv("CLOUD_API_KEY", "k")
+    assert providers.choose_model(None) == "cloud:c1"
+
+
+# --- [options] passthrough (client kwargs, e.g. ollama num_ctx) -------------
+#
+# One Ollama tag can serve every context size, because per-request options
+# override the Modelfile PARAMETER block. These cases pin the resolution order
+# (provider [options] < model [options] < DEEPAGENTS_MODEL_OPTIONS) and the env
+# parser; actually applying them to a client is image-only.
+
+def test_options_absent_resolves_empty(tmp_path, monkeypatch):
+    _write_provider(tmp_path, "acme", api_key_env="ACME_API_KEY", models=[("m1", "")])
+    monkeypatch.setattr(providers, "PROVIDERS", providers._load_providers(tmp_path))
+    monkeypatch.delenv(providers.MODEL_OPTIONS_ENV, raising=False)
+    # Removable contract: no [options] anywhere => nothing to apply.
+    assert providers.resolve_model_options("acme:m1") == {}
+
+
+def test_model_options_override_provider_options(tmp_path, monkeypatch):
+    _write_provider(
+        tmp_path, "acme", api_key_env="ACME_API_KEY",
+        extra_toml="[options]\nnum_ctx = 4096\ntemperature = 0.5\n",
+        models=[("m1", "[options]\nnum_ctx = 32768\n")],
+    )
+    monkeypatch.setattr(providers, "PROVIDERS", providers._load_providers(tmp_path))
+    monkeypatch.delenv(providers.MODEL_OPTIONS_ENV, raising=False)
+    # Model wins on the key it sets; the provider-wide key it doesn't set survives.
+    assert providers.resolve_model_options("acme:m1") == {
+        "num_ctx": 32768, "temperature": 0.5,
+    }
+
+
+def test_env_options_override_the_registry(tmp_path, monkeypatch):
+    _write_provider(tmp_path, "acme", api_key_env="ACME_API_KEY",
+                    models=[("m1", "[options]\nnum_ctx = 4096\n")])
+    monkeypatch.setattr(providers, "PROVIDERS", providers._load_providers(tmp_path))
+    monkeypatch.setenv(providers.MODEL_OPTIONS_ENV, "num_ctx=131072")
+    assert providers.resolve_model_options("acme:m1")["num_ctx"] == 131072
+
+
+def test_parse_options_env_coerces_scalars():
+    parsed = providers.parse_options_env(
+        "num_ctx=65536, temperature=0.2 , think=true, stop=END"
+    )
+    # Types matter: a client that validates kwargs rejects the string "65536".
+    assert parsed == {
+        "num_ctx": 65536, "temperature": 0.2, "think": True, "stop": "END",
+    }
+    assert isinstance(parsed["num_ctx"], int)
+    assert isinstance(parsed["temperature"], float)
+
+
+def test_parse_options_env_empty_is_empty():
+    assert providers.parse_options_env(None) == {}
+    assert providers.parse_options_env("") == {}
+    assert providers.parse_options_env("   ") == {}
+
+
+def test_parse_options_env_rejects_malformed():
+    with pytest.raises(SystemExit):
+        providers.parse_options_env("num_ctx")       # no '='
+    with pytest.raises(SystemExit):
+        providers.parse_options_env("=65536")        # no key
+
+
+def test_options_table_must_be_a_table(tmp_path):
+    _write_provider(tmp_path, "acme", api_key_env="ACME_API_KEY",
+                    extra_toml='options = "nope"\n', models=[("m1", "")])
+    with pytest.raises(SystemExit) as exc:
+        providers._load_providers(tmp_path)
+    assert "[options]" in str(exc.value)
+
+
+def test_unknown_prefix_has_no_options(tmp_path, monkeypatch):
+    _write_provider(tmp_path, "acme", api_key_env="ACME_API_KEY", models=[("m1", "")])
+    monkeypatch.setattr(providers, "PROVIDERS", providers._load_providers(tmp_path))
+    monkeypatch.setenv(providers.MODEL_OPTIONS_ENV, "num_ctx=4096")
+    # No provider matches, but the env tier still applies -- an unregistered spec
+    # is passed through to init_chat_model, and it should be configurable too.
+    assert providers.resolve_model_options("mystery:x") == {"num_ctx": 4096}
+
+
+def test_shipped_ollama_model_declares_num_ctx():
+    """The shipped default carries an explicit num_ctx.
+
+    Ollama's own default context is far below what a coding agent needs, and the
+    failure is silent truncation rather than an error -- so the registry pins it
+    instead of inheriting whatever the tag's Modelfile happens to say.
+    """
+    provider = providers.provider_for("ollama:gemma4")
+    assert provider.options_for("ollama:gemma4")["num_ctx"] >= 32768
+
+
+def test_shipped_registry_autoselects_ollama(monkeypatch):
+    """The shipped providers/ dir must resolve to a local model with no keys set."""
+    monkeypatch.delenv("DEEPAGENTS_MODEL", raising=False)
+    for provider in providers.PROVIDERS:
+        monkeypatch.delenv(provider.api_key_env, raising=False)
+    assert providers.choose_model(None) == "ollama:gemma4"
 
 
 # --- validate_credentials --------------------------------------------------

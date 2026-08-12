@@ -32,6 +32,20 @@ def _project_shaped_tmp_path(tmp_path):
     (tmp_path / "providers").mkdir(exist_ok=True)
 
 
+def _no_provider_detected(monkeypatch):
+    """Force `_wizard_model_step` down its "nothing detected" branch.
+
+    Clearing the API-key env vars is no longer sufficient: ollama is keyless and
+    carries a `default_model`, so the shipped registry always detects it (that is
+    the point -- it is the auto-select default). Drop keyless providers from the
+    list as well to reach the no-detection path.
+    """
+    keyed = [p for p in cc.PROVIDERS if p.requires_key]
+    for p in cc.PROVIDERS:
+        monkeypatch.delenv(p.api_key_env, raising=False)
+    monkeypatch.setattr(cc, "PROVIDERS", keyed)
+
+
 # --- format_settings_lines (pure) ---------------------------------------------
 
 
@@ -222,10 +236,23 @@ def test_cmd_set_invalid_value_no_prior_file_removed(tmp_path, monkeypatch):
 
 
 def test_wizard_model_step_no_keys_returns_none(tmp_path, monkeypatch, capsys):
-    for p in cc.PROVIDERS:
-        monkeypatch.delenv(p.api_key_env, raising=False)
+    _no_provider_detected(monkeypatch)
     assert cc._wizard_model_step() is None
     assert "no provider API key detected" in capsys.readouterr().out
+
+
+def test_wizard_model_step_offers_keyless_provider_without_keys(monkeypatch):
+    """A keyless provider with a default_model is offered with no keys set.
+
+    Regression guard: the wizard gated on `os.getenv(api_key_env)` like
+    choose_model did, so it would report "no provider API key detected" on a
+    host whose only configured model is a local ollama one -- and then advise
+    auto-select, which would have picked ollama anyway. The two now agree.
+    """
+    for p in cc.PROVIDERS:
+        monkeypatch.delenv(p.api_key_env, raising=False)
+    _input_sequence(monkeypatch, ["1"])  # pick the first (only) detected option
+    assert cc._wizard_model_step() == "ollama:gemma4"
 
 
 def test_wizard_model_step_picks_detected_provider(monkeypatch):
@@ -342,9 +369,8 @@ def test_run_wizard_refuses_without_tty(monkeypatch, capsys):
 def test_run_wizard_end_to_end_writes_profile_and_hitl(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cc.sys.stdin, "isatty", lambda: True)
-    for p in cc.PROVIDERS:
-        monkeypatch.delenv(p.api_key_env, raising=False)
-    # No keys detected => _wizard_model_step prints a message and returns
+    _no_provider_detected(monkeypatch)
+    # No provider detected => _wizard_model_step prints a message and returns
     # WITHOUT calling input() at all, so the sequence below starts at the
     # security-posture prompt, not the model prompt.
     _input_sequence(monkeypatch, [

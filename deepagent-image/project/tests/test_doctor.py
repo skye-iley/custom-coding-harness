@@ -45,6 +45,10 @@ def test_doctor_prints_resolved_config_summary(tmp_path, monkeypatch, capsys):
 def test_doctor_resolved_config_summary_reflects_profile(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("DEEPAGENTS_JAIL", raising=False)
+    # env outranks profile in the precedence chain, so an ambient DEEPAGENTS_MODEL
+    # would make the summary read `(env)` and defeat the point of this case, which
+    # is that the *profile* tier is what gets reported.
+    monkeypatch.delenv("DEEPAGENTS_MODEL", raising=False)
     (tmp_path / ".harness-profile.yaml").write_text("jail: true\nmodel: openai:gpt-5.5\n", encoding="utf-8")
     ws = tmp_path / "workspace"
     ws.mkdir()

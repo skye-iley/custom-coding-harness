@@ -38,6 +38,11 @@ def test_parse_args_defaults(monkeypatch):
     monkeypatch.delenv("DEEPAGENTS_THREAD_ID", raising=False)
     monkeypatch.delenv("DEEPAGENTS_MAX_COST", raising=False)
     monkeypatch.delenv("DEEPAGENTS_MAX_TOKENS", raising=False)
+    # A test asserting *default* resolution must not inherit the ambient env: a
+    # DEEPAGENTS_MODEL exported in the shell (or `-e`'d into a dev container) is a
+    # legitimate tier the resolver honours, so it would make ns.model non-None and
+    # fail this for reasons that have nothing to do with the code.
+    monkeypatch.delenv("DEEPAGENTS_MODEL", raising=False)
     _argv(monkeypatch)
     ns = cli.parse_args()
     assert ns.task == []

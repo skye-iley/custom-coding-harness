@@ -35,7 +35,12 @@ A milestone moves through three folders. What each stage carries is deliberate:
 
 ## Planned milestones — `milestones/planned/`
 
-(none currently)
+- **`milestone5.1.md`** — **Config Field Registry**: follow-on refactor of `milestone5.md`. M5 put
+  every run knob behind one precedence chain but not behind one *declaration* — adding a knob is a
+  ten-site edit where nine sites fail silently, and no field knows its own valid values, which is
+  what blocks the arrow-key `/config` menu M5 scoped out. Replaces the duplication with one
+  `FieldSpec` table everything derives from, then adds the picker on top. Behavior-preserving by
+  construction: the M5 test suite is the oracle and must pass unchanged.
 
 ## In-progress milestones — `milestones/in-progress/`
 

@@ -13,6 +13,13 @@ doesn't fit most of them anyway). One real bug the build surfaced and fixed alon
 `PauseMiddleware` caching note. §0.1 records the pre-merge review fixes (two passes, 16 items);
 §0.2 the one gap that ships open, deferred to M5.1 on purpose.
 
+**Follow-on: `docs/milestones/planned/milestone5.1.md` (Config Field Registry).** The reviews that
+produced §0.1 also found the *structural* reason the C5 menu was dropped: a knob is declared in ten
+places and none of them records its valid values, so no field can render a picker. 5.1 replaces that
+duplication with one `FieldSpec` table everything derives from, then adds the menu on top. It is a
+behavior-preserving refactor — this milestone's test suite is its oracle — and it is where §0.2's
+enum-validation gap gets closed.
+
 ### 0.1 Pre-merge review fixes (two passes)
 
 Two reviews of the completed branch found the same shape of defect twice: the resolver and both

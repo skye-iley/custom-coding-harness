@@ -61,10 +61,23 @@ class Provider:
     # stored raw so env + tier resolution happens at run time (harness/ratelimit).
     # None => no plan limits declared (no proactive pacing unless env sets one).
     limits_table: dict | None = None
+    # Optional [options] tables: client kwargs passed verbatim to the chat model
+    # constructor (e.g. ollama's num_ctx). Provider-wide default + per-model
+    # override, both empty by default so the removable contract holds.
+    options_table: dict = field(default_factory=dict)
+    model_options: dict[str, dict] = field(default_factory=dict)
 
     def rates_for(self, model: str) -> ModelRates | None:
         """ModelRates for a full model spec, keyed by the bare id after prefix."""
         return self.model_rates.get(model[len(self.prefix):])
+
+    def options_for(self, model: str) -> dict:
+        """Client kwargs for a full model spec: provider [options], then the
+        model's own [options] on top. Registry tiers only — the env tier is
+        applied by resolve_model_options."""
+        merged = dict(self.options_table)
+        merged.update(self.model_options.get(model[len(self.prefix):], {}))
+        return merged
 
 
 def _load_provider(provider_dir: Path) -> Provider:
@@ -91,6 +104,7 @@ def _load_provider(provider_dir: Path) -> Provider:
     # the bare id so cost.py can price a turn (Milestone 1).
     models: list[str] = []
     model_rates: dict[str, ModelRates] = {}
+    model_options: dict[str, dict] = {}
     models_dir = provider_dir / "models"
     if models_dir.is_dir():
         for model_path in sorted(models_dir.glob("*.toml")):
@@ -106,6 +120,11 @@ def _load_provider(provider_dir: Path) -> Provider:
             energy_tbl = model_cfg.get("energy")
             if pricing_tbl or energy_tbl:
                 model_rates[bare] = rates_from_toml(pricing_tbl, energy_tbl)
+            opts_tbl = model_cfg.get("options")
+            if opts_tbl:
+                if not isinstance(opts_tbl, dict):
+                    raise SystemExit(f"Model config {model_path}: [options] must be a table.")
+                model_options[bare] = dict(opts_tbl)
 
     # default_model is a model stem in provider.toml; expand to a full spec.
     default_stem = cfg.get("default_model")
@@ -125,6 +144,10 @@ def _load_provider(provider_dir: Path) -> Provider:
     if limits_table is not None and not isinstance(limits_table, dict):
         raise SystemExit(f"Provider config {config_path}: [limits] must be a table.")
 
+    options_table = cfg.get("options") or {}
+    if not isinstance(options_table, dict):
+        raise SystemExit(f"Provider config {config_path}: [options] must be a table.")
+
     return Provider(
         prefix=prefix,
         api_key_env=api_key_env,
@@ -136,6 +159,8 @@ def _load_provider(provider_dir: Path) -> Provider:
         pricing=pricing,
         model_rates=model_rates,
         limits_table=limits_table,
+        options_table=dict(options_table),
+        model_options=model_options,
     )
 
 
@@ -184,6 +209,27 @@ def provider_for(model: str) -> Provider | None:
     return _provider_for(model)
 
 
+def provider_available(provider: Provider) -> bool:
+    """Is this provider usable right now, for auto-selection purposes?
+
+    Keyed providers need their `api_key_env` set to a non-empty value. Keyless
+    ones (`requires_key = false` — ollama, lmstudio) are always available: they
+    talk to a local daemon, so there is no credential whose presence could act
+    as the "configured" signal. Gating them on `api_key_env` anyway would make a
+    keyless provider permanently unselectable, which is why ollama could not be
+    the default before.
+
+    Consequence worth knowing: with a keyless provider carrying a `default_model`
+    (ollama does, at priority 0), auto-selection always succeeds, so a host with
+    no Ollama daemon fails at *connect* time rather than with `choose_model`'s
+    "No model configured" SystemExit. That exit is now only reachable when every
+    provider with a `default_model` is keyed and unkeyed.
+    """
+    if not provider.requires_key:
+        return True
+    return bool(os.getenv(provider.api_key_env))
+
+
 def choose_model(explicit_model: str | None) -> str:
     if explicit_model:
         return explicit_model
@@ -193,7 +239,7 @@ def choose_model(explicit_model: str | None) -> str:
         return env_model
 
     for provider in PROVIDERS:
-        if provider.default_model and os.getenv(provider.api_key_env):
+        if provider.default_model and provider_available(provider):
             return provider.default_model
 
     raise SystemExit(
@@ -221,6 +267,69 @@ def validate_credentials(model: str) -> None:
         raise SystemExit(f"Model '{model}' requires {provider.api_key_env}.")
 
 
+MODEL_OPTIONS_ENV = "DEEPAGENTS_MODEL_OPTIONS"
+
+
+def _coerce_option(raw: str):
+    """Best-effort scalar typing for an env-supplied option value.
+
+    The registry gets types for free from TOML; the env tier is a flat string, and
+    `num_ctx="65536"` is not the same as `num_ctx=65536` to a client that validates
+    its kwargs. bool first (``int("true")`` raises anyway), then int, then float,
+    else the string unchanged.
+    """
+    text = raw.strip()
+    if text.lower() in ("true", "false"):
+        return text.lower() == "true"
+    for cast in (int, float):
+        try:
+            return cast(text)
+        except ValueError:
+            pass
+    return text
+
+
+def parse_options_env(value: str | None) -> dict:
+    """Parse DEEPAGENTS_MODEL_OPTIONS ("num_ctx=65536,temperature=0.2") to a dict.
+
+    Deliberately a generic key=value bag rather than a dedicated `--num-ctx` flag:
+    these are provider-specific client kwargs (num_ctx is Ollama's; OpenAI has no
+    such thing), so they are registry data, not `Settings` fields. Adding a typed
+    flag per option is the exact sprawl Milestone 5.1's field registry exists to
+    remove — a knob that belongs in `Settings` should go through that, not here.
+    """
+    if not value or not value.strip():
+        return {}
+    out: dict = {}
+    for chunk in value.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if "=" not in chunk:
+            raise SystemExit(
+                f"{MODEL_OPTIONS_ENV}: expected key=value pairs, got {chunk!r}."
+            )
+        key, _, raw = chunk.partition("=")
+        key = key.strip()
+        if not key:
+            raise SystemExit(f"{MODEL_OPTIONS_ENV}: empty option name in {chunk!r}.")
+        out[key] = _coerce_option(raw)
+    return out
+
+
+def resolve_model_options(model: str, env=None) -> dict:
+    """Client kwargs for a model spec: provider [options] < model [options] < env.
+
+    Env wins so a one-off run can raise `num_ctx` without editing the registry,
+    matching the precedence every other knob uses.
+    """
+    env = os.environ if env is None else env
+    provider = _provider_for(model)
+    merged = provider.options_for(model) if provider else {}
+    merged.update(parse_options_env(env.get(MODEL_OPTIONS_ENV)))
+    return merged
+
+
 def resolve_chat_model(model: str):
     """Turn a model spec into something create_deep_agent accepts.
 
@@ -232,6 +341,7 @@ def resolve_chat_model(model: str):
     """
     provider = _provider_for(model)
     limiter = _rate_limiter_for(provider)
+    options = resolve_model_options(model)
 
     if provider and provider.base_url_env:
         base_url = os.getenv(provider.base_url_env)
@@ -239,7 +349,9 @@ def resolve_chat_model(model: str):
             raise SystemExit(f"Model '{model}' requires {provider.base_url_env}.")
         from langchain_openai import ChatOpenAI
 
-        kwargs = {"rate_limiter": limiter} if limiter is not None else {}
+        kwargs = dict(options)
+        if limiter is not None:
+            kwargs["rate_limiter"] = limiter
         return ChatOpenAI(
             model=model[len(provider.prefix):],
             base_url=base_url,
@@ -247,16 +359,28 @@ def resolve_chat_model(model: str):
             **kwargs,
         )
 
-    if limiter is not None:
+    if limiter is not None or options:
         # Native provider: create_deep_agent would call init_chat_model itself and
-        # get an unpaced model. To attach the limiter we must build the object here.
-        # Fall back to the bare string (unpaced) if construction fails (e.g. keyless
-        # host) so we never turn a pacing win into a hard failure.
-        try:
-            from langchain.chat_models import init_chat_model
+        # get a bare, unconfigured model. To attach the limiter or any [options]
+        # kwargs we must build the object here.
+        from langchain.chat_models import init_chat_model
 
-            return init_chat_model(model, rate_limiter=limiter)
-        except Exception:  # noqa: BLE001 - pacing is best-effort; degrade to unpaced
+        kwargs = dict(options)
+        if limiter is not None:
+            kwargs["rate_limiter"] = limiter
+        try:
+            return init_chat_model(model, **kwargs)
+        except Exception as exc:  # noqa: BLE001
+            # Pacing is best-effort: degrading to an unpaced model costs speed, so
+            # it stays a silent fallback (unchanged contract). Options are NOT --
+            # a dropped num_ctx silently truncates context and changes answers,
+            # which is worse than a loud failure. So only degrade when the only
+            # thing we would lose is the limiter.
+            if options:
+                raise SystemExit(
+                    f"Model '{model}': failed to apply [options] "
+                    f"{sorted(options)} -- {type(exc).__name__}: {exc}"
+                ) from exc
             return model
     return model
 
@@ -290,4 +414,8 @@ def init_summary_model(model: str):
         return resolved
     from langchain.chat_models import init_chat_model
 
+    # A bare string here means resolve_chat_model found no limiter and no
+    # [options] -- so there is nothing to forward. If options existed it would
+    # already have returned a configured object, and re-resolving them here would
+    # double-apply them.
     return init_chat_model(resolved)

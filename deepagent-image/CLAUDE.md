@@ -67,10 +67,16 @@ on user code inside a separate **workspace** conda env. `project/main.py` is the
 .\scripts\build.ps1                       # docker build -t deepagent-harness
 .\scripts\verify.ps1                      # sanity-check harness venv + conda in one start
 .\scripts\smoke.ps1                       # smoke test
+.\scripts\smoke.ps1 -LiveModel            # + the live-model tier (real model in/out)
 .\scripts\run-docker.ps1                  # opens straight to the you> prompt
 .\scripts\run-docker.ps1 "your task"      # runs that task first, then drops to the prompt
 .\scripts\run-docker.ps1 -WorkspacePath C:\path\to\repo "your task"
 ```
+
+To iterate on the image tiers **without** a rebuild, bind-mount the tree over
+`/project` — see "Fast dev loop" under "Test suite layout & conventions". It has two
+mount/env gotchas whose failures masquerade as real regressions; read it before
+hand-rolling a `docker run`.
 
 `run-docker.ps1` refuses to start without `project\.env`. It bind-mounts the workspace to
 `/project/workspace`, seeds missing `environment.yml` / `.gitignore` / `run-in-env.sh`, and runs
@@ -142,11 +148,47 @@ Harness changes → `project/requirements.txt` + rebuild. Never edit `/opt/venv`
 resolution all derive from it, so maps can't drift. It is **loaded at import time from the
 `project/providers/` registry** (one `provider.toml` per provider + `models/<model>.toml` per
 model), not hard-coded — add/change a provider or model by editing TOML, no Python edit needed
-(see `providers/README.md`). Auto-selection scans by ascending `priority` and **skips any provider
-whose `default_model` is unset** (ollama, lmstudio, openrouter are intentionally unset). Override
-explicitly with `DEEPAGENTS_MODEL=provider:model`. OpenAI-compatible providers (cursor, openrouter,
-lmstudio) route via `ChatOpenAI` and need their `*_BASE_URL`. `DEEPAGENTS_PROVIDERS_DIR` overrides
-the registry path (used by tests).
+(see `providers/README.md`). Override explicitly with `DEEPAGENTS_MODEL=provider:model`.
+OpenAI-compatible providers (cursor, openrouter, lmstudio) route via `ChatOpenAI` and need their
+`*_BASE_URL`. `DEEPAGENTS_PROVIDERS_DIR` overrides the registry path (used by tests).
+
+**Auto-selection** (`choose_model`, when neither `--model` nor `DEEPAGENTS_MODEL` is set) scans by
+ascending `priority` and takes the first provider that has a `default_model` **and** is *available*
+(`providers.provider_available`). Two gates, both required:
+- `default_model` set — lmstudio and openrouter are still deliberately unset, so they are never
+  auto-picked.
+- available — a **keyed** provider (`requires_key = true`) needs a non-empty `api_key_env`; a
+  **keyless** one (`requires_key = false`) is always available, because there is no credential whose
+  presence could signal "configured".
+
+**`ollama` is the shipped default** (`priority = 0`, `default_model = "gemma4"`), so an unconfigured
+run pins a local model instead of spending a cloud free-tier quota — which is what makes the
+live-model test tier practical (see "Test suite layout & conventions"). Two consequences worth
+knowing:
+- Auto-selection now effectively always succeeds, so a host with no Ollama daemon fails at
+  *connect* time, not with `choose_model`'s "No model configured" `SystemExit`. That exit is only
+  reachable when every provider carrying a `default_model` is keyed and unkeyed.
+- The `gemma4` stem is an Ollama **tag**. A locally-tagged variant (`gemma4:harnesstest1`) needs its
+  own `providers/ollama/models/<tag>.toml` before it is a *known* spec; without one it still runs
+  (`validate_credentials` passes unknown specs through to `init_chat_model`) but carries no rates or
+  metadata.
+
+**`[options]` — client kwargs from the registry.** `provider.toml` and
+`models/<model>.toml` can each carry an `[options]` table whose keys are passed verbatim to the
+chat-model constructor; `DEEPAGENTS_MODEL_OPTIONS="num_ctx=131072,temperature=0.2"` overrides both
+(`providers.resolve_model_options`). This is what lets **one Ollama tag serve every context size** —
+per-request options beat the tag's Modelfile `PARAMETER` block, so no `ollama create` per variant.
+`providers/ollama/models/gemma4.toml` ships `num_ctx = 65536` because Ollama's own default is well
+below what a coding agent needs and the failure mode is silent truncation, not an error.
+
+Deliberately a generic key=value bag, **not** a typed `--num-ctx` flag: these are provider-specific
+client kwargs (`num_ctx` is Ollama's; OpenAI has no such thing), so they are registry data rather
+than `Settings` fields — adding a flag per option is the sprawl Milestone 5.1's field registry
+exists to remove. Two behaviours: **options fail loudly** where the rate limiter degrades quietly
+(a dropped `num_ctx` changes answers; a missing limiter only costs speed), and options are resolved
+**once at agent build**, never per call — changing `num_ctx` makes Ollama reload the model (~15–20s,
+KV cache reallocation), so varying it per turn would thrash the GPU. Full detail:
+`providers/README.md` → "`[options]` — client kwargs".
 
 `scripts/sync-models.{sh,ps1}` (= `python3 -m harness sync-models`, code in `harness/sync_models.py`)
 regenerates `models/*.toml` from each provider's live list-models endpoint. **Dev-time only** — it
@@ -449,12 +491,80 @@ layered by dependency so most of it also runs on a bare host with just pytest:
   budgets, the null=MVP cost-tracker contract). Each guards its module with
   `pytest.importorskip(...)`, so on a bare host the module is reported skipped
   instead of erroring; in the `test` image it runs.
+- **Live-model (needs a reachable model):** `test_live_model` — real prompts to a
+  real model, real replies asserted. **Off unless `DEEPAGENTS_LIVE_MODEL=1`**
+  (marker + gate in `conftest.py`), so the two tiers above stay hermetic and CI is
+  unaffected. `smoke -LiveModel` / `LIVE_MODEL=1 ./smoke.sh` turns it on and points
+  the container at a host-run daemon. Take the session-scoped **`live_model`
+  fixture**: it resolves the model through the harness's own
+  `choose_model` → `validate_credentials` → `resolve_chat_model` path (so a routing
+  regression fails here too) and **skips** — never fails — when the stack or the
+  model is unreachable.
+
+### Fast dev loop — run the image tiers without rebuilding
+
+`smoke` rebuilds both image targets every run, which is the right default but slow
+to iterate against. Once the images exist, bind-mount the working tree over
+`/project` instead: the container gets your live edits with no rebuild. **Rebuild
+only when `requirements.txt` changes** — everything else is mounted.
+
+```powershell
+$w = "<repo>\deepagent-image"
+docker run --rm -v "$w\project:/project" `
+  -v "$w\apparmor:/project/apparmor:ro" -v "$w\seccomp:/project/seccomp:ro" `
+  --add-host host.docker.internal:host-gateway `
+  -e DEEPAGENTS_LIVE_MODEL=1 -e OLLAMA_HOST=http://host.docker.internal:11434 `
+  deepagent-harness-test python3 -m pytest tests/ -q -ra
+```
+
+```bash
+w="<repo>/deepagent-image"
+docker run --rm -v "$w/project:/project" \
+  -v "$w/apparmor:/project/apparmor:ro" -v "$w/seccomp:/project/seccomp:ro" \
+  --add-host host.docker.internal:host-gateway \
+  -e DEEPAGENTS_LIVE_MODEL=1 -e OLLAMA_HOST=http://host.docker.internal:11434 \
+  deepagent-harness-test python3 -m pytest tests/ -q -ra
+```
+
+One non-obvious requirement, and one preference:
+
+- **Mount `apparmor/` and `seccomp/` back explicitly.** The Dockerfile copies them
+  *into* `/project`, but on the host they are **siblings** of `project/`
+  (`deepagent-image/apparmor`, `deepagent-image/seccomp`) — so mounting `project/`
+  over `/project` hides the baked-in copies. Without the two extra mounts,
+  `test_apparmor` / `test_seccomp` / the AppArmor+seccomp cases in `test_doctor`
+  fail on missing artifacts (11 tests). Not fixable in the tests: they are the CI
+  regression guards on those profiles, so skipping when the artifact is absent
+  would let a *deleted* profile pass silently.
+- **Prefer leaving `DEEPAGENTS_MODEL` unset.** Not a correctness trap — every test
+  that asserts default/profile resolution now scrubs it explicitly, and the suite
+  is green with it set. But leaving it unset is the stronger check: auto-selection
+  then has to reach `ollama:gemma4` by itself, which is what a stock run does.
+  Point the live tier at another model with a per-test monkeypatch when you need to.
+
+Drop `DEEPAGENTS_LIVE_MODEL` / `OLLAMA_HOST` / `--add-host` to run just the
+hermetic tiers. `smoke` remains the authority before a PR — it builds clean, so it
+catches anything the mount papers over (a missing `COPY`, a stale image layer).
 
 Conventions for new tests:
 
-- **No keys, no network, no real model calls.** Stub `create_deep_agent` /
-  `subprocess.run`, monkeypatch `providers.PROVIDERS`, build throwaway provider
-  registries under `tmp_path` via `providers._load_providers(dir)`.
+- **Exercise the real model where the behavior under test is model behavior.**
+  Stubs are deterministic *and* structurally blind: they answer however the test
+  wrote them to, so a harness that is internally consistent but doesn't actually
+  work reads green. Real bugs have been caught only by running a model —
+  tool-calling the model won't emit, `usage_metadata` a provider omits (silently
+  billing $0), a reply shape the extractor mishandles. So when a case asserts
+  something that depends on what a *model* does rather than on what the harness
+  does with it, add a `live_model` case alongside the stubbed one. Ollama being
+  the default makes this cheap: no key, no quota, no rate limit.
+  **Don't convert the existing tiers** — a stubbed test is still the right tool
+  for harness logic, and the live tier is additive.
+- **No keys, no network, no real cloud calls — outside the live tier.** In the
+  host and image tiers: stub `create_deep_agent` / `subprocess.run`, monkeypatch
+  `providers.PROVIDERS`, build throwaway provider registries under `tmp_path` via
+  `providers._load_providers(dir)`. The live tier is the *only* place a real model
+  call belongs, it is opt-in, and even there the model must be a local one — a
+  test that needs a cloud key is a test CI can never run.
 - **All filesystem writes go to `tmp_path`** (or the `workspace_sandbox` fixture,
   which is a tmp workspace with CWD pointed at it). Nothing a test writes may
   reach the repo or the host-mounted workspace.

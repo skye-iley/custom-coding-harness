@@ -15,8 +15,15 @@
 #                               # the gate runs but self-skips on a host that cannot
 #                               # nest user namespaces; -JailCheck turns that skip into
 #                               # a failure (use in CI to pin the boundary).
+#   .\smoke.ps1 -LiveModel      # also run the live-model tier: real prompts to a real
+#                               # model, real replies asserted (tests\test_live_model.py).
+#                               # Default off, so the suite stays hermetic. Needs a
+#                               # reachable model — with the shipped default that is a
+#                               # host `ollama serve`. Individual cases SKIP rather than
+#                               # fail when it is unreachable, so read the -ra recap
+#                               # instead of trusting a green exit.
 [CmdletBinding()]
-param([switch]$NetJail, [switch]$KeepArtifacts, [switch]$JailCheck)
+param([switch]$NetJail, [switch]$KeepArtifacts, [switch]$JailCheck, [switch]$LiveModel)
 
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
@@ -272,10 +279,26 @@ try {
         Write-Host "M4 jail: bwrap gate + masked/unmasked/write/ro boundary checks - ok"
     }
 
+    # Live-model tier: off by default so the suite needs no model, no keys, no
+    # network. -LiveModel turns it on and reaches a host-run daemon at
+    # host.docker.internal (built in on Docker Desktop; --add-host is the Linux
+    # path and is harmless here). Under -NetJail the forwarder already set
+    # OLLAMA_HOST for us - don't overwrite it.
+    $LiveArgs = @()
+    if ($LiveModel) {
+        $LiveArgs = @("-e", "DEEPAGENTS_LIVE_MODEL=1", "--add-host", "host.docker.internal:host-gateway")
+        if (-not $NetJail) {
+            $ollamaHost = if ($env:OLLAMA_HOST) { $env:OLLAMA_HOST } else { "http://host.docker.internal:11434" }
+            $LiveArgs += @("-e", "OLLAMA_HOST=$ollamaHost")
+        }
+        if ($env:DEEPAGENTS_MODEL) { $LiveArgs += @("-e", "DEEPAGENTS_MODEL=$($env:DEEPAGENTS_MODEL)") }
+        Write-Host "LiveModel: on -> live-model tier will run (cases SKIP if the model is unreachable)"
+    }
+
     # Full suite via pytest discovery on the test image. -v names every test case
     # (file::test PASSED/FAILED); -ra recaps non-passing tests at the end. Failures
     # print the failing test id, file:line, and asserted values by default.
-    $pytestArgs = @("run", "--rm") + $NetArgs + $ProxyEnv + $ArtifactArgs + @("deepagent-harness-test", "python3", "-m", "pytest", "tests/", "-v", "-ra")
+    $pytestArgs = @("run", "--rm") + $NetArgs + $ProxyEnv + $ArtifactArgs + $LiveArgs + @("deepagent-harness-test", "python3", "-m", "pytest", "tests/", "-v", "-ra")
     & docker @pytestArgs
     if ($LASTEXITCODE -ne 0) { throw "pytest suite failed" }
 } finally {
