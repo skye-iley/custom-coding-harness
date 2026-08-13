@@ -88,6 +88,41 @@ secret-safe containers.
       sanctioned behavior change: **every enum knob now rejects an invalid value at the point of
       entry**, closing M5's known `mask_mode: alow` → silently-`deny` gap for profile, env, and CLI
       at once. See the "Unified config" section in `deepagent-image/CLAUDE.md`.
+    - `milestone6.md` (+ `milestone6_invariants.md` + `milestone6_spec.md`) — **Telemetry**
+      (`design_doc.md` §8 + §12.7). **Build from `milestone6_spec.md`** — it is the
+      implementation-level doc (exact schemas, capture seams, module layout, test plan, build
+      order); the other two are the plan and the checkable properties. Scope: a per-turn
+      `<state-dir>/usage.jsonl` sink, a derived session summary, that summary appended
+      to the PR body `git-pr` opens, and keyless read access. **Built — T1–T6 all landed** on
+      `feat/milestone6-telemetry-impl`; §0.1 records the three things the build changed about the
+      plan, the biggest being that **the §3.1 probe's answer reversed the fix the spec planned**
+      (telemetry *is* the outer `wrap_tool_call`, but `PauseMiddleware` suspends the graph rather
+      than blocking, so the human wait is never inside the wrapper and the planned `hitl_wait_ms`
+      subtraction would have removed time that was never counted — what the probe actually bought
+      was the discovery that `GraphInterrupt`/`HaltTurn` pass *through* telemetry's wrapper and must
+      not be counted as tool errors or as a second tool call). See the "Telemetry" section in
+      `deepagent-image/CLAUDE.md`. Not a from-scratch build: M1 already computes
+      per-turn tokens/cost/energy and discards them, M2 persists only a session roll-up, and
+      `audit.py` already has the jsonl-append + recursive-scrub substrate. The milestone is the
+      missing sink and surface. Chosen as next because it is one of the two core-identity items
+      independent of the trust-boundary chain, so it cannot stall on the open AppArmor measurement.
+      **Telemetry is an audit surface** (§5a): the sink lives in the **state dir**, beside
+      `past.sqlite` / `denials.jsonl` and outside the workspace mount, because the subject of the
+      audit must not be able to rewrite the record — same reasoning M4 slice D applied to
+      `denials.jsonl`. Tamper-resistance is file-tool-proof always, shell-proof only under
+      `DEEPAGENTS_JAIL=1`; say it that way, don't round it up. Read §5/§5a before writing code —
+      sink placement, the one-authority rule against `past.sqlite`, and which §8 metrics are
+      deferred *by dependency* are all decided there. Defaults **on**
+      (`DEEPAGENTS_TELEMETRY=0` disables); PR summary goes in the body.
+      **Primary purpose is benchmark-grade per-run attribution** (§5b — e.g. a SWE-bench Lite
+      sweep): wall clock must **decompose** into `model_ms` / `tool_ms` / `retry_sleep_ms` /
+      `paced_sleep_ms` + a bounded residual, each measured at its own seam (`before_model`/
+      `after_model`, `wrap_tool_call`, `retry_call`'s injected `sleep=`, an instrumented
+      `InMemoryRateLimiter.acquire`), plus per-tool-name call counts and `run_id` in the headless
+      JSON so a sweep can join stdout to the ledger. Telemetry **does not score** a benchmark —
+      correctness comes from the benchmark's own evaluation of the produced diff. Note
+      `TelemetryMiddleware` must not ride on `CostTrackerMiddleware`: M1 omits the tracker entirely
+      on a `pricing = "free"` model, which is the default local-Ollama benchmark case.
   - `docs/milestones/planned/` — **not-yet-built** milestones (docs only). Wins over `design_doc.md`
     for "what we build next." *(Currently empty — `milestone5.1.md` moved to `in-progress/`.)*
   - `docs/features/workspace_visibility.md` — **named feature plan** (not a numbered milestone): restrict
@@ -175,6 +210,13 @@ cd deepagent-image
                                           #   when unreachable, so read the -ra recap.
 .\scripts\run-docker.ps1                  # opens a persistent interactive session (you> prompt)
 .\scripts\run-docker.ps1 "your task"      # runs that task first, then drops to the prompt
+.\scripts\dev-setup.ps1                   # OPTIONAL host dev venv at deepagent-image\.venv
+                                          #   (requirements.txt + pytest). Lets the image-only
+                                          #   test tiers and the keyless admin commands run
+                                          #   outside Docker. Never required — CI installs
+                                          #   pytest alone and the host tier must keep working
+                                          #   that way. smoke stays the pre-PR authority.
+                                          #   See deepagent-image/CLAUDE.md → "Host dev venv".
 ```
 
 `run-docker` is a persistent multi-turn session, not a one-shot: the container stays up across
@@ -190,6 +232,7 @@ This repo maintains **parallel PowerShell and Bash scripts** for cross-platform 
 - `verify.ps1` ↔ `verify.sh`
 - `smoke.ps1` ↔ `smoke.sh`
 - `run-docker.ps1` ↔ `run-docker.sh`
+- `dev-setup.ps1` ↔ `dev-setup.sh`
 
 **Sync rule:** When you edit one, **keep the pair in sync**. Both must implement the 
 same logic and support the same flags. This is a known maintenance burden; a 

@@ -93,3 +93,77 @@ def test_model_can_emit_tool_calls(live_model):
         "Pick a tool-capable tag (ollama: check the model's template)."
     )
     assert calls[0]["name"] == "get_weather"
+
+
+# --- Milestone 6: telemetry against a real model ------------------------------
+
+
+def test_a_real_turn_produces_a_decomposable_record(live_model, tmp_path):
+    """One real turn through a real agent leaves a record whose wall clock
+    decomposes, with non-zero tokens and a model_ms that is a real fraction of
+    duration_ms.
+
+    Worth a live case for the reason the whole tier exists: a stub populates
+    `usage_metadata` however the test wrote it, so a harness that records zeros
+    forever reads green. `usage_metadata` is exactly the field providers have
+    silently omitted before -- and telemetry parses it independently of the cost
+    tracker, which M1 does not even build on the default (free) local model, so
+    this is the only place that path is exercised end to end.
+
+    It also pins the decomposition on real timings rather than injected ones:
+    model_ms and tool_ms come from separate seams, and a real turn is where a
+    double-count or a missed seam would actually show.
+    """
+    from _bootstrap import _load
+
+    pytest.importorskip("deepagents")
+    agent_mod = _load("harness.agent")
+    cli = _load("harness.cli")
+    tm = _load("harness.telemetry")
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    telemetry = cli.TelemetryMiddleware(
+        tm.usage_path(tmp_path / "state"),
+        run_id="run-live-1",
+        thread_id="live",
+        topic="live-telemetry",
+        provider="live",
+        model=str(getattr(live_model, "model", "unknown")),
+    )
+    agent = agent_mod.build_agent(live_model, workspace, middleware=[telemetry])
+
+    cli.run_turn(agent, "Reply with the single word: pong", {}, telemetry=telemetry)
+
+    records = tm.read_records(telemetry.sink)
+    assert len(records) == 1, "a completed turn must leave exactly one record"
+    rec = records[0]
+
+    assert rec["failed"] is False
+    assert rec["model_calls"] >= 1
+    assert rec["input"] > 0, (
+        "no input tokens on a real turn -- usage_metadata did not reach telemetry, "
+        "which would report every real run as free"
+    )
+    assert rec["output"] > 0
+
+    # The decomposition, on real timings.
+    components = (
+        rec["model_ms"] + rec["tool_ms"] + rec["retry_sleep_ms"]
+        + rec["paced_sleep_ms"] + rec["hitl_wait_ms"]
+    )
+    assert components <= rec["duration_ms"], "the components must not exceed the whole"
+    assert rec["model_ms"] > 0, "model time was not measured at its seam"
+    # A real fraction, not a rounding artefact: the model call dominates a turn
+    # this small, so anything under a tenth means the seam is not really wired.
+    assert rec["model_ms"] >= 0.1 * rec["duration_ms"]
+
+    # No cost tracker on the default free local model -- the field must stay NULL
+    # rather than claim the run was free (invariant 5).
+    assert rec["cost_usd"] is None
+
+    summary = tm.derive_session(records, run_id="run-live-1")
+    assert summary["tokens"]["total"] == (
+        rec["input"] + rec["output"] + rec["cache_read"] + rec["cache_write"]
+    )
+    assert summary["time"]["residual_ms"] >= 0

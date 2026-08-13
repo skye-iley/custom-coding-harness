@@ -47,8 +47,10 @@ on user code inside a separate **workspace** conda env. `project/main.py` is the
   `git-pr` (the git session lifecycle). See "Custom workflows" below.
 - `project/workspace/` — seed workspace (environment.yml, run-in-env.sh). Copied to
   `/project/workspace-seed/` in the image; the real workspace is bind-mounted at run time.
-- `scripts/` — `build`, `run-docker`, `verify`, `smoke`, `sync-models` in both `.ps1` (Windows)
-  and `.sh`. `sync-models` is a dev-time registry refresh (see Model routing).
+- `scripts/` — `build`, `run-docker`, `verify`, `smoke`, `sync-models`, `dev-setup` in both `.ps1`
+  (Windows) and `.sh`. `sync-models` is a dev-time registry refresh (see Model routing);
+  `dev-setup` builds the optional host venv (see "Host dev venv" below) and is the one script
+  that touches nothing in the image.
   `jail-check.py` is the odd one out: a single cross-platform Python script (no `.ps1`/`.sh` pair)
   driven by `smoke` to verify the M4 slice H bwrap jail actually holds in the built image. It lives
   here rather than in `tests/` because it only means anything when the container was started with
@@ -280,6 +282,103 @@ never import `providers.py` (the import goes providers → cost, §2.4).
   keys/network) — run by `smoke` via `python3 -m pytest tests/` (needs pytest +
   harness deps; the `test` image stage has both).
 
+## Telemetry (Milestone 6)
+
+Per-turn measurements become durable, decomposable and publishable. **Defaults ON**;
+`DEEPAGENTS_TELEMETRY=0` in `.env` (or the shell) is the whole off switch — env-only,
+no CLI flag, not persisted to the profile (`milestone6_spec.md` §7).
+
+Two files, both in the **state dir** (`archive.state_dir`), never the workspace:
+
+- `<state-dir>/usage.jsonl` — one JSON object per turn, `schema: 1` first, append-only.
+  Tokens (fresh-input split, same as the ledger row), cost/energy, the wall-clock
+  decomposition, per-tool-name call counts, how the turn ended (`outcome`, with
+  `failed` derived from it), and the anomaly counters (`retry_count`,
+  `context_trimmed`).
+- `<state-dir>/session.json` — the per-run summary, **derived** from those records.
+  `past.sqlite` stays authoritative for session totals; two files disagreeing is
+  worse than one file missing.
+
+**The placement is the point, not a detail.** Telemetry is an *audit surface* — evidence
+about the agent, produced by the harness, read by a human — so the audited party must not
+be able to rewrite it. Same reasoning M4 slice D applied to `denials.jsonl`. Stated
+precisely: **file-tool-proof always** (pathguard + the workspace-rooted backend cannot
+address the state dir), **shell-proof only under `DEEPAGENTS_JAIL=1`**. With the jail off,
+a container shell can still reach it by absolute path. Do not round that up.
+
+**Wall clock decomposes**, each component measured at its own seam and only the residual
+inferred:
+
+| Field | Seam |
+|---|---|
+| `model_ms`, `model_calls` | `TelemetryMiddleware.before_model` / `after_model` |
+| `tool_ms`, `tool_calls`, `tool_errors` | `wrap_tool_call`, name off `request.tool_call` |
+| `retry_sleep_ms`, `retry_count` | the `sleep=` wrapper `cli._invoke_resilient` injects |
+| `paced_sleep_ms` | `ratelimit`'s module counter around `InMemoryRateLimiter.acquire` |
+| `hitl_wait_ms`, `interrupts` | `hitl.run_interrupt_loop`'s `on_wait` observer |
+| `duration_ms` | `cli.run_turn`, around the whole turn |
+| residual | `duration_ms` minus the rest — the only inferred number |
+
+Three things worth knowing before touching this code:
+
+- **It is its own middleware, not a hook on the cost tracker.** M1 appends no tracker at
+  all on an unpriced model — which is `ollama:gemma4`, the shipped default and the
+  local-benchmark case. Telemetry riding on it would vanish exactly where it is wanted.
+  Tokens are parsed off `usage_metadata` via `cost._latest_usage` + `cost._split_tokens`
+  (use those; two parsers is how the numbers drift). Cost/energy come from the tracker
+  when one exists, else **`null` — never `0.0`**, which reads as "free" and is a different
+  claim.
+- **The record is written from `run_turn`'s `finally`**, not `after_agent` and not the
+  callers' `except` blocks. `after_agent` never fires for a turn that raises, which is the
+  record an operator most wants; `run_turn` has no general `except`; and `duration_ms` has
+  to bracket the HITL resume loop, which runs after `after_agent` already fired.
+- **`run_turn` is also the only place the accumulator resets** (`begin_turn()`). `before_agent`
+  looks like the turn boundary and is not — it fires once per *invoke*, and a turn invokes
+  several times (a resilience retry; every HITL resume). A reset there silently erases the
+  retry numbers and every pre-suspend tool count. `tracker.turn` has exactly this defect, which
+  is why per-turn cost is a **delta against `tracker.session`** (never reset) rather than a read
+  of `tracker.turn` — that also makes the per-turn costs sum to the session total by
+  construction. If you add a hook here, ask which of the two it fires per.
+- **`TelemetryMiddleware` is the OUTER `wrap_tool_call`** (langchain composes middleware
+  order first-is-outermost), so `PauseMiddleware`'s `GraphInterrupt` / `HaltTurn` pass
+  straight through it. They are control flow, not tool failures: they must not count as
+  `tool_errors`, and a gated call must not be counted twice (it enters once to suspend,
+  once on resume). `cli._is_control_flow` is that classifier.
+- **A turn records *how* it ended, and `failed` is derived from that** — never set on its
+  own. `outcome` is one of `ok` / `denied` / `budget` / `cancelled` / `aborted` / `error`,
+  and `failed` is the property `outcome == "error"`. Only `error` reaches `turns_failed`;
+  the summary also carries an `outcomes` map that sums to `turns`. The reason is invariant
+  2a generalized: a deny, a `--max-cost` cap, a Ctrl-C and a fail-closed headless abort are
+  all the harness doing what it was told, and a sweep reading `turns_failed` must not be
+  measuring the operator or its own budget. `cli._turn_outcome` is the one classifier —
+  a new governance exception is a line there, not a new flag.
+
+Read access, keyless in the strong sense (no API key, no network, no model, and no runtime
+stack — the route lives in `harness/entry.py`, so it never imports `cli.py`):
+
+```bash
+harness telemetry show [--run <run_id>] [--state-dir <path>]   # default: most recent
+harness telemetry list [--topic LABEL] [--limit N]
+harness telemetry pr-block [--run <run_id>]                    # used by open-pr.sh
+```
+
+`show` falls back to deriving from the records when `session.json` is absent (a crashed run
+has records and no summary) and **says which source it used**.
+
+**PR body:** `workflows/git-pr/open-pr.sh` builds its body into a temp file and passes
+`--body-file`, appending the rendered block when a summary parses. Any failure — missing
+file, bad JSON, non-zero exit, missing interpreter — leaves the body byte-identical to the
+old hardcoded string and exits 0. A telemetry gap must never be why a PR does not open.
+
+**Headless join:** `_batch_payload` carries `run_id`, `topic` and `usage_log` alongside
+`thread_id` (which repeats across resumes and is therefore not the `past.sqlite` key). That
+is what lets a benchmark sweep join 300 instances' stdout to the ledger.
+
+**Tests:** `tests/test_telemetry.py` + `tests/test_scrub.py` (host), the Milestone 6 block
+in `tests/test_cli.py` (image), the `open-pr.sh` cases in `tests/test_workflows.py`, plus
+`tests/test_live_model.py::test_a_real_turn_produces_a_decomposable_record` — the one thing
+a stub cannot check, since a stub populates `usage_metadata` however the test wrote it.
+
 ## Present / past memory (Milestone 2)
 
 The harness keeps **two** stores in the harness **state dir** (`archive.state_dir`),
@@ -480,19 +579,31 @@ shape; only the graph-side `interrupt()`/`ask_human` suspend/resume is image-onl
 `smoke` runs `python3 -m pytest tests/` in the `test` image stage. The suite is
 layered by dependency so most of it also runs on a bare host with just pytest:
 
-- **Host-runnable (stdlib + harness.cost only):** `test_cost`, `test_sync_models`,
-  `test_providers` (model routing), `test_loaders` (optional-config IO),
-  `test_import_isolation` (the cost-↛-sibling acyclic guard, **plus** M5 §0.1 F6's
-  keyless-path guard: `harness`, `harness.entry`, `harness.config_cli` and
-  `harness.doctor` must each import without pulling `cli`/`agent`/deepagents/dotenv).
-  These import harness submodules via `tests/_bootstrap._load` (by file path, skipping
-  `harness/__init__`) and never need keys, network, or the runtime stack.
-- **Image-only (need deepagents/langchain/langgraph):** `test_agent` (workspace
-  trust boundary, shell-env secret scrub, final-message extraction, AGENTS.md
-  append), `test_hooks` (lifecycle hook dispatch), `test_cli` (arg parsing,
-  budgets, the null=MVP cost-tracker contract). Each guards its module with
-  `pytest.importorskip(...)`, so on a bare host the module is reported skipped
-  instead of erroring; in the `test` image it runs.
+- **Host-runnable (stdlib only — the default, and most of the suite):** anything
+  that does not touch the runtime stack. These import harness submodules via
+  `tests/_bootstrap._load` (by file path, skipping `harness/__init__`) and never
+  need keys, network, or langchain. **Do not maintain a list of them** — CI runs
+  `pytest tests/` with pytest and nothing else, so membership is decided by whether
+  a module imports cleanly, not by an enumeration someone has to remember to
+  extend. (It used to be enumerated in `ci.yml`, the list drifted, and 246 tests
+  quietly stopped running in that job.) One of them polices the tier itself:
+  `test_import_isolation` carries the cost-↛-sibling acyclic guard **plus** M5
+  §0.1 F6's keyless-path guard — `harness`, `harness.entry`, `harness.config_cli`,
+  `harness.doctor` and `harness.telemetry` must each import without pulling
+  `cli`/`agent`/deepagents/dotenv.
+- **Runtime-dependent (need deepagents/langchain/langgraph):** guarded with
+  `pytest.importorskip(...)` so a bare host reports SKIPPED instead of erroring,
+  and the `test` image runs them for real. Guard at **module** level when the whole
+  file needs the stack (`test_agent` — workspace trust boundary, shell-env secret
+  scrub, final-message extraction, AGENTS.md append; `test_cli` — arg parsing,
+  budgets, the null=MVP cost-tracker contract; `test_hooks`), or **per test** when
+  the rest of the module is pure (`test_hitl`, where only the two cases that build
+  a real `ToolMessage` need `langchain_core`). Prefer per-test: a module-level guard
+  over one impure case costs the host tier every other test in the file.
+
+  **A missing guard turns the host CI job red**, by design — that is the signal
+  that a new test reached for the runtime stack. Add the guard; never narrow what
+  CI collects to route around it.
 - **Live-model (needs a reachable model):** `test_live_model` — real prompts to a
   real model, real replies asserted. **Off unless `DEEPAGENTS_LIVE_MODEL=1`**
   (marker + gate in `conftest.py`), so the two tiers above stay hermetic and CI is
@@ -502,6 +613,55 @@ layered by dependency so most of it also runs on a bare host with just pytest:
   `choose_model` → `validate_credentials` → `resolve_chat_model` path (so a routing
   regression fails here too) and **skips** — never fails — when the stack or the
   model is unreachable.
+
+### Host dev venv (`scripts/dev-setup.{ps1,sh}`) — optional, and deliberately so
+
+Everything above assumes a bare host has nothing but pytest, which is exactly what
+CI does (`.github/workflows/ci.yml`: `pip install pytest`, then an explicit list of
+host-tier files). That property — **the suite runs with nothing installed** — is
+load-bearing and does not change.
+
+But it left no way to run anything langchain-touching *outside* Docker: the
+image-only tiers (`test_cli`, `test_agent`, `test_hooks`), the keyless admin
+commands this file documents as host-side, and any throwaway probe against real
+middleware. The admin-commands section below has always said "requires the harness
+venv: `source deepagent-image/.venv/bin/activate`" — and nothing created that venv.
+
+```powershell
+.\scripts\dev-setup.ps1              # create deepagent-image\.venv + install
+.\scripts\dev-setup.ps1 -Recreate    # rebuild from scratch
+```
+```bash
+./scripts/dev-setup.sh
+./scripts/dev-setup.sh --recreate
+```
+
+Installs `project/requirements.txt` + pytest into `deepagent-image/.venv`
+(gitignored). Four things to hold onto:
+
+- **It is not a third stack.** It mirrors the *image's* harness venv (`/opt/venv`)
+  from the same `requirements.txt`. The two-stack rule is untouched: harness deps
+  here, the agent's deps in `<workspace>/.conda/env`, never mixed. Do not install a
+  workspace dependency into it.
+- **It is not required, and no guard may be dropped because it exists.** Every
+  `pytest.importorskip(...)` in the image-only modules stays. Removing one because
+  "langchain is installed anyway" breaks the CI job that installs only pytest, and
+  breaks it silently — the tests would *error*, not skip, on a bare checkout.
+- **It changes what a local `pytest tests/` means.** With langchain present the
+  `importorskip` guards stop skipping, so the image-only tiers now run on the host.
+  Good for feedback speed; it also means a local green no longer proves anything
+  about the *image*. Same caveat the bind-mount loop below carries — a missing
+  `COPY`, a stale layer, or an image-only dep is invisible from here.
+- **It can drift from the image.** No lockfile, so wheels resolve to whatever is
+  current for your platform and Python minor (the image is ubuntu:24.04 ⇒ 3.12; the
+  script warns when yours differs). `smoke` builds clean and stays the check before
+  a PR.
+
+Related but separate, and no longer a reason to build this venv: the keyless admin
+commands (`config`, `doctor`, `threads`/`past`, `telemetry`, …) used to be dragged
+into langchain by `harness/__init__.py` importing `cli` unconditionally. Milestone 5
+§0.1 F6 fixed that — a lazy `__init__` plus `harness/entry.py` — so they now run on
+a bare interpreter. This venv is for the image-only *test tiers*, not for them.
 
 ### Fast dev loop — run the image tiers without rebuilding
 
@@ -1061,9 +1221,24 @@ harness config                              # full interactive wizard, then conf
 harness config show                         # print resolved config, no prompts
 harness config set <field> <value>          # one-shot, non-interactive
 harness config security                     # security-only wizard + .agentignore/NetJail quick-edit
+
+# Run telemetry (Milestone 6) -- reads <state-dir>/usage.jsonl + session.json
+harness telemetry show [--run <run-id>] [--state-dir <path>]
+harness telemetry list [--topic LABEL] [--limit N]
+harness telemetry pr-block [--run <run-id>]  # the markdown block open-pr.sh appends
 ```
 
-(Requires the harness venv: `source deepagent-image/.venv/bin/activate` or install locally)
+"Keyless" here means no API key, no network and no model — **and, since M5 §0.1 F6
+landed, no runtime stack either.** `entry.dispatch` routes each of these to its
+stdlib-only module without importing `cli`, and `harness/__init__.py` resolves
+`main` through a lazy `__getattr__`, so `python3 -m harness telemetry show` runs on
+a bare interpreter with nothing installed. `tests/test_import_isolation.py` pins
+that for `harness`, `harness.entry`, `harness.config_cli`, `harness.doctor` and
+`harness.telemetry` — adding a package-level import to any of them fails there.
+
+The host dev venv (`scripts/dev-setup.{ps1,sh}`) is therefore **not** required for
+these commands any more. It is still what lets the *image-only test tiers* run
+outside Docker — see "Host dev venv" above.
 
 ## Feature Toggles & Removable Contracts
 
@@ -1077,6 +1252,7 @@ how to disable them, and what behavior they enable/disable:
 | Cost Tracking | M1 | n/a (auto) | on | Never; budgets are optional | No per-turn usage line; budgets ignored |
 | HITL | M3 | n/a (config file) | off | (not set by env) | Only if `.harness-config.yaml` exists in project root | No approval gates; agent runs freely |
 | Unified Config profile | M5 | n/a (`.harness-profile.yaml`) | off (no file) | Never; hand-edit `.env`/flags for a one-off | No `.harness-profile.yaml` present ⇒ every knob resolves exactly as it did pre-M5 (env var → default) |
+| Telemetry | M6 | `DEEPAGENTS_TELEMETRY` | 1 | Rarely — the run you want telemetry for is the one you did not expect to go wrong | No `usage.jsonl`, no `session.json`, no PR block, no middleware appended, no new stderr line |
 
 **Removable contract:** Each "off" state is byte-for-byte identical to the prior milestone 
 (see [Glossary](../docs/README.md#glossary)). E.g., `DEEPAGENTS_MASK=0` ⇒ M3 parity.

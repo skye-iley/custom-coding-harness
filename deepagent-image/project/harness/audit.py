@@ -27,17 +27,30 @@ fired), preserving the removable-seam / byte-for-byte-MVP contract.
 
 Stdlib only; imports ``harness.interrupt`` for the request type but nothing heavy,
 so it stays host-testable.
+
+The secret scrub itself now lives in ``harness.scrub`` (Milestone 6 T1) so
+``telemetry.py`` can share the one implementation without pulling
+``harness.interrupt`` in behind it. It is re-exported here under its original
+names, so ``audit.scrub(...)`` / ``audit.scrub_deep(...)`` still resolve and the
+existing scrub tests in ``test_audit.py`` pass unedited — which is what makes
+them the oracle for the move.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 from harness.interrupt import InterruptRequest
+from harness.scrub import (  # noqa: F401 - re-exported for existing call sites
+    _REDACTED,
+    _SECRET_KEY_MARKERS,
+    _SECRET_PATTERN,
+    _secret_values,
+    scrub,
+    scrub_deep,
+)
 
 # Lives under the workspace like the rest of the agent telemetry, but in its own
 # dir the git-pr workflow already excludes (deepagent-image/CLAUDE.md).
@@ -46,12 +59,6 @@ INTERRUPTS_FILE = "interrupts.jsonl"
 # Boundary-denial sink. Lives in the *state dir*, not the workspace — see the
 # module docstring ("two sinks").
 DENIALS_FILE = "denials.jsonl"
-
-# Env-key name fragments that mark a value as a credential worth redacting.
-_SECRET_KEY_MARKERS = ("API_KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "_KEY")
-# Backstop pattern for common bearer/api-key shapes even if not in the env.
-_SECRET_PATTERN = re.compile(r"\b(sk|pk|ghp|gho|xoxb|xoxp)-[A-Za-z0-9_\-]{12,}\b")
-_REDACTED = "***REDACTED***"
 
 
 def interrupts_path(workspace: Path) -> Path:
@@ -66,47 +73,6 @@ def denials_path(state_dir: Path) -> Path:
     its zero-sibling-import profile — the caller (``hitl``/``cli``) already knows
     the state dir via ``archive.state_dir``."""
     return Path(state_dir) / DENIALS_FILE
-
-
-def _secret_values(env: dict) -> list[str]:
-    """Values of credential-looking env vars, longest first so a longer secret is
-    redacted before a shorter one it may contain."""
-    vals = [
-        v
-        for k, v in env.items()
-        if v and len(v) >= 8 and any(m in k.upper() for m in _SECRET_KEY_MARKERS)
-    ]
-    return sorted(set(vals), key=len, reverse=True)
-
-
-def scrub(text: str | None, env: dict | None = None) -> str | None:
-    """Redact credential env values and common key shapes from `text` (§10).
-
-    Redacts any live secret env *value* found verbatim in the string (the strong
-    check — it catches a leaked key regardless of surrounding text), then a
-    pattern backstop for key shapes not sourced from the current env."""
-    if not text:
-        return text
-    env = os.environ if env is None else env
-    for val in _secret_values(env):
-        text = text.replace(val, _REDACTED)
-    return _SECRET_PATTERN.sub(_REDACTED, text)
-
-
-def scrub_deep(value, env: dict | None = None):
-    """`scrub` applied through nested containers, leaving non-strings untouched.
-
-    ``meta`` is a free-form dict (``interrupt.InterruptRequest``), so a producer
-    can put a dict/list in it. A top-level-strings-only scrub would make that a
-    silent leak path around the §10 backstop — the very thing dropping ``context``
-    exists to prevent. Recurse instead."""
-    if isinstance(value, str):
-        return scrub(value, env)
-    if isinstance(value, dict):
-        return {k: scrub_deep(v, env) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [scrub_deep(v, env) for v in value]
-    return value
 
 
 def _now() -> str:

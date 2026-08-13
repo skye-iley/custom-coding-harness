@@ -169,6 +169,19 @@ def test_doctor_imports_without_the_runtime_stack():
     _assert_no_runtime_stack(_modules_after("import harness.doctor"), "harness.doctor")
 
 
+def test_telemetry_imports_without_the_runtime_stack():
+    # Milestone 6 invariant 22, in its strong form. The M6 branch could only claim
+    # the narrow version ("adds no import cost config/doctor do not already pay")
+    # because at the time the package pulled cli unconditionally; with F6 landed
+    # the strong claim holds, so it gets pinned rather than left as prose.
+    #
+    # This is also what keeps `harness telemetry` readable on a bare host: reading
+    # a finished run's numbers must not require the stack that produced them.
+    _assert_no_runtime_stack(
+        _modules_after("import harness.telemetry"), "harness.telemetry"
+    )
+
+
 def test_entry_routes_without_importing_cli():
     # The second half of the fix: lazy routes are worthless if reaching them
     # means importing cli.py first, which is what living in cli.py meant.

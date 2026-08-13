@@ -82,3 +82,70 @@ def test_env_only_paces_provider_without_limits():
 def test_zero_and_garbage_are_ignored():
     lim = rl.resolve_limits({"free": {"rpm": 0, "tpm": "nope"}}, env={"DEEPAGENTS_PROVIDER_TIER": "free"})
     assert lim.rpm is None and lim.tpm is None
+
+
+# --- Milestone 6 §5: pacing accounting ----------------------------------------
+#
+# The limiter blocks INSIDE the model call, so without this the pacing wait is
+# indistinguishable from model latency — and on a throttled free tier that is
+# most of the run (invariant 4b).
+
+import pytest  # noqa: E402
+
+
+def test_counter_starts_at_zero_after_reset():
+    rl.reset_blocked()
+    assert rl.blocked_ms() == 0
+
+
+def test_counter_accumulates_nanoseconds_and_reports_milliseconds():
+    rl.reset_blocked()
+    rl._add_blocked_ns(1_500_000)   # 1.5ms
+    rl._add_blocked_ns(1_500_000)   # 1.5ms
+    # Stored in ns and floored only at the seam, so two sub-millisecond waits do
+    # not each round to zero -- which is how a paced run would report 0ms.
+    assert rl.blocked_ms() == 3
+    rl.reset_blocked()
+
+
+def test_negative_deltas_are_ignored():
+    rl.reset_blocked()
+    rl._add_blocked_ns(-5_000_000)
+    assert rl.blocked_ms() == 0
+
+
+def test_counter_is_monotonic_so_callers_take_a_delta():
+    rl.reset_blocked()
+    rl._add_blocked_ns(2_000_000)
+    first = rl.blocked_ms()
+    rl._add_blocked_ns(3_000_000)
+    assert rl.blocked_ms() > first
+    rl.reset_blocked()
+
+
+def test_instrumented_limiter_times_acquire():
+    """The counter has to be fed by the real acquire() path, not only by the
+    helper above. Needs langchain, so it is image-tier."""
+    pytest.importorskip("langchain_core.rate_limiters")
+    rl.reset_blocked()
+    limiter = rl.build_rate_limiter(1000.0)  # fast: this must not slow the suite
+    limiter.acquire()
+    limiter.acquire()
+    # Monotonic and non-negative is all a wall-clock assertion can honestly claim
+    # at this rate; that the seam is wired at all is the property under test.
+    assert rl.blocked_ms() >= 0
+    assert type(limiter).__name__ == "_InstrumentedLimiter"
+    rl.reset_blocked()
+
+
+def test_limiter_is_still_an_inmemoryratelimiter():
+    """Instrumenting must not change what providers.resolve_chat_model hands the
+    chat model as `rate_limiter=`, or the soft "could not build a limiter, carry
+    on unpaced" degradation becomes a hard failure."""
+    pytest.importorskip("langchain_core.rate_limiters")
+    from langchain_core.rate_limiters import InMemoryRateLimiter
+
+    limiter = rl.build_rate_limiter(10.0)
+    assert isinstance(limiter, InMemoryRateLimiter)
+    assert limiter.requests_per_second == 10.0
+    assert limiter.max_bucket_size == 1

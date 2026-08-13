@@ -57,6 +57,17 @@ def dispatch(argv: list[str]) -> int:
         from harness.config_cli import config_main
 
         return config_main(argv[1:])
+    if argv and argv[0] == "telemetry":
+        # Milestone 6 T5. Routed here rather than from cli.py so it is keyless in
+        # the strong sense F6 established: `harness.telemetry` imports nothing
+        # from the package but `harness.scrub` (stdlib), and `harness.archive`
+        # lazily inside `_resolve_state_dir`, so reading a run's numbers loads no
+        # langchain, no langgraph and no deepagents. Routing it from cli.py would
+        # have re-created exactly the defect F6 removed -- reaching a lazy import
+        # inside an eager module imports that module first.
+        from harness.telemetry import telemetry_main
+
+        return telemetry_main(argv[1:])
     if argv and argv[0] == "seccomp-sync":
         from harness.seccomp import seccomp_sync_main
 
