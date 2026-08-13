@@ -5,9 +5,27 @@
 > this folds into `milestone6.md` as a section and the standalone file is dropped (see the milestone
 > lifecycle in `docs/README.md`).
 >
-> **Status: none of these are implemented or tested yet.** They are written first, on purpose — a
-> telemetry milestone whose correctness is "the numbers look about right" is untestable by
-> construction, so the numbers get pinned before they exist.
+> **Status: implemented and covered.** They were written first, on purpose — a telemetry milestone
+> whose correctness is "the numbers look about right" is untestable by construction, so the numbers
+> got pinned before they existed. Where the tests live: 1–13 and 20–25 across
+> `tests/test_telemetry.py` (host), `tests/test_cli.py` (image), `tests/test_workflows.py` (the
+> git-pr degradation cases), `tests/test_ratelimit.py` (4b's seam), `tests/test_hitl.py` (the
+> `on_wait` observer 4a depends on), `tests/test_agent.py` (14/15/19), and one live case in
+> `tests/test_live_model.py`.
+>
+> **Two were amended by the build, neither weakened:**
+>
+> * **4g** — the subtraction `milestone6_spec.md` §3.1 planned for the "telemetry is outer" case was
+>   **not** implemented, because the probe showed the HITL wait never happens inside
+>   `wrap_tool_call` at all (the gate *suspends* the graph; the human is asked afterwards, in
+>   `run_interrupt_loop`). The invariant now holds structurally rather than by arithmetic, which is
+>   stronger. The probe's actual finding is a new obligation, covered below.
+> * **4e** — gains the consequence of that finding: `GraphInterrupt`/`HaltTurn` travel *through*
+>   telemetry's wrapper, so they must not count as tool errors and a gated call must not be counted
+>   twice.
+>
+> **16 is still narrow and still correct.** The shell leg is asserted only under the jail; the
+> jail-off case is stated in the docs, not claimed by a test.
 >
 > **Amended in the pre-build pass** that also amended `milestone6_spec.md` (see its header table):
 > **22** was restated because the version first written could not hold — `harness/__init__.py`
@@ -36,7 +54,9 @@ Two are load-bearing and pull in opposite directions, so neither can be quietly 
 ## Capture
 
 1. **One record per completed turn.** A run of N successful turns leaves exactly N lines in
-   `usage.jsonl`, each valid JSON, each carrying the same key set.
+   `usage.jsonl`, each valid JSON, each carrying the same key set. **Including a `--stream` turn**,
+   which bypasses the resilience layer and the HITL loop but is still a turn — a mode that silently
+   produced no record would be a hole shaped exactly like a bug.
 
 2. **A failed turn is still recorded.** A turn that raises after burning tokens produces a record
    with `failed: true` — the case an operator most wants and the one an exception path most easily
@@ -88,11 +108,22 @@ Two are load-bearing and pull in opposite directions, so neither can be quietly 
     top-level `tool_name` instead is a real bug this repo has already shipped once, in M3's pause
     gate.)*
 
-4g. **`tool_ms` never contains human wait time.** Whether telemetry's `wrap_tool_call` wraps outside
-    or inside `PauseMiddleware`'s is a middleware-composition fact this repo has not verified, so
-    `milestone6_spec.md` §3.1 requires a probe *before* capture code is written and a subtraction
-    only if the probe says telemetry is outer. The invariant holds under either composition — which
-    is the point of stating it as a property rather than as an implementation.
+4e-i. **The HITL gate's control flow is not tool work.** Telemetry is the *outer*
+    `wrap_tool_call` wrapper (langchain composes middleware order first-is-outermost), and
+    `PauseMiddleware` gates by raising langgraph's `interrupt()`. So `GraphInterrupt` — and
+    `HaltTurn` on `on_deny: halt` — pass straight through telemetry's `except`. Neither may count
+    as a `tool_error`, and neither may increment `tool_calls`: a gated call enters the wrapper
+    twice (once to suspend, once on resume) and only the entry that reaches the tool is a call.
+    *(Added by the §3.1 probe. Without it a strict-autonomy run reports double its tool work and a
+    tool error for every approval — invariant 2a's mistake one level down.)*
+
+4g. **`tool_ms` never contains human wait time.** Holds **structurally**, not by subtraction:
+    `PauseMiddleware` suspends the graph rather than blocking, so the human is asked in
+    `hitl.run_interrupt_loop` *after* `agent.invoke` has returned — the wait is never inside any
+    `wrap_tool_call`. `milestone6_spec.md` §3.1 originally required a subtraction if telemetry
+    turned out to be outer; it *is* outer, and the subtraction would have removed time that was
+    never counted. Stating this as a property rather than as an implementation is what let the
+    implementation change without the invariant moving.
 
 4f. **Telemetry does not depend on the cost tracker existing.** On an unpriced model — `ollama:gemma4`,
     `pricing = "free"`, the default provider and the local-benchmark case — M1 appends **no**
@@ -143,6 +174,13 @@ Two are load-bearing and pull in opposite directions, so neither can be quietly 
 11. **Every string value is scrubbed, recursively**, via the shared helper extracted from
     `audit.py` — one scrub implementation, not two. A planted `sk-…` token and an
     `*_API_KEY`-shaped env value are both redacted, at any nesting depth.
+
+    **And every dict *key*, in telemetry specifically.** `audit`'s `scrub_deep` walks values only,
+    which is right for `meta` (harness-chosen labels). `tool_calls` is keyed by the tool name off
+    the model's tool call, which is not a harness constant, so `telemetry._scrub_all` widens the
+    traversal. Still one redaction implementation (`scrub`) — only the walk differs, and the wider
+    walk lives in the module that needs it rather than in the shared one whose oracle test
+    (`test_audit.py`, unedited) pins the narrower behaviour.
 
 12. **The PR body carries aggregates only.** Built from `session.json`, which has no free-text
     field. A test plants a secret in a turn record and asserts it cannot appear in the generated
@@ -201,6 +239,12 @@ Two are load-bearing and pull in opposite directions, so neither can be quietly 
     passes: `telemetry.py` may import `harness.scrub` (the leaf module the scrub moves into — see
     `milestone6_spec.md` §1) and nothing else from the package; `cli.py` feeds it, exactly as it
     feeds `archive.py`.
+
+    **One lazy exception, inside a function, on the CLI path only.** `telemetry_main`'s
+    `--state-dir` default imports `harness.archive` *inside* `_resolve_state_dir` so it can call
+    `archive.state_dir` rather than re-deriving the fallback. The module-level import profile — the
+    thing the test asserts — is unchanged, and the alternative would give the repo two definitions
+    of where state lives, which is the drift the one-authority rule exists to prevent.
 
 22. **`harness telemetry` needs no key, no network, and no model — and adds no import cost that
     `config`/`doctor` do not already pay.** Asserted two ways: `harness.telemetry` itself imports

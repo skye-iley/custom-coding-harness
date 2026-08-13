@@ -440,6 +440,24 @@ FIELD_SPECS: tuple[FieldSpec, ...] = (
         cast=_mask_enabled_cast, default=True, label="Mask enabled",
     ),
     FieldSpec(
+        # profile_key=None: an audit surface's off switch is an operator escape
+        # hatch, not a standing preference. Persisting it would also oblige BOTH
+        # launchers to resolve and forward it
+        # (test_prespinup_profile_keys_are_consumed_by_both_launchers) and would
+        # put "do you want telemetry?" in the security wizard
+        # (test_wizard_prespinup_specs_are_the_persisted_prespinup_half) -- asking
+        # every operator to reconfirm a knob that defaults ON contradicts
+        # defaulting it on. Env/.env is the whole off switch, and .env already
+        # reaches the container through --env-file (milestone6_spec.md §7).
+        #
+        # tier="prespinup": read once when the middleware list is built. Toggling
+        # mid-session would leave a half-recorded run, which is worse than either
+        # state. No `choices`: it is a bool, and a value list would reject the very
+        # spellings the launchers pass (DEEPAGENTS_TELEMETRY=1).
+        name="telemetry", tier="prespinup", env_var="DEEPAGENTS_TELEMETRY", profile_key=None,
+        cast=_to_bool, default=True, label="Telemetry",
+    ),
+    FieldSpec(
         name="mask_mode", tier="prespinup", env_var="DEEPAGENTS_MASK_MODE", profile_key="mask_mode",
         default="deny", choices=("deny", "allow"), label="Mask mode",
     ),
@@ -511,6 +529,7 @@ class Settings:
     # --- pre-spinup-only (fixed at container start; shown read-only in /config) ---
     headless: bool = False
     mask_enabled: bool = True
+    telemetry: bool = True
     mask_mode: str = "deny"
     jail: bool = False
     jail_apparmor: str | None = None
@@ -534,6 +553,7 @@ class SettingsSources:
     hitl: str = "default"
     headless: str = "default"
     mask_enabled: str = "default"
+    telemetry: str = "default"
     mask_mode: str = "default"
     jail: str = "default"
     jail_apparmor: str = "default"

@@ -122,17 +122,85 @@ def resolve_limits(table: dict | None, env: dict | None = None) -> Limits:
     return Limits(rpm=rpm, tpm=tpm, tokens_per_request=tokens)
 
 
+# --- pacing accounting (Milestone 6, milestone6_spec.md §5) -------------------
+#
+# The limiter blocks *inside* the model call, so without this the pacing wait is
+# indistinguishable from model latency — and on a throttled free tier that is most
+# of the run. Measuring it is what keeps `model_ms` a property of the model rather
+# than of the plan (invariant 4b).
+#
+# MODULE-LEVEL, not an instance attribute, and that is forced rather than
+# stylistic: the limiter is built deep inside `providers.resolve_chat_model` and
+# handed straight to the chat model as `rate_limiter=`, so **nothing gives cli.py a
+# reference to the object**. A per-instance counter would be unreachable from the
+# middleware that has to read it. One limiter exists per process (M1's design), so
+# the two carry identical information here; only one of them is addressable.
+#
+# Nanoseconds internally, milliseconds at the seam, so repeated small acquire()
+# waits don't each floor to zero. Monotonically increasing — callers take a delta
+# across a turn boundary rather than an absolute.
+_TOTAL_BLOCKED_NS = 0
+
+
+def blocked_ms() -> int:
+    """Total milliseconds spent blocked in ``acquire()`` since process start."""
+    return _TOTAL_BLOCKED_NS // 1_000_000
+
+
+def reset_blocked() -> None:
+    """Zero the counter. For tests only — it is process-global, so a case that
+    asserts on it must reset rather than poke the private name."""
+    global _TOTAL_BLOCKED_NS
+    _TOTAL_BLOCKED_NS = 0
+
+
+def _add_blocked_ns(elapsed_ns: int) -> None:
+    global _TOTAL_BLOCKED_NS
+    _TOTAL_BLOCKED_NS += max(int(elapsed_ns), 0)
+
+
 def build_rate_limiter(rps: float):
     """A langchain ``InMemoryRateLimiter`` pacing at ``rps`` requests/second.
 
     ``max_bucket_size=1`` disables bursting (a hard steady cap, not a token bucket
     that lets N calls through at once then stalls). Lazy import so this module stays
-    host-importable for the pure-math tests."""
+    host-importable for the pure-math tests.
+
+    The returned limiter is a subclass that also accounts for the time it spends
+    blocked (see the module counter above). Behaviour is otherwise the base class's,
+    unchanged: instrumenting must not turn the soft "limiter could not be built,
+    carry on unpaced" degradation in ``providers.resolve_chat_model`` into a hard
+    failure, so nothing here may raise that the base would not.
+    """
+    import time
+
     from langchain_core.rate_limiters import InMemoryRateLimiter
+
+    class _InstrumentedLimiter(InMemoryRateLimiter):
+        """Same limiter, plus accounting of time spent blocked in acquire().
+
+        Defined inside the factory because the base class is a lazy import — the
+        module must stay host-importable for the pure-math tests, which is also why
+        `harness doctor` and the resolver can load it with no langchain present.
+        """
+
+        def acquire(self, *args, **kwargs):
+            start = time.perf_counter_ns()
+            try:
+                return super().acquire(*args, **kwargs)
+            finally:
+                _add_blocked_ns(time.perf_counter_ns() - start)
+
+        async def aacquire(self, *args, **kwargs):
+            start = time.perf_counter_ns()
+            try:
+                return await super().aacquire(*args, **kwargs)
+            finally:
+                _add_blocked_ns(time.perf_counter_ns() - start)
 
     # Check often enough to be responsive at high rps, but not busy-spin at low rps.
     check = min(0.1, max(rps / 10.0, 0.001)) if rps > 0 else 0.1
-    return InMemoryRateLimiter(
+    return _InstrumentedLimiter(
         requests_per_second=rps,
         check_every_n_seconds=check,
         max_bucket_size=1,

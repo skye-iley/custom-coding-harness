@@ -93,8 +93,15 @@ secret-safe containers.
       implementation-level doc (exact schemas, capture seams, module layout, test plan, build
       order); the other two are the plan and the checkable properties. Scope: a per-turn
       `<state-dir>/usage.jsonl` sink, a derived session summary, that summary appended
-      to the PR body `git-pr` opens, and keyless read access. **Planned — docs only on
-      `feat/milestone6-telemetry`, no code yet.** Not a from-scratch build: M1 already computes
+      to the PR body `git-pr` opens, and keyless read access. **Built — T1–T6 all landed** on
+      `feat/milestone6-telemetry-impl`; §0.1 records the three things the build changed about the
+      plan, the biggest being that **the §3.1 probe's answer reversed the fix the spec planned**
+      (telemetry *is* the outer `wrap_tool_call`, but `PauseMiddleware` suspends the graph rather
+      than blocking, so the human wait is never inside the wrapper and the planned `hitl_wait_ms`
+      subtraction would have removed time that was never counted — what the probe actually bought
+      was the discovery that `GraphInterrupt`/`HaltTurn` pass *through* telemetry's wrapper and must
+      not be counted as tool errors or as a second tool call). See the "Telemetry" section in
+      `deepagent-image/CLAUDE.md`. Not a from-scratch build: M1 already computes
       per-turn tokens/cost/energy and discards them, M2 persists only a session roll-up, and
       `audit.py` already has the jsonl-append + recursive-scrub substrate. The milestone is the
       missing sink and surface. Chosen as next because it is one of the two core-identity items

@@ -2,19 +2,67 @@
 
 ## 0. Build status
 
-**Planned — nothing built yet.** Branch `feat/milestone6-telemetry` carries three docs only: this
-plan, `milestone6_invariants.md` (the checkable properties), and `milestone6_spec.md` (the
-implementation-level doc — **build from that one**). All three unimplemented.
+**Built — all slices landed (T1–T6) on `feat/milestone6-telemetry-impl`.** `harness/scrub.py` and
+`harness/telemetry.py` are new; `cli.py` owns `TelemetryMiddleware` and the `run_turn` write;
+`ratelimit.py`, `hitl.py`, `config.py`, `cost.py` and `workflows/git-pr/open-pr.sh` carry the seam
+changes `milestone6_spec.md` §15.1 lists, and nothing outside that list moved.
 
 This doc is the plan, written before the code so the code has something to be wrong against. Every
-claim below about *existing* behaviour was read off the tree at `6e0c104`; every claim about new
-behaviour is a proposal until a slice lands and this §0 says so.
+claim below about *existing* behaviour was read off the tree at `6e0c104`.
 
 **A pre-build pass re-checked every seam the spec names against the tree** and found five claims
 that did not hold plus five decisions left unmade. All ten are settled in `milestone6_spec.md`
 (header table lists them) and the two that reach this doc are corrected in place: §3 T3's summary
 placement, and §3 T1's scrub-extraction naming. The spec is the doc that changed; nothing about the
 plan's scope, forks, or §5a placement argument moved.
+
+### 0.1 What the build changed about the plan
+
+Three things, each recorded because the superseded version is the one a reader would otherwise
+assume.
+
+1. **The §3.1 middleware-order probe resolved, and its answer reversed the planned fix.** The
+   composition fact was settled from `langchain.agents.factory._chain_tool_call_wrappers` (langchain
+   1.3.15) rather than from a timing probe — the source says *"first = outermost"*, so telemetry,
+   appended before `PauseMiddleware`, is the outer `wrap_tool_call`. The spec planned to subtract
+   `hitl_wait_ms` from `tool_ms` in that case. **That subtraction is wrong and was not
+   implemented**: `PauseMiddleware` raises langgraph's `interrupt()`, which *suspends* the graph, so
+   the human is asked in `run_interrupt_loop` after `invoke` has already returned. The wait is never
+   inside the wrapper, and subtracting it would have removed time that was never counted.
+   The probe still earned its place, by surfacing what the spec had missed: the gate raises
+   **through** telemetry's wrapper, so `GraphInterrupt`/`HaltTurn` must not count as tool errors and
+   a gated call must not be counted twice (it enters the wrapper once to suspend, once on resume).
+   Full record in `milestone6_spec.md` §3.1.
+2. **The scrub traversal is wider in telemetry than in audit.** `scrub_deep` moved verbatim, as
+   specified, and scrubs dict *values* only — correct for `audit`, whose `meta` keys are
+   harness-chosen labels. Telemetry's `tool_calls` is keyed by the **tool name off the model's tool
+   call**, which is not a harness constant, so `telemetry._scrub_all` extends the traversal to keys.
+   One redaction implementation still (`scrub`); only the walk is wider, and the wider walk lives in
+   the module that needs it rather than in the shared one whose oracle test pins the narrower
+   behaviour.
+3. **`interrupts` is a turn-record field.** §9's summary schema carries an interrupt count and
+   invariant 6 requires every summary field to be *derivable from the records*, which the §2 record
+   list could not support. It is counted at the same seam that measures `hitl_wait_ms` (the `on_wait`
+   observer). Additive, so no schema bump — §2's own rule.
+
+4. **`before_agent` is not the turn boundary — the spec was wrong about that, and it mattered.**
+   §3/§3.2 had `TelemetryMiddleware` reset its accumulator in `before_agent`. That hook fires once
+   per **invoke**, and a turn invokes several times: the resilience layer re-invokes on a retry, and
+   every HITL resume is another invoke. The reset therefore erased `retry_sleep_ms`/`retry_count`
+   (which accumulate *between* invokes) and every tool and model count from before a gate suspended
+   the graph — silently, and only on exactly the turns worth investigating. `run_turn` is the only
+   thing that brackets a whole turn, so `begin_turn()` is called from there and the middleware
+   defines no `before_agent`. The same defect applies to `tracker.turn`, which §8 told the
+   implementer to read: per-turn cost is now a **delta against `tracker.session`** (never reset),
+   which is right for any invoke count and makes the per-turn costs sum to the session total by
+   construction rather than by luck. Regression tests:
+   `test_retry_numbers_survive_the_re_invoke`, `test_turn_cost_is_a_session_delta_not_tracker_turn`,
+   `test_per_turn_costs_sum_to_the_session_total`.
+
+Two smaller notes: `cost.CostTrackerMiddleware` gained a `has_energy` property (without it,
+`turn.energy_wh == 0.0` on a model with no energy table is indistinguishable from a measured zero),
+and `cli._cost_totals_for_row` was split so `_cost_and_provenance` can ask the same "is this a real
+number or a floor" question of `tracker.turn` that the ledger row asks of `tracker.session`.
 
 Chosen over the `HarnessProfile` chain deliberately: telemetry is one of the two core-identity items
 with **no dependency on the trust-boundary chain** (`design_doc.md` → Product Identity → "Core

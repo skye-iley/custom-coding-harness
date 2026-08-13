@@ -1341,3 +1341,550 @@ def test_config_set_bare_free_text_field_does_not_open_the_picker(tmp_path, monk
         edited=set(),
     )
     assert "usage: /config set <field> <value>" in capsys.readouterr().err
+
+
+# =============================================================================
+# Milestone 6 — telemetry capture (T2/T3/T5)
+# =============================================================================
+
+import json as _json  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+tm = _load("harness.telemetry")
+
+
+class _StubResult(dict):
+    pass
+
+
+class _OkAgent:
+    """Agent whose invoke succeeds, returning a minimal final-message result."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def invoke(self, *args, **kwargs):
+        self.calls += 1
+        return {"messages": [type("M", (), {"content": "done", "type": "ai"})()]}
+
+
+def _telemetry(tmp_path, **over):
+    kwargs = dict(run_id="run-test-1", thread_id="thread-1", topic="t",
+                  provider="ollama", model="gemma4")
+    kwargs.update(over)
+    return cli.TelemetryMiddleware(tmp_path / "usage.jsonl", **kwargs)
+
+
+# --- the removable contract (invariant 20) ------------------------------------
+
+
+def test_telemetry_off_builds_no_middleware(tmp_path):
+    settings = cfg.Settings(telemetry=False)
+    assert cli.build_telemetry(
+        settings, tmp_path, run_id="r", thread_id="t", topic=None,
+        provider=None, model=None,
+    ) is None
+
+
+def test_telemetry_on_by_default(tmp_path):
+    assert cli.build_telemetry(
+        cfg.Settings(), tmp_path, run_id="r", thread_id="t", topic=None,
+        provider=None, model=None,
+    ) is not None
+
+
+def test_telemetry_off_writes_no_sink_and_no_summary(tmp_path, monkeypatch):
+    """Invariant 20: nothing on disk, and run_turn behaves exactly as before."""
+    monkeypatch.setenv("DEEPAGENTS_STATE_DIR", str(tmp_path / "state"))
+    cli.run_turn(_OkAgent(), "hi", {}, telemetry=None)
+    cli._write_session_summary(None, tmp_path, started="x", elapsed_ms=1.0)
+    assert not (tmp_path / "state").exists()
+
+
+def test_every_added_parameter_defaults_to_the_inert_value():
+    """§15.1: the removable contract is structural, not policed by tests. Every
+    signature this milestone widened must default telemetry to None."""
+    import inspect
+
+    for fn in (cli.run_turn, cli.run_repl, cli.run_batch, cli._invoke_resilient,
+               cli._run_turn_hitl):
+        param = inspect.signature(fn).parameters["telemetry"]
+        assert param.default is None, f"{fn.__name__} does not default telemetry to None"
+
+
+# --- capture (invariants 1, 2, 2a, 4, 4a) --------------------------------------
+
+
+def test_one_record_per_completed_turn(tmp_path):
+    t = _telemetry(tmp_path)
+    agent = _OkAgent()
+    for _ in range(3):
+        cli.run_turn(agent, "hi", {}, telemetry=t)
+    records = tm.read_records(t.sink)
+    assert [r["turn"] for r in records] == [1, 2, 3]
+    assert all(r["failed"] is False for r in records)
+    assert all(r["run_id"] == "run-test-1" for r in records)
+
+
+def test_a_failed_turn_is_still_recorded(tmp_path, monkeypatch):
+    """Invariant 2 — the record an operator most wants and the one an exception
+    path most easily drops. run_turn has no general `except`, so this pins that
+    the write happens in its `finally`."""
+    monkeypatch.setenv("DEEPAGENTS_MAX_RETRIES", "0")
+    t = _telemetry(tmp_path)
+    with pytest.raises(RuntimeError):
+        cli.run_turn(_BoomAgent(), "hi", {}, telemetry=t)
+    records = tm.read_records(t.sink)
+    assert len(records) == 1
+    assert records[0]["failed"] is True
+
+
+def test_failed_turn_recorded_on_the_headless_path_too(tmp_path, monkeypatch):
+    """Invariant 2 pins BOTH turn paths: run_repl and run_batch each carry their
+    own general `except`, so a test that only drives the REPL leaves headless —
+    the benchmark path — unproven."""
+    monkeypatch.setenv("DEEPAGENTS_MAX_RETRIES", "0")
+    t = _telemetry(tmp_path)
+    rc = cli.run_batch(_BoomAgent(), {}, ["do it"], telemetry=t)
+    assert rc == 1
+    records = tm.read_records(t.sink)
+    assert len(records) == 1 and records[0]["failed"] is True
+
+
+def test_repl_path_records_a_failed_turn(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEEPAGENTS_MAX_RETRIES", "0")
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    t = _telemetry(tmp_path)
+    assert cli.run_repl(_BoomAgent(), {}, "do it", telemetry=t) == 0
+    assert [r["failed"] for r in tm.read_records(t.sink)] == [True]
+
+
+def test_operator_deny_is_not_a_failure(tmp_path):
+    """Invariant 2a: conflating "the human said no" with "the turn broke" would
+    put a governance signal in the reliability column, and a sweep reading
+    `turns_failed` would be measuring the operator."""
+    hitl_mod = _load("harness.hitl")
+
+    class _HaltAgent:
+        def invoke(self, *a, **k):
+            raise hitl_mod.HaltTurn(
+                type("TM", (), {"content": "blocked"})(), "execute"
+            )
+
+        def update_state(self, *a, **k):
+            return None
+
+    t = _telemetry(tmp_path)
+    assert cli.run_turn(_HaltAgent(), "hi", {}, telemetry=t) is None
+    records = tm.read_records(t.sink)
+    assert len(records) == 1 and records[0]["failed"] is False
+
+
+def test_sink_failure_never_breaks_a_turn(tmp_path, capsys):
+    """Invariant 3 — same rule audit.py and the /config dispatch already follow."""
+    t = _telemetry(tmp_path)
+    t.sink = _Path(tmp_path / "usage.jsonl")
+
+    def boom(*a, **k):
+        raise OSError("no space left on device")
+
+    import harness.telemetry as _tmmod
+    original = _tmmod.record_turn
+    _tmmod.record_turn = boom
+    try:
+        assert cli.run_turn(_OkAgent(), "hi", {}, telemetry=t) == "done"
+        cli.run_turn(_OkAgent(), "hi", {}, telemetry=t)
+    finally:
+        _tmmod.record_turn = original
+    err = capsys.readouterr().err
+    # One warning per RUN, not per turn.
+    assert err.count("telemetry: no space left on device") == 1
+
+
+def test_duration_brackets_the_whole_turn(tmp_path):
+    """Invariant 4: wall clock around the turn, tool execution included — not
+    model latency. Pinned with a deliberately slow invoke, because the field's
+    *meaning* is what makes it useful or misleading and both look identical in
+    a JSON file."""
+    import time as _time
+
+    class _SlowAgent:
+        def invoke(self, *a, **k):
+            _time.sleep(0.05)
+            return {"messages": [type("M", (), {"content": "ok", "type": "ai"})()]}
+
+    t = _telemetry(tmp_path)
+    cli.run_turn(_SlowAgent(), "hi", {}, telemetry=t)
+    assert tm.read_records(t.sink)[0]["duration_ms"] >= 50
+
+
+def test_retry_sleep_is_recorded_not_absorbed(tmp_path, monkeypatch):
+    """Invariant 4c. `retry_call` takes `sleep=` as a parameter specifically so
+    the caller owns it; passing bare time.sleep is what loses the number."""
+    monkeypatch.setenv("DEEPAGENTS_MAX_RETRIES", "2")
+    monkeypatch.setenv("DEEPAGENTS_RETRY_BASE", "0.02")
+    t = _telemetry(tmp_path)
+    with pytest.raises(RuntimeError):
+        cli.run_turn(_BoomAgent(), "hi", {}, telemetry=t)
+    rec = tm.read_records(t.sink)[0]
+    assert rec["retry_count"] == 2
+    assert rec["retry_sleep_ms"] > 0
+
+
+def test_context_overflow_trim_is_flagged(tmp_path, monkeypatch):
+    """Invariant 4d: a trimmed turn is not comparable to an untrimmed one, and a
+    benchmark that mixes them silently is measuring two different things."""
+    class _OverflowThenOk:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, inputs, config=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise ValueError("maximum context length exceeded for this model")
+            return {"messages": [type("M", (), {"content": "ok", "type": "ai"})()]}
+
+    t = _telemetry(tmp_path)
+    cli.run_turn(
+        _OverflowThenOk(), "hi", {},
+        extra_messages=[{"role": "user", "content": "recalled"}],
+        telemetry=t,
+    )
+    assert tm.read_records(t.sink)[0]["context_trimmed"] is True
+
+
+# --- the tool seam (invariants 4e, 4g) ----------------------------------------
+
+
+class _Req:
+    def __init__(self, name):
+        self.tool_call = {"name": name, "args": {}}
+
+
+def test_tool_work_is_recorded_by_name(tmp_path):
+    """Invariant 4e: `request.tool_call`, the same field PauseMiddleware reads.
+    Reading a top-level `tool_name` is a bug this repo has already shipped once."""
+    t = _telemetry(tmp_path)
+    t.acc.reset()
+    t.wrap_tool_call(_Req("read_file"), lambda r: "ok")
+    t.wrap_tool_call(_Req("read_file"), lambda r: "ok")
+    t.wrap_tool_call(_Req("execute"), lambda r: "ok")
+    assert t.acc.tool_calls == {"read_file": 2, "execute": 1}
+    assert t.acc.tool_errors == 0
+
+
+def test_tool_error_status_counts_as_an_error(tmp_path):
+    t = _telemetry(tmp_path)
+    t.acc.reset()
+    t.wrap_tool_call(_Req("execute"), lambda r: type("TM", (), {"status": "error"})())
+    assert t.acc.tool_errors == 1
+
+
+def test_raising_tool_counts_as_an_error(tmp_path):
+    t = _telemetry(tmp_path)
+    t.acc.reset()
+
+    def boom(_r):
+        raise RuntimeError("tool blew up")
+
+    with pytest.raises(RuntimeError):
+        t.wrap_tool_call(_Req("execute"), boom)
+    assert t.acc.tool_errors == 1 and t.acc.tool_calls == {"execute": 1}
+
+
+def test_hitl_control_flow_is_not_a_tool_error(tmp_path):
+    """The probe's real finding (milestone6_spec.md §3.1): telemetry is the OUTER
+    wrap_tool_call wrapper, and PauseMiddleware's gate raises GraphInterrupt /
+    HaltTurn straight through it. Counting those as tool errors would put every
+    gated call in the reliability column."""
+    hitl_mod = _load("harness.hitl")
+    from langgraph.errors import GraphInterrupt
+
+    t = _telemetry(tmp_path)
+    t.acc.reset()
+
+    def suspend(_r):
+        raise GraphInterrupt(())
+
+    def halt(_r):
+        raise hitl_mod.HaltTurn(type("TM", (), {"content": "x"})(), "execute")
+
+    with pytest.raises(GraphInterrupt):
+        t.wrap_tool_call(_Req("execute"), suspend)
+    with pytest.raises(hitl_mod.HaltTurn):
+        t.wrap_tool_call(_Req("execute"), halt)
+    assert t.acc.tool_errors == 0
+    # And no count: neither entry reached the tool. A gated call re-enters this
+    # wrapper on resume, and only that entry may increment the mix.
+    assert t.acc.tool_calls == {}
+
+
+def test_tool_ms_excludes_a_suspended_gate(tmp_path):
+    """Invariant 4g, in the composition this repo actually has: the human wait
+    happens in run_interrupt_loop, after invoke returns, so it cannot land in
+    tool_ms — and the prompt-building time before the suspend must not either."""
+    import time as _time
+    from langgraph.errors import GraphInterrupt
+
+    t = _telemetry(tmp_path)
+    t.acc.reset()
+
+    def slow_suspend(_r):
+        _time.sleep(0.05)
+        raise GraphInterrupt(())
+
+    with pytest.raises(GraphInterrupt):
+        t.wrap_tool_call(_Req("execute"), slow_suspend)
+    assert t.acc.tool_ms == 0
+
+
+# --- independence from the cost tracker (invariants 4f, 5) --------------------
+
+
+def test_no_tracker_records_null_cost_not_zero(tmp_path):
+    """Invariant 5 / 4f: on `ollama:gemma4` (pricing = "free", the default
+    provider and the local-benchmark case) M1 appends NO tracker, and telemetry
+    must still record tokens and timings with cost_usd null."""
+    t = _telemetry(tmp_path)
+    assert t.tracker is None
+    cli.run_turn(_OkAgent(), "hi", {}, telemetry=t)
+    rec = tm.read_records(t.sink)[0]
+    assert rec["cost_usd"] is None and rec["cost_provenance"] is None
+    assert rec["energy_wh"] is None
+    assert rec["duration_ms"] >= 0
+
+
+def test_tokens_use_the_same_split_as_the_ledger_row(tmp_path):
+    """Invariant 7's precondition: `input` must mean *fresh* input on both sides.
+    `_split_tokens` splits cache-read tokens OUT of input, and that split is what
+    UsageAccumulator stores and _cost_totals_for_row writes to the past.sqlite
+    row. Hand-rolling usage["input_tokens"] here makes invariant 7 fail as
+    arithmetic that looks like a telemetry bug."""
+    t = _telemetry(tmp_path)
+    t.acc.reset()
+    usage = {
+        "input_tokens": 1000,
+        "output_tokens": 50,
+        "input_token_details": {"cache_read": 300, "cache_creation": 100},
+    }
+    t.acc.add_tokens(usage)
+    acc = cost.UsageAccumulator()
+    acc.add(usage, cost.Free(), "m")
+    assert (t.acc.input, t.acc.output, t.acc.cache_read, t.acc.cache_write) == (
+        acc.input, acc.output, acc.cache_read, acc.cache_write
+    )
+    assert t.acc.input == 600  # fresh input, cache split OUT
+
+
+# --- the session summary (invariants 6, 8, 9) ---------------------------------
+
+
+def test_summary_is_written_whether_or_not_the_archive_is_on(tmp_path, monkeypatch):
+    """Invariant 8's second half: the _finalize_session call sits inside
+    `if archive_conn is not None:`, and the summary write must sit OUTSIDE it or
+    DEEPAGENTS_ARCHIVE=0 silently produces no summary."""
+    state = tmp_path / "state"
+    monkeypatch.setenv("DEEPAGENTS_STATE_DIR", str(state))
+    t = _telemetry(tmp_path, run_id="run-sum")
+    t.sink = tm.usage_path(state)
+    cli.run_turn(_OkAgent(), "hi", {}, telemetry=t)
+    cli._write_session_summary(t, tmp_path, started="2026-01-01T00:00:00Z", elapsed_ms=1234)
+    summary = tm.read_session(tm.session_path(state))
+    assert summary is not None
+    assert summary["run_id"] == "run-sum" and summary["turns"] == 1
+    assert summary["duration_ms"] == 1234
+
+
+def test_summary_totals_equal_the_records(tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    monkeypatch.setenv("DEEPAGENTS_STATE_DIR", str(state))
+    t = _telemetry(tmp_path)
+    t.sink = tm.usage_path(state)
+    for _ in range(2):
+        cli.run_turn(_OkAgent(), "hi", {}, telemetry=t)
+    cli._write_session_summary(t, tmp_path, started="s", elapsed_ms=5000)
+    summary = tm.read_session(tm.session_path(state))
+    records = tm.read_records(t.sink)
+    assert summary["turns"] == len(records) == 2
+    assert summary["time"]["model_ms"] == sum(r["model_ms"] for r in records)
+
+
+def test_summary_write_failure_does_not_end_the_run(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("DEEPAGENTS_STATE_DIR", str(tmp_path / "state"))
+    t = _telemetry(tmp_path)
+
+    import harness.telemetry as _tmmod
+    original = _tmmod.write_session
+    _tmmod.write_session = lambda *a, **k: (_ for _ in ()).throw(OSError("read-only fs"))
+    try:
+        cli._write_session_summary(t, tmp_path, started="s", elapsed_ms=1)
+    finally:
+        _tmmod.write_session = original
+    assert "failed to write session summary" in capsys.readouterr().err
+
+
+# --- the headless join (invariant 23) -----------------------------------------
+
+
+def test_batch_payload_carries_the_join_keys(tmp_path):
+    t = _telemetry(tmp_path, topic="django__django-11099")
+    payload = cli._batch_payload("done", {"configurable": {"thread_id": "th"}},
+                                 None, tmp_path, 0, t)
+    assert payload["run_id"] == "run-test-1"
+    assert payload["topic"] == "django__django-11099"
+    assert payload["usage_log"] == str(t.sink)
+    # additive: the existing keys keep their names and meanings
+    assert payload["thread_id"] == "th"
+    assert payload["exit_code"] == 0
+
+
+def test_batch_payload_join_keys_are_null_not_absent_when_telemetry_is_off(tmp_path):
+    """A driver reading payload["run_id"] should get a null it can test, not a
+    KeyError that looks like a schema change."""
+    payload = cli._batch_payload("done", {"configurable": {"thread_id": "th"}},
+                                 None, tmp_path, 0, None)
+    assert payload["run_id"] is None
+    assert payload["topic"] is None and payload["usage_log"] is None
+
+
+def test_headless_run_emits_the_join_keys_on_stdout(tmp_path, capsys):
+    t = _telemetry(tmp_path)
+    cli.run_batch(_OkAgent(), {"configurable": {"thread_id": "th"}}, ["go"], telemetry=t)
+    payload = _json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["run_id"] == "run-test-1"
+    assert payload["usage_log"] == str(t.sink)
+
+
+# --- a live /config change reaches the next record ----------------------------
+
+
+def test_topic_change_applies_from_the_next_turn(tmp_path):
+    t = _telemetry(tmp_path, topic="old")
+    cli.run_turn(_OkAgent(), "hi", {}, telemetry=t)
+    cli._retopic_telemetry(t, "new")
+    cli.run_turn(_OkAgent(), "hi", {}, telemetry=t)
+    assert [r["topic"] for r in tm.read_records(t.sink)] == ["old", "new"]
+
+
+def test_model_change_is_split_into_provider_and_model(tmp_path):
+    t = _telemetry(tmp_path)
+    cli._remodel_telemetry(t, "ollama:gemma4")
+    assert (t.provider, t.model) == ("ollama", "gemma4")
+
+
+# --- the dispatch route (invariant 22) ----------------------------------------
+
+
+def test_dispatch_routes_telemetry(tmp_path, monkeypatch, capsys):
+    state = tmp_path / "state"
+    t = _telemetry(tmp_path)
+    t.sink = tm.usage_path(state)
+    cli.run_turn(_OkAgent(), "hi", {}, telemetry=t)
+    rc = cli.dispatch(["telemetry", "show", "--state-dir", str(state)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "run-test-1" in out
+    assert "derived from 1 turn record" in out  # says which source it used
+
+
+def test_streamed_turn_is_still_recorded(tmp_path):
+    """--stream bypasses the resilience layer and the HITL loop, but it is still a
+    completed turn. Invariant 1 says one record per turn, and a mode that silently
+    produced none would be a hole shaped exactly like a bug."""
+
+    class _StreamAgent:
+        def stream(self, inputs, config=None):
+            yield {"event": "one"}
+            yield {"event": "two"}
+
+    t = _telemetry(tmp_path)
+    assert cli.run_turn(_StreamAgent(), "hi", {}, stream=True, telemetry=t) is None
+    records = tm.read_records(t.sink)
+    assert len(records) == 1
+    assert records[0]["failed"] is False and records[0]["turn"] == 1
+
+
+# --- the turn boundary is run_turn, not before_agent --------------------------
+#
+# Regression guard for a bug this milestone shipped into review once:
+# `before_agent` fires once per INVOKE, not per turn, and a turn can invoke
+# several times (a resilience retry; every HITL resume). Resetting the
+# accumulator there silently wiped everything measured before the last invoke.
+
+
+def test_before_agent_does_not_reset_the_accumulator(tmp_path):
+    t = _telemetry(tmp_path)
+    t.begin_turn()
+    t.acc.add_tool("read_file", 0.01, error=False)
+    t.acc.add_retry_sleep(500)
+    t.acc.retry_count = 1
+    # A second invoke inside the same turn fires the hooks again.
+    assert not hasattr(t, "before_agent") or t.before_agent(None, None) is None
+    assert t.acc.tool_calls == {"read_file": 1}
+    assert t.acc.retry_sleep_ms == 500
+    assert t.acc.retry_count == 1
+
+
+def test_retry_numbers_survive_the_re_invoke(tmp_path, monkeypatch):
+    """The real shape of the bug: retry sleeps are accumulated BETWEEN invokes,
+    so a reset on the next invoke's before_agent erases them."""
+    monkeypatch.setenv("DEEPAGENTS_MAX_RETRIES", "2")
+    monkeypatch.setenv("DEEPAGENTS_RETRY_BASE", "0.02")
+
+    class _BoomThenBoom:
+        """Fires the middleware hooks on every invoke, like the real graph does."""
+
+        def __init__(self, telemetry):
+            self.telemetry = telemetry
+
+        def invoke(self, *a, **k):
+            self.telemetry.before_model(None, None)
+            raise RuntimeError("500 INTERNAL")
+
+    t = _telemetry(tmp_path)
+    with pytest.raises(RuntimeError):
+        cli.run_turn(_BoomThenBoom(t), "hi", {}, telemetry=t)
+    rec = tm.read_records(t.sink)[0]
+    assert rec["retry_count"] == 2, "retry count was reset by a mid-turn hook"
+    assert rec["retry_sleep_ms"] > 0, "retry sleep was reset by a mid-turn hook"
+    assert rec["model_calls"] == 3, "each invoke's model span must survive the retry"
+
+
+def test_turn_cost_is_a_session_delta_not_tracker_turn(tmp_path):
+    """`tracker.turn` has the same per-invoke reset defect, so the per-turn cost
+    is read as a delta against `tracker.session`, which is never reset. That also
+    makes the per-turn costs sum to the session total by construction -- which is
+    what invariant 7 actually needs."""
+    tracker = cost.CostTrackerMiddleware(cost.Free(), "m")
+    t = _telemetry(tmp_path)
+    t.tracker = tracker
+
+    usage = {"input_tokens": 100, "output_tokens": 10}
+    t.begin_turn()
+    tracker.turn = cost.UsageAccumulator()  # what before_agent does, mid-turn
+    tracker.session.add(usage, cost.Free(), "m")
+    tracker.turn = cost.UsageAccumulator()  # a second invoke resets it again
+    tracker.session.add(usage, cost.Free(), "m")
+
+    delta = cli._session_delta(tracker, t._cost_at_start)
+    assert delta.input == 200, "the turn saw two invokes; tracker.turn would report one"
+    assert delta.output == 20
+
+
+def test_per_turn_costs_sum_to_the_session_total(tmp_path):
+    tracker = cost.CostTrackerMiddleware(
+        cost.RateTable({"m": cost.ModelRates(input=1.0, output=2.0)}), "m"
+    )
+    t = _telemetry(tmp_path)
+    t.tracker = tracker
+    usage = {"input_tokens": 1000, "output_tokens": 500}
+
+    for _ in range(3):
+        t.begin_turn()
+        tracker.session.add(usage, tracker._pricing, "m", rates=tracker._rates)
+        rec = t.build_record(duration_ms=1, failed=False)
+        tm.record_turn(t.sink, rec)
+
+    records = tm.read_records(t.sink)
+    assert sum(r["cost_usd"] for r in records) == pytest.approx(tracker.session.cost, rel=1e-9)
+    assert sum(r["input"] for r in records) == 0  # tokens come from the model seam, not the tracker

@@ -83,15 +83,19 @@ A milestone moves through three folders. What each stage carries is deliberate:
   no dependency on the trust-boundary chain, so it cannot be blocked on the open AppArmor
   measurement. **Telemetry is treated as an audit surface** — the sink lives in the state dir with
   `past.sqlite` / `denials.jsonl`, not in the agent-writable workspace, because the subject of the
-  audit must not be able to edit the record (§5a). **Planned — branch `feat/milestone6-telemetry`
-  carries the docs only; no code yet.**
+  audit must not be able to edit the record (§5a). **Built — T1–T6 all landed** on
+  `feat/milestone6-telemetry-impl`. §0.1 records what the build changed about the plan; the notable
+  one is that §3.1's probe **reversed the fix the spec had planned** (telemetry is the outer
+  `wrap_tool_call`, but the gate *suspends* the graph rather than blocking, so the human wait was
+  never inside the wrapper and the planned subtraction would have removed time nobody counted).
   Its **primary purpose is benchmark-grade attribution** (§5b): wall clock decomposes into
   `model_ms` / `tool_ms` / `retry_sleep_ms` / `paced_sleep_ms` + a bounded residual, each measured
   at its own seam, with per-tool-name counts and `run_id` in the headless JSON so a sweep (e.g.
   SWE-bench Lite, one instance per `--headless` run, `--topic <instance_id>` as the join key) can
   aggregate. It does **not** score a benchmark — correctness stays with the benchmark's own
   evaluation of the produced diff.
-- **`milestone6_invariants.md`** — the checkable properties, written before the code on purpose:
+- **`milestone6_invariants.md`** — the checkable properties, written before the code and now
+  implemented and covered:
   capture (one record per turn, failed turns included, never breaks a turn, **and the wall-clock
   decomposition** — invariant 4a, the one that catches a future blocking call vanishing into
   "overhead"), derivation (the summary is derived and must agree with the `past.sqlite` row, which
@@ -102,9 +106,12 @@ A milestone moves through three folders. What each stage carries is deliberate:
   has to `milestone5.md`): exact `usage.jsonl` / `session.json` schemas, which hook captures which
   field, the `scrub.py` extraction, the `FieldSpec` entry for the on/off knob, the PR-block format,
   the `harness telemetry` argv grammar, failure paths, test plan, and build order. **Written to be
-  sufficient to build from cold** — including the one composition fact the repo has never verified
-  (whether telemetry's `wrap_tool_call` nests outside `PauseMiddleware`'s), which §3.1 makes a probe
-  step rather than a guess.
+  sufficient to build from cold** — including the one composition fact the repo had never verified
+  (whether telemetry's `wrap_tool_call` nests outside `PauseMiddleware`'s), which §3.1 made a probe
+  step rather than a guess. **§3.1 now records the answer and both findings**: telemetry is outer,
+  and the subtraction that fact was supposed to justify is wrong for an unrelated reason, so the
+  probe's real payoff was catching that the gate's control flow passes *through* telemetry's
+  wrapper.
 
 ## Complete milestones — `milestones/complete/`
 

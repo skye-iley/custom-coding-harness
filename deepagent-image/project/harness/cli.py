@@ -14,7 +14,7 @@ import subprocess
 import sys
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from pprint import pprint
 
@@ -29,8 +29,10 @@ from harness import (
     hitl,
     interrupt,
     jail,
+    ratelimit,
     refresh,
     resilience,
+    telemetry as telemetry_mod,
 )
 from harness.config import (
     FIELD_SPECS,
@@ -54,9 +56,18 @@ from harness.cost import (
     CostTrackerMiddleware,
     Free,
     ReportedCost,
+    UsageAccumulator,
+    _latest_usage,
+    _split_tokens,
     format_session_total,
 )
+from harness._compat import compat_import
 from harness.loaders import load_hooks, load_mcp_tools
+
+# Same pattern cost.py and archive.py use: only the middleware needs the real
+# base, so fall back to `object` when langchain is absent rather than making the
+# module unimportable.
+_AgentMiddleware = compat_import("langchain.agents.middleware.types", "AgentMiddleware")  # type: ignore[assignment,misc]
 from harness.providers import (
     choose_model,
     init_summary_model,
@@ -512,6 +523,349 @@ def build_cost_tracker(
     )
 
 
+# =============================================================================
+# Telemetry (Milestone 6 T2) — the capture half
+# =============================================================================
+#
+# The middleware lives here, not in telemetry.py, for the same reason
+# `_LIVE_APPLIERS` does not live in config.py: it needs the langchain
+# AgentMiddleware base, and telemetry.py must stay host-testable on a bare
+# interpreter (invariant 22).
+#
+# It is its own middleware and NOT a hook on the cost tracker: M1 appends no
+# tracker at all on an unpriced model (`ollama:gemma4`, `pricing = "free"` — the
+# default provider and the local-benchmark case), so telemetry riding on it would
+# be silently absent exactly where it is most wanted (invariant 4f).
+
+
+def _is_control_flow(exc: BaseException) -> bool:
+    """True for an exception that is the HITL gate suspending or abandoning the
+    turn, rather than a tool failing.
+
+    ``PauseMiddleware.wrap_tool_call`` calls langgraph's ``interrupt()``, which
+    raises ``GraphInterrupt`` to suspend the graph; ``on_deny: halt`` raises
+    ``HaltTurn``. Telemetry is the OUTER ``wrap_tool_call`` wrapper (langchain
+    composes middleware order first-is-outermost — ``milestone6_spec.md`` §3.1),
+    so both travel straight through its ``except``. Counting them as tool errors
+    would put every gated call in the reliability column, which is invariant 2a's
+    mistake one level down.
+    """
+    if isinstance(exc, hitl.HaltTurn):
+        return True
+    try:
+        from langgraph.errors import GraphBubbleUp
+
+        return isinstance(exc, GraphBubbleUp)
+    except Exception:  # noqa: BLE001 - never let the classifier break a turn
+        # Name check as the fallback: better to under-count a tool error than to
+        # let an import problem here propagate out of a tool call.
+        return type(exc).__name__ in ("GraphInterrupt", "GraphBubbleUp", "ParentCommand")
+
+
+@dataclasses.dataclass
+class _TurnAccumulator:
+    """The middleware's half of one turn's numbers (``milestone6_spec.md`` §3.2).
+
+    Two halves measure a turn: this one owns what is only visible on the hook
+    seams (model/tool time and counts); ``run_turn`` owns ``duration_ms``,
+    ``failed``, the retry fields and the write, because it is the only thing that
+    brackets the whole turn including a raise.
+    """
+
+    input: int = 0
+    output: int = 0
+    cache_read: int = 0
+    cache_write: int = 0
+    model_ms: float = 0.0
+    model_calls: int = 0
+    tool_ms: float = 0.0
+    tool_calls: dict = dataclasses.field(default_factory=dict)
+    tool_errors: int = 0
+    retry_sleep_ms: float = 0.0
+    retry_count: int = 0
+    hitl_wait_ms: float = 0.0
+    interrupts: int = 0
+    context_trimmed: bool = False
+    # Sampled at turn start; `paced_sleep_ms` is the delta against the module
+    # counter at finalize (the limiter object itself is unreachable from here —
+    # ratelimit.py's comment explains why the counter has to be module-level).
+    paced_at_start: int = 0
+    _model_span_started: float | None = None
+
+    def reset(self) -> None:
+        fresh = _TurnAccumulator()
+        for f in dataclasses.fields(self):
+            setattr(self, f.name, getattr(fresh, f.name))
+        self.paced_at_start = ratelimit.blocked_ms()
+
+    # --- model ---------------------------------------------------------------
+
+    def open_model_span(self) -> None:
+        # Close any span still open: `after_model` does not fire when a model call
+        # raises, so a failed call would otherwise leak its time into the residual
+        # instead of into `model_ms` where it belongs.
+        self.close_model_span()
+        self._model_span_started = time.perf_counter()
+
+    def close_model_span(self) -> None:
+        if self._model_span_started is None:
+            return
+        self.model_ms += (time.perf_counter() - self._model_span_started) * 1000
+        self.model_calls += 1
+        self._model_span_started = None
+
+    def add_tokens(self, usage: dict) -> None:
+        # `_split_tokens`, not `usage["input_tokens"]` — it splits cache-read
+        # tokens OUT of input, and that is the same definition `UsageAccumulator`
+        # and `_cost_totals_for_row` use. Hand-rolling it here is how invariant 7
+        # (`session.json` agrees with the past.sqlite row) fails as arithmetic that
+        # looks like a telemetry bug and is really two definitions of one word.
+        fresh_in, out, cache_read, cache_write = _split_tokens(usage)
+        self.input += fresh_in
+        self.output += out
+        self.cache_read += cache_read
+        self.cache_write += cache_write
+
+    # --- tools ---------------------------------------------------------------
+
+    def add_tool(self, name: str, elapsed_s: float, *, error: bool) -> None:
+        self.tool_ms += elapsed_s * 1000
+        self.tool_calls[name] = self.tool_calls.get(name, 0) + 1
+        if error:
+            self.tool_errors += 1
+
+    # --- observers passed to other modules ------------------------------------
+
+    def add_retry_sleep(self, ms: float) -> None:
+        self.retry_sleep_ms += ms
+
+    def add_hitl_wait(self, ms: int) -> None:
+        self.hitl_wait_ms += ms
+        self.interrupts += 1
+
+    def paced_ms(self) -> int:
+        return max(ratelimit.blocked_ms() - self.paced_at_start, 0)
+
+
+class TelemetryMiddleware(_AgentMiddleware):
+    """Times the model and tool seams for the turn record (``milestone6_spec.md`` §3).
+
+    Appended immediately after the workflow middleware and *before* the cost
+    tracker, so telemetry observes the whole turn including anything the later
+    middlewares add.
+
+    Holds the per-run identity (``run_id``/``thread_id``) plus the fields a live
+    ``/config set`` can change mid-session (``topic``, ``provider``/``model``), so
+    a record always describes the turn it came from rather than the launch config.
+    """
+
+    def __init__(self, sink: Path, *, run_id: str, thread_id: str | None = None,
+                 topic: str | None = None, provider: str | None = None,
+                 model: str | None = None):
+        super().__init__()
+        self.sink = Path(sink)
+        self.run_id = run_id
+        self.thread_id = thread_id
+        self.topic = topic
+        self.provider = provider
+        self.model = model
+        self.tracker: CostTrackerMiddleware | None = None
+        self.acc = _TurnAccumulator()
+        self.turn_index = 0
+        self._cost_at_start = None  # tracker.session snapshot; see begin_turn
+        self._warned = False  # one sink warning per run, not per turn
+
+    # --- turn boundary --------------------------------------------------------
+
+    def begin_turn(self) -> None:
+        """Start a new turn. Called by ``run_turn`` — **never from a hook**.
+
+        Deliberately NOT `before_agent`, which `milestone6_spec.md` §3.2 assumed
+        was the turn boundary. It is not: `before_agent` fires once per *invoke*,
+        and a turn can invoke several times — the resilience layer re-invokes on a
+        retry, and every HITL resume is another invoke. Resetting there would wipe
+        `retry_sleep_ms`/`retry_count` accumulated before the retry, and every
+        pre-suspend tool and model count on a gated turn. `run_turn` is the only
+        thing that brackets a whole turn, so it is the only thing that may reset.
+
+        The cost snapshot is taken here for the same reason. `tracker.turn` has
+        exactly this defect (`CostTrackerMiddleware.before_agent` resets it per
+        invoke), so a retried or gated turn's `tracker.turn.cost` is only the last
+        invoke's cost. Reading a **delta against `tracker.session`** — which is
+        never reset — is correct for any number of invokes, and makes the per-turn
+        costs sum to the session total by construction, which is what invariant 7
+        actually needs.
+        """
+        self.turn_index += 1
+        self.acc.reset()
+        self._cost_at_start = (
+            dataclasses.replace(self.tracker.session) if self.tracker is not None else None
+        )
+
+    # --- hooks ---------------------------------------------------------------
+
+    def before_model(self, state, runtime):
+        self.acc.open_model_span()
+
+    def after_model(self, state, runtime):
+        self.acc.close_model_span()
+        usage, _ = _latest_usage(state)
+        if usage is not None:
+            # Parsed off the response directly, independent of the tracker. When a
+            # tracker IS present the two are independent observers of the same
+            # event, not two writers of one number; invariant 7's session-level
+            # check against the past.sqlite row is what would catch a divergence.
+            self.acc.add_tokens(usage)
+
+    def wrap_tool_call(self, request, handler):
+        # `request.tool_call["name"]`, the same access PauseMiddleware uses.
+        # Reading a top-level `tool_name` is the M3 bug that let every call run
+        # ungated, and it would silently produce an empty tool mix here.
+        try:
+            name = (request.tool_call or {}).get("name") or "<unknown>"
+        except Exception:  # noqa: BLE001
+            name = "<unknown>"
+        started = time.perf_counter()
+        try:
+            result = handler(request)
+        except BaseException as exc:
+            if _is_control_flow(exc):
+                # The gate suspended or halted before the tool ran: no call, no
+                # error, no time. A gated call re-enters this wrapper on resume,
+                # and only that entry — the one that reaches the tool — counts.
+                raise
+            self.acc.add_tool(name, time.perf_counter() - started, error=True)
+            raise
+        self.acc.add_tool(
+            name,
+            time.perf_counter() - started,
+            error=getattr(result, "status", None) == "error",
+        )
+        return result
+
+    # --- the write -----------------------------------------------------------
+
+    def build_record(self, *, duration_ms: float, failed: bool) -> "telemetry_mod.TurnRecord":
+        acc = self.acc
+        acc.close_model_span()  # a turn that died mid-model still reports its time
+        delta = _session_delta(self.tracker, self._cost_at_start)
+        cost_usd, provenance = _turn_cost(self.tracker, delta)
+        return telemetry_mod.TurnRecord(
+            run_id=self.run_id,
+            thread_id=self.thread_id,
+            topic=self.topic,
+            turn=self.turn_index,
+            provider=self.provider,
+            model=self.model,
+            input=acc.input,
+            output=acc.output,
+            cache_read=acc.cache_read,
+            cache_write=acc.cache_write,
+            cost_usd=cost_usd,
+            cost_provenance=provenance,
+            energy_wh=_turn_energy(self.tracker, delta),
+            unpriced_calls=(delta.unpriced_calls if delta else 0),
+            estimated_calls=(delta.estimated_calls if delta else 0),
+            duration_ms=duration_ms,
+            model_ms=acc.model_ms,
+            tool_ms=acc.tool_ms,
+            retry_sleep_ms=acc.retry_sleep_ms,
+            paced_sleep_ms=acc.paced_ms(),
+            hitl_wait_ms=acc.hitl_wait_ms,
+            model_calls=acc.model_calls,
+            tool_calls=dict(acc.tool_calls),
+            tool_errors=acc.tool_errors,
+            failed=failed,
+            retry_count=acc.retry_count,
+            context_trimmed=acc.context_trimmed,
+            interrupts=acc.interrupts,
+        )
+
+    def write(self, *, duration_ms: float, failed: bool) -> None:
+        """Append this turn's record. Never raises into the turn path (invariant 3):
+        an unwritable sink degrades to one stderr line per run, then silence."""
+        try:
+            telemetry_mod.record_turn(self.sink, self.build_record(
+                duration_ms=duration_ms, failed=failed
+            ))
+        except Exception as exc:  # noqa: BLE001
+            if not self._warned:
+                self._warned = True
+                print(f"[harness] telemetry: {exc}", file=sys.stderr)
+
+
+def _session_delta(tracker: CostTrackerMiddleware | None, snapshot):
+    """This turn's usage as a delta against the session accumulator, or ``None``.
+
+    Not ``tracker.turn``: that is reset in ``CostTrackerMiddleware.before_agent``,
+    which fires once per *invoke*, so on a retried or HITL-gated turn it holds
+    only the last invoke's numbers. ``tracker.session`` is never reset, so a
+    snapshot-at-start / delta-at-end is correct however many times the turn
+    invoked — and the per-turn costs then sum to the session total by
+    construction, which is what invariant 7 needs.
+    """
+    if tracker is None or snapshot is None:
+        return None
+    s = tracker.session
+    return UsageAccumulator(
+        input=s.input - snapshot.input,
+        output=s.output - snapshot.output,
+        cache_read=s.cache_read - snapshot.cache_read,
+        cache_write=s.cache_write - snapshot.cache_write,
+        cost=s.cost - snapshot.cost,
+        energy_wh=s.energy_wh - snapshot.energy_wh,
+        unpriced_calls=s.unpriced_calls - snapshot.unpriced_calls,
+        estimated_calls=s.estimated_calls - snapshot.estimated_calls,
+    )
+
+
+def _turn_cost(tracker: CostTrackerMiddleware | None, delta):
+    """(cost_usd, provenance) for the turn just finished, or (None, None).
+
+    ``None`` and not ``0.0`` when there is no tracker: M1 builds one only when
+    there is something to price, so an unpriced model must leave the field NULL
+    rather than claim the run was free (invariant 5).
+    """
+    if tracker is None or delta is None:
+        return None, None
+    return _cost_and_provenance(tracker, delta)
+
+
+def _turn_energy(tracker: CostTrackerMiddleware | None, delta) -> float | None:
+    """Watt-hours for the turn, or ``None`` when the model carries no energy table
+    (in which case ``0.0`` would be a claim the harness never measured)."""
+    if tracker is None or delta is None or not tracker.has_energy:
+        return None
+    return delta.energy_wh
+
+
+def build_telemetry(settings, workspace: Path, *, run_id: str, thread_id: str | None,
+                    topic: str | None, provider: str | None, model: str | None):
+    """The telemetry middleware, or ``None`` when the knob is off.
+
+    ``None`` => ``main`` appends no middleware, opens no sink and writes no summary
+    — the removable contract (invariant 20), structural rather than policed, since
+    every parameter this milestone added downstream defaults to the inert value.
+
+    The sink goes in the **state dir**, beside ``past.sqlite`` and
+    ``denials.jsonl`` and outside the workspace mount: telemetry is an audit
+    surface, and the audited party must not be able to rewrite the record
+    (``milestone6.md`` §5a). No extra check that the state dir really is outside
+    the workspace — ``harness doctor`` already errors on that, and a second,
+    divergent guard is worse than one (invariant 19).
+    """
+    if not getattr(settings, "telemetry", True):
+        return None
+    return TelemetryMiddleware(
+        telemetry_mod.usage_path(archive.state_dir(workspace)),
+        run_id=run_id,
+        thread_id=thread_id,
+        topic=topic,
+        provider=provider,
+        model=model,
+    )
+
+
 def run_turn(
     agent,
     text: str,
@@ -519,6 +873,7 @@ def run_turn(
     stream: bool = False,
     extra_messages: list | None = None,
     hitl_ctx: "hitl.HitlContext | None" = None,
+    telemetry: "TelemetryMiddleware | None" = None,
 ) -> str | None:
     """One invoke on the given thread. Returns the answer text, or None when
     --stream already printed raw events instead of a final message.
@@ -530,39 +885,82 @@ def run_turn(
     `interrupt()` is drained through the human channel and resumed before the
     final message is extracted (S1). None => the invoke returns straight through
     (MVP path).
+
+    `telemetry` (Milestone 6) is the middleware appended to this same agent,
+    threaded in the way `tracker` already is rather than kept in a module global:
+    at most one `run_turn` runs per process today, but a global would make the
+    host tests order-dependent and a future parallel driver silently wrong.
+
+    **The record is written from this function's `finally`** — not from
+    `after_agent`, and not from the callers' `except` blocks
+    (`milestone6_spec.md` §3.2). Three reasons, each decisive on its own:
+    `run_turn` has no general `except` to hook (only `HaltTurn`, and its two
+    callers each carry their own handler, so hooking either misses the other
+    path); `after_agent` never fires for a turn that raises mid-invoke, which is
+    exactly the record an operator most wants (invariant 2); and `duration_ms`
+    must bracket the HITL resume loop below, which runs *after* the middleware's
+    `after_agent` has already fired.
     """
     messages = list(extra_messages or []) + [{"role": "user", "content": text}]
     inputs = {"messages": messages}
     _stage("thinking")
-    if stream:
-        for event in agent.stream(inputs, config=config):
-            pprint(event)
-        return None
+    if telemetry is not None:
+        # The ONLY reset site. `before_agent` looks like the turn boundary and is
+        # not — it fires per invoke, and a turn can invoke several times (a
+        # resilience retry, every HITL resume). See TelemetryMiddleware.begin_turn.
+        telemetry.begin_turn()
+    started = time.perf_counter()
+    failed = False
     try:
-        result = _invoke_resilient(agent, inputs, config)
-        if hitl_ctx is not None:
-            result = hitl.run_interrupt_loop(
-                result,
-                lambda value: _invoke_resilient(agent, hitl.resume_command(value), config),
-                channel=hitl_ctx.channel,
-                headless=hitl_ctx.headless,
-                config=hitl_ctx.config,
-                workspace=hitl_ctx.workspace,
-            )
-    except hitl.HaltTurn as halt:
-        # on_deny='halt': the gate abandoned the turn on a deny. Pair the dangling
-        # tool_call in checkpoint state so the next turn doesn't resume with an
-        # unanswered call, then return to the human prompt with no model reply.
         try:
-            agent.update_state(config, {"messages": [halt.tool_message]})
-        except Exception as exc:  # noqa: BLE001 - repair is best-effort, never fatal
-            _stage(f"halt: could not repair tool_call state ({type(exc).__name__}: {exc})")
-        _stage(f"tool call '{halt.tool_name}' denied — turn halted; back to you")
-        return None
-    return final_message_text(result)
+            if stream:
+                # --stream is the raw-event debug path: no resilience layer, no
+                # HITL loop. It IS still a completed turn, so it gets a record --
+                # invariant 1 says one record per turn, and a mode that silently
+                # produced none would be a hole shaped exactly like a bug.
+                for event in agent.stream(inputs, config=config):
+                    pprint(event)
+                return None
+            result = _invoke_resilient(agent, inputs, config, telemetry=telemetry)
+            if hitl_ctx is not None:
+                result = hitl.run_interrupt_loop(
+                    result,
+                    lambda value: _invoke_resilient(
+                        agent, hitl.resume_command(value), config, telemetry=telemetry
+                    ),
+                    channel=hitl_ctx.channel,
+                    headless=hitl_ctx.headless,
+                    config=hitl_ctx.config,
+                    workspace=hitl_ctx.workspace,
+                    on_wait=(telemetry.acc.add_hitl_wait if telemetry is not None else None),
+                )
+        except hitl.HaltTurn as halt:
+            # on_deny='halt': the gate abandoned the turn on a deny. Pair the dangling
+            # tool_call in checkpoint state so the next turn doesn't resume with an
+            # unanswered call, then return to the human prompt with no model reply.
+            #
+            # NOT a failed turn (invariant 2a): an operator deny is an outcome, and
+            # conflating it with "the turn broke" would put a governance signal in
+            # the reliability column that a benchmark sweep then reads as harness
+            # unreliability.
+            try:
+                agent.update_state(config, {"messages": [halt.tool_message]})
+            except Exception as exc:  # noqa: BLE001 - repair is best-effort, never fatal
+                _stage(f"halt: could not repair tool_call state ({type(exc).__name__}: {exc})")
+            _stage(f"tool call '{halt.tool_name}' denied — turn halted; back to you")
+            return None
+        except BaseException:
+            failed = True
+            raise
+        return final_message_text(result)
+    finally:
+        if telemetry is not None:
+            telemetry.write(
+                duration_ms=(time.perf_counter() - started) * 1000, failed=failed
+            )
 
 
-def _invoke_resilient(agent, inputs: dict, config: dict):
+def _invoke_resilient(agent, inputs: dict, config: dict, telemetry=None):
     """Invoke the agent with the P1 resilience layer (§12.4 / slice P1):
 
     * bounded exponential backoff on transient provider/transport errors
@@ -574,11 +972,35 @@ def _invoke_resilient(agent, inputs: dict, config: dict):
 
     A retryable error that outlasts the backoff budget is re-raised unchanged —
     that is the seam S4's provider-error interrupt hooks onto.
+
+    `telemetry` (Milestone 6 §4) turns the two things this function already does
+    but does not record into numbers: the backoff sleeps and the one-shot trim.
+    `retry_call` takes `sleep=` as a parameter precisely so the caller owns the
+    sleeping, so measuring it costs one wrapper rather than a new seam.
     """
+    acc = telemetry.acc if telemetry is not None else None
+
     def invoke():
         return agent.invoke(inputs, config=config)
 
+    def _sleep(seconds: float) -> None:
+        # Accumulate the ELAPSED sleep, not the requested delay: they differ under
+        # load, and the decomposition's residual is exactly where that difference
+        # would otherwise hide.
+        started = time.perf_counter()
+        try:
+            time.sleep(seconds)
+        finally:
+            if acc is not None:
+                acc.add_retry_sleep((time.perf_counter() - started) * 1000)
+
     def _note(attempt: int, exc: Exception, delay: float) -> None:
+        if acc is not None:
+            # Increment, don't `max(..., attempt)`: `_invoke_resilient` runs once
+            # per invoke and a HITL turn invokes it repeatedly (once per resume),
+            # so `attempt` restarts at 1 each time and a max would silently report
+            # the worst single invoke as the whole turn's retry count.
+            acc.retry_count += 1
         _stage(
             f"provider error ({_err_detail(exc)}); retry {attempt} in {delay:.1f}s"
         )
@@ -588,7 +1010,7 @@ def _invoke_resilient(agent, inputs: dict, config: dict):
             invoke,
             max_retries=resilience.max_retries_from_env(),
             base=resilience.retry_base_from_env(),
-            sleep=time.sleep,
+            sleep=_sleep,
             on_retry=_note,
         )
     except Exception as exc:  # noqa: BLE001
@@ -596,7 +1018,13 @@ def _invoke_resilient(agent, inputs: dict, config: dict):
         if resilience.is_context_overflow(exc) and len(msgs) > 1:
             # Stopgap: recalled/injected slices are reference-only, so shed them
             # and retry once with just the live user turn (the last message).
+            #
+            # Flagged on the record because a trimmed turn is NOT comparable to an
+            # untrimmed one, and a benchmark that mixes them silently is measuring
+            # two different things (invariant 4d).
             _stage("context overflow — dropping injected context and retrying once")
+            if acc is not None:
+                acc.context_trimmed = True
             trimmed = {"messages": resilience.trim_messages(msgs, 1)}
             return agent.invoke(trimmed, config=config)
         raise
@@ -1047,18 +1475,29 @@ def _cost_totals_for_row(tracker: CostTrackerMiddleware | None):
     if tracker is None:
         return None, None, None, None
     s = tracker.session
+    cost, provenance = _cost_and_provenance(tracker, s)
+    return s.input, s.output, cost, provenance
+
+
+def _cost_and_provenance(tracker: CostTrackerMiddleware, acc):
+    """(cost_usd, provenance) for one UsageAccumulator under `tracker`'s pricing.
+
+    Split out of `_cost_totals_for_row` so Milestone 6 can ask the same question of
+    `tracker.turn` that the ledger row asks of `tracker.session`. One rule for "is
+    this a real number or a floor", not two that drift -- the fork-2
+    single-authority posture applied to the cost field itself."""
     pricing = getattr(tracker, "_pricing", None)
     if isinstance(pricing, Free):
-        return s.input, s.output, 0.0, "official"
-    if s.cost > 0 or (s.total_tokens > 0 and s.unpriced_calls == 0):
+        return 0.0, "official"
+    if acc.cost > 0 or (acc.total_tokens > 0 and acc.unpriced_calls == 0):
         provenance = (
             "estimate"
-            if s.estimated_calls
+            if acc.estimated_calls
             else ("reported" if isinstance(pricing, ReportedCost) else "official")
         )
-        return s.input, s.output, round(s.cost, 6), provenance
+        return round(acc.cost, 6), provenance
     # Fully unpriced (floor only): tokens known, cost is not.
-    return s.input, s.output, None, None
+    return None, None
 
 
 def _finalize_session(conn, run_id: str, chat_model, tracker: CostTrackerMiddleware | None) -> None:
@@ -1081,6 +1520,44 @@ def _finalize_session(conn, run_id: str, chat_model, tracker: CostTrackerMiddlew
         _stage(f"archive: failed to finalize session ({exc})")
 
 
+def _write_session_summary(telemetry, workspace: Path | None, *, started: str,
+                           elapsed_ms: float) -> None:
+    """Derive and write `<state-dir>/session.json` (Milestone 6 T3). No-op when
+    telemetry is off.
+
+    Derived from the turn records, never accumulated in parallel (invariant 6):
+    `past.sqlite` stays authoritative for session totals, and two files disagreeing
+    is worse than one file missing (fork 2).
+
+    **Normal-completion path only.** A hard crash unwinds past this call to the
+    `finally`, leaving the turn records (each already appended at its own turn) and
+    no summary. That is the deliberate trade: per-turn durability is what bounds
+    loss, and a summary written from a half-finalized session would disagree with
+    the ledger row. `harness telemetry show` derives from the records when the
+    summary is absent, so the run stays readable either way.
+
+    Never raises -- a summary failure must not stop the run ending normally or
+    git-pr running with the plain body."""
+    if telemetry is None or workspace is None:
+        return
+    try:
+        records = telemetry_mod.read_records(telemetry.sink, run_id=telemetry.run_id)
+        summary = telemetry_mod.derive_session(
+            records,
+            run_id=telemetry.run_id,
+            thread_id=telemetry.thread_id,
+            topic=telemetry.topic,
+            started=started,
+            duration_ms=elapsed_ms,
+            usage_log=str(telemetry.sink),
+        )
+        telemetry_mod.write_session(
+            telemetry_mod.session_path(archive.state_dir(workspace)), summary
+        )
+    except Exception as exc:  # noqa: BLE001
+        _stage(f"telemetry: failed to write session summary ({exc})")
+
+
 def _print_session_total(tracker: CostTrackerMiddleware | None) -> None:
     """End-of-session token/cost/energy total (§1 req 2). No-op without a tracker."""
     if tracker is not None:
@@ -1090,7 +1567,7 @@ def _print_session_total(tracker: CostTrackerMiddleware | None) -> None:
         )
 
 
-def _run_turn_hitl(agent, text, config, *, stream, extra_messages, hitl_ctx):
+def _run_turn_hitl(agent, text, config, *, stream, extra_messages, hitl_ctx, telemetry=None):
     """`run_turn` plus the S4 *provider-error* system interrupt.
 
     When the resilience layer (P1) has exhausted its retries and re-raised a
@@ -1099,12 +1576,19 @@ def _run_turn_hitl(agent, text, config, *, stream, extra_messages, hitl_ctx):
     channel instead of just reporting the failure (§4 S4). `switch provider` is
     not offered yet (it needs an agent rebuild) — tracked as a follow-up. Any
     other failure (a bug, a bad key) propagates to the caller's handler unchanged.
+
+    Stays a **pass-through** for telemetry: `run_turn` is the single write site, so
+    this wrapper must not become a second one or a HITL run records every turn
+    twice (`milestone6_spec.md` §3.2). A `retry` choice below re-enters `run_turn`,
+    which is a genuinely new turn record — that is the same event the operator saw
+    twice, not a duplicate of one.
     """
     while True:
         try:
             return run_turn(
                 agent, text, config,
                 stream=stream, extra_messages=extra_messages, hitl_ctx=hitl_ctx,
+                telemetry=telemetry,
             )
         except BudgetExceeded:
             raise
@@ -1133,6 +1617,25 @@ def _run_turn_hitl(agent, text, config, *, stream, extra_messages, hitl_ctx):
                 _stage("retrying turn after provider error")
                 continue
             raise
+
+
+def _retopic_telemetry(telemetry, topic: str | None) -> None:
+    """Point telemetry at the current topic. Inert when telemetry is off."""
+    if telemetry is not None:
+        telemetry.topic = topic
+
+
+def _remodel_telemetry(telemetry, model_spec: str | None) -> None:
+    """Split a `provider:model` spec onto the telemetry middleware.
+
+    Same split `main` does for the archive row, so a mid-session model switch is
+    recorded the way the launch model was and `session.json`'s model mix stays a
+    map of real `provider:model` keys."""
+    if telemetry is None or not model_spec:
+        return
+    provider = provider_for(model_spec)
+    telemetry.provider = provider.prefix.rstrip(":") if provider else None
+    telemetry.model = model_spec[len(provider.prefix):] if provider else model_spec
 
 
 def _should_audit_path_denials(hitl_conf) -> bool:
@@ -1182,6 +1685,7 @@ def run_repl(
     rebuild_agent=None,
     settings=None,
     settings_sources=None,
+    telemetry: "TelemetryMiddleware | None" = None,
 ) -> int:
     """Container-lifetime loop: build once (by the caller), then prompt -> invoke
     -> answer until /exit, /quit, or EOF. A non-TTY stdin collapses to the single
@@ -1228,7 +1732,8 @@ def run_repl(
     if initial_task:
         try:
             answer = _run_turn_hitl(
-                agent, initial_task, config, stream=stream, extra_messages=None, hitl_ctx=hitl_ctx
+                agent, initial_task, config, stream=stream, extra_messages=None,
+                hitl_ctx=hitl_ctx, telemetry=telemetry,
             )
         except KeyboardInterrupt:
             # Ctrl-C during a turn cancels that turn only; the session survives.
@@ -1279,6 +1784,7 @@ def run_repl(
             continue
         if archive_conn is not None and command == "/topic":
             current_topic = _handle_topic(archive_conn, run_id, line, current_topic)
+            _retopic_telemetry(telemetry, current_topic)
             continue
         if command == "/refresh":
             # Available whenever the ephemeral source mount is present, independent
@@ -1313,13 +1819,19 @@ def run_repl(
                 _stage(f"config: command failed: {_err_detail(exc)}")
                 _dump_error(exc)
                 continue
+            # A live `/config set topic|model` must reach the record from the NEXT
+            # turn on, or every record after the change describes the launch config
+            # instead of the turn it came from.
+            _retopic_telemetry(telemetry, current_topic)
+            _remodel_telemetry(telemetry, current_model)
             if new_agent is not None:
                 agent = new_agent
             continue
 
         try:
             answer = _run_turn_hitl(
-                agent, line, config, stream=stream, extra_messages=pending, hitl_ctx=hitl_ctx
+                agent, line, config, stream=stream, extra_messages=pending,
+                hitl_ctx=hitl_ctx, telemetry=telemetry,
             )
             pending = []
         except KeyboardInterrupt:
@@ -1444,10 +1956,22 @@ def _pr_approval(hitl_conf, workspace: Path | None, headless: bool) -> bool:
     return approved
 
 
-def _batch_payload(final_message, config, tracker, workspace, exit_code) -> dict:
+def _batch_payload(final_message, config, tracker, workspace, exit_code,
+                   telemetry=None) -> dict:
     """The one JSON object a headless run emits on stdout (P2). PR URL is not yet
     captured here — git-pr runs at session.end (after this) and logs its URL to
-    stderr; wiring it into the payload is a follow-up."""
+    stderr; wiring it into the payload is a follow-up.
+
+    Milestone 6 adds three join keys (`run_id`, `topic`, `usage_log`). Today's
+    `thread_id` **repeats across resumes** and is therefore not the `past.sqlite`
+    key, so a batch driver could not reliably join its own stdout to the ledger.
+    That is the difference between telemetry you can aggregate over 300 benchmark
+    instances and telemetry you open one file at a time (invariant 23). Additive:
+    existing keys keep their names and meanings.
+
+    The keys are present with `None` values when telemetry is off, rather than
+    absent: a driver that reads `payload["run_id"]` should get a null it can test,
+    not a KeyError that looks like a schema change."""
     thread_id = config.get("configurable", {}).get("thread_id")
     tokens = cost = None
     if tracker is not None:
@@ -1456,6 +1980,9 @@ def _batch_payload(final_message, config, tracker, workspace, exit_code) -> dict
     return {
         "final_message": final_message,
         "thread_id": thread_id,
+        "run_id": (telemetry.run_id if telemetry is not None else None),
+        "topic": (telemetry.topic if telemetry is not None else None),
+        "usage_log": (str(telemetry.sink) if telemetry is not None else None),
         "tokens": tokens,
         "cost_usd": cost,
         "branch": _read_session_branch(workspace),
@@ -1472,6 +1999,7 @@ def run_batch(
     tracker: CostTrackerMiddleware | None = None,
     hitl_conf=None,
     workspace: Path | None = None,
+    telemetry: "TelemetryMiddleware | None" = None,
 ) -> int:
     """Headless one-shot mode (P2 / design_doc.md §12.3).
 
@@ -1490,7 +2018,9 @@ def run_batch(
         for task in tasks:
             if not task:
                 continue
-            final_message = run_turn(agent, task, config, stream=stream, hitl_ctx=hitl_ctx)
+            final_message = run_turn(
+                agent, task, config, stream=stream, hitl_ctx=hitl_ctx, telemetry=telemetry
+            )
     except hitl.InterruptAborted as exc:
         _stage(f"headless abort: {exc}")
         exit_code = exc.exit_code
@@ -1503,7 +2033,9 @@ def run_batch(
         exit_code = 1
 
     _print_session_total(tracker)
-    print(json.dumps(_batch_payload(final_message, config, tracker, workspace, exit_code)))
+    print(json.dumps(
+        _batch_payload(final_message, config, tracker, workspace, exit_code, telemetry)
+    ))
     _stage("session closed")
     return exit_code
 
@@ -1540,6 +2072,18 @@ def dispatch(argv: list[str]) -> int:
         from harness.config_cli import config_main
 
         return config_main(argv[1:])
+    if argv and argv[0] == "telemetry":
+        # Milestone 6 T5. Lazy import inside the branch, like every route above:
+        # the module is stdlib-weight (it imports nothing from the package but
+        # harness.scrub), so this route adds no dependency of its own.
+        #
+        # It needs no key, no network and no model. It is NOT a stdlib-only
+        # *process*: harness/__init__.py imports cli unconditionally, so `config`
+        # and `doctor` already pay langchain's import cost too -- M5 §0.1 F6's
+        # known, deferred limitation, which M6 does not fix (invariant 22).
+        from harness.telemetry import telemetry_main
+
+        return telemetry_main(argv[1:])
     if argv and argv[0] == "seccomp-sync":
         from harness.seccomp import seccomp_sync_main
 
@@ -1630,6 +2174,12 @@ def main() -> int:
     # provider/model strings are resolved here and passed in as plain values.
     archive_conn = None
     run_id = f"run-{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
+    # Session wall clock for the telemetry summary (T3). Taken here, beside
+    # run_id, because both must exist whether or not the archive is enabled.
+    session_started_iso = datetime.now(timezone.utc).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
+    session_started_perf = time.perf_counter()
     provider = provider_for(model)
     provider_name = provider.prefix.rstrip(":") if provider else None
     bare_model = model[len(provider.prefix):] if provider else model
@@ -1659,6 +2209,18 @@ def main() -> int:
             # something to track (§2.5). None => append nothing => MVP behavior.
             tracker = build_cost_tracker(model, args.max_cost, args.max_tokens)
             middleware = build_workflow_middleware(by_hook, workspace)
+            # Telemetry goes in BEFORE the tracker so it observes the whole turn
+            # including anything the later middlewares add. langchain composes
+            # first-is-outermost, so this also makes it the outer wrap_tool_call
+            # (milestone6_spec.md §3.1 — measured, not assumed).
+            telemetry = build_telemetry(
+                args.settings, workspace,
+                run_id=run_id, thread_id=args.thread_id, topic=args.topic,
+                provider=provider_name, model=bare_model,
+            )
+            if telemetry is not None:
+                telemetry.tracker = tracker  # for cost/energy only; tokens are parsed independently
+                middleware.append(telemetry)
             if tracker is not None:
                 middleware.append(tracker)
 
@@ -1759,6 +2321,7 @@ def main() -> int:
                     tracker=tracker,
                     hitl_conf=hitl_conf,
                     workspace=workspace,
+                    telemetry=telemetry,
                 )
             else:
                 rc = run_repl(
@@ -1777,6 +2340,7 @@ def main() -> int:
                     rebuild_agent=_rebuild_agent,
                     settings=args.settings,
                     settings_sources=args.settings_sources,
+                    telemetry=telemetry,
                 )
             if archive_conn is not None:
                 # After the M1 session-total line printed (inside run_repl), so the
@@ -1787,6 +2351,17 @@ def main() -> int:
                 _finalize_session(
                     archive_conn, run_id, init_summary_model(model), tracker
                 )
+            # T3: the derived session summary, written OUTSIDE the archive guard
+            # above. "After _finalize_session" read literally would put it inside,
+            # and DEEPAGENTS_ARCHIVE=0 would then silently produce no summary --
+            # which the failure table forbids (milestone6_spec.md §9/§13). The
+            # ordering constraint (invariant 8) is *after finalize, before
+            # _pr_approval*, and this is that point in the sequence.
+            _write_session_summary(
+                telemetry, workspace,
+                started=session_started_iso,
+                elapsed_ms=(time.perf_counter() - session_started_perf) * 1000,
+            )
             # Ask the operator before git-pr opens the PR (interactive gated presets
             # only; off-path returns True). Decided here, enforced in `finally`.
             pr_gate_ok = _pr_approval(hitl_conf, workspace, args.headless)

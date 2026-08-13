@@ -473,3 +473,82 @@ def test_shell_guard_lets_ordinary_commands_through(workspace_sandbox, monkeypat
     monkeypatch.setattr(agent.LocalShellBackend, "execute", lambda self, command, **kw: "ran")
     backend = _ns_backend(workspace_sandbox)
     assert backend.execute("pytest tests/ -v") == "ran"
+
+
+# --- Milestone 6: the telemetry sink is agent-unreachable (invariants 14/15) ---
+#
+# Telemetry is an audit surface, so the audited party must not be able to rewrite
+# the record (milestone6.md §5a) -- the same reasoning M4 slice D applied to
+# denials.jsonl. This is the leg that holds UNCONDITIONALLY: the file tools are
+# rooted at the workspace and cannot address the state dir. The shell leg holds
+# only under DEEPAGENTS_JAIL=1, and is asserted in the jail tests, not here.
+
+
+def test_telemetry_files_resolve_under_the_state_dir(tmp_path, monkeypatch):
+    """Invariant 14, on the RESOLVED paths rather than a string prefix."""
+    archive = _load("harness.archive")
+    tm = _load("harness.telemetry")
+
+    state = tmp_path / "outside-state"
+    monkeypatch.setenv("DEEPAGENTS_STATE_DIR", str(state))
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    resolved_state = archive.state_dir(workspace).resolve()
+    for path in (tm.usage_path(resolved_state), tm.session_path(resolved_state)):
+        assert path.parent == resolved_state
+        assert workspace.resolve() not in path.resolve().parents
+
+
+def test_file_tools_cannot_reach_the_telemetry_sink(tmp_path, monkeypatch):
+    """Invariant 15: a write_file/read_file aimed at the resolved usage.jsonl is
+    refused OR redirected back inside the workspace — either way the sink is not
+    what the tool addresses. (On Linux, upstream's `_resolve_path` re-roots the
+    absolute path under the workspace rather than raising; the property under
+    test is the same, so assert the property, not the mechanism.)
+
+    Driven through the same backend the agent's file tools use, with the state
+    dir OUTSIDE the workspace -- which is the configuration run-docker always
+    produces and the one the placement decision assumes."""
+    archive = _load("harness.archive")
+    tm = _load("harness.telemetry")
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    monkeypatch.setenv("DEEPAGENTS_STATE_DIR", str(state))
+
+    sink = tm.usage_path(archive.state_dir(workspace))
+    sink.write_text('{"schema": 1}\n', encoding="utf-8")
+
+    backend = agent._WorkspaceShellBackend(
+        root_dir=str(workspace), virtual_mode=True, inherit_env=False, env={}
+    )
+    # Whether upstream's own resolution refuses it first or our pathguard does,
+    # the property under test is the same: the path does not resolve to the sink.
+    import pathlib
+
+    try:
+        resolved = backend._resolve_path(str(sink))
+    except Exception:
+        return  # refused outright -- the strongest form of the same guarantee
+    assert pathlib.Path(resolved).resolve() != sink.resolve(), (
+        "a file tool addressed the telemetry sink -- the agent could edit its own record"
+    )
+
+
+def test_telemetry_adds_no_second_state_dir_guard():
+    """Invariant 19: state_dir() falls back to <workspace>/.deepagents when
+    DEEPAGENTS_STATE_DIR is unset, which would put the sink back inside the mount.
+    `harness doctor` already errors on that; telemetry must INHERIT that check
+    rather than grow a second, divergent one."""
+    import inspect
+
+    tm = _load("harness.telemetry")
+    source = inspect.getsource(tm)
+    # No re-implementation of the workspace-containment test in telemetry.py.
+    assert "is_relative_to" not in source
+    assert "DEEPAGENTS_STATE_DIR" not in source
+    doctor = _load("harness.doctor")
+    assert "state" in inspect.getsource(doctor)

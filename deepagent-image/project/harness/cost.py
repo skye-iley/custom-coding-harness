@@ -439,6 +439,16 @@ class CostTrackerMiddleware(AgentMiddleware):
         """Model name this tracker is currently pricing against."""
         return self._bare_model
 
+    @property
+    def has_energy(self) -> bool:
+        """Whether the current model declares an energy table.
+
+        Milestone 6 needs the distinction the accumulator alone cannot make: with
+        no table, ``turn.energy_wh`` is ``0.0`` because nothing was ever added, and
+        recording that as a measurement would claim a zero the harness never took.
+        """
+        return self._rates is not None and self._rates.has_energy
+
     def reprice(self, pricing: Pricing, bare_model: str, rates: "ModelRates | None") -> None:
         """Point the tracker at a different model's rates mid-session.
 

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -208,6 +209,7 @@ def run_interrupt_loop(
     config: HitlSection,
     workspace: Path,
     audit_on: bool = True,
+    on_wait: "Callable[[int], None] | None" = None,
 ):
     """Drain every interrupt from `result`, resuming the graph until it runs clean.
 
@@ -219,6 +221,18 @@ def run_interrupt_loop(
 
     A bounded iteration cap guards against a pathological gate that re-raises an
     interrupt every resume — it aborts loudly rather than spinning forever.
+
+    ``on_wait(elapsed_ms)`` (Milestone 6, ``milestone6_spec.md`` §6) is an optional
+    observer called once per resolution with the time this loop spent blocked on
+    the human. An *observer*, not a widened return value: the return is the resumed
+    result and three call sites plus the HITL tests depend on that, so a tuple here
+    would ripple for no gain. Every existing caller passes nothing and behaves
+    exactly as before.
+
+    Only the **resolution** is timed — not the audit write and not the resume
+    invoke. Those are harness cost and belong in the decomposition's residual;
+    counting them as human wait time would flatter the harness by attributing its
+    own overhead to the operator.
     """
     guard = 0
     while True:
@@ -229,9 +243,20 @@ def run_interrupt_loop(
         if guard > 1000:
             raise RuntimeError("interrupt loop did not converge (re-raised >1000 times)")
         request = pending[0]
-        value, resolved_by = resolve_value(
-            request, channel=channel, headless=headless, config=config
-        )
+        _waited_from = time.perf_counter()
+        try:
+            value, resolved_by = resolve_value(
+                request, channel=channel, headless=headless, config=config
+            )
+        finally:
+            if on_wait is not None:
+                # `finally`, so an InterruptAborted out of the headless policy still
+                # attributes the time it took to decide. Never let the observer
+                # break the loop it is only watching.
+                try:
+                    on_wait(int((time.perf_counter() - _waited_from) * 1000))
+                except Exception:  # noqa: BLE001
+                    pass
         if audit_on:
             try:
                 audit.record_interrupt(workspace, request, value, resolved_by=resolved_by)

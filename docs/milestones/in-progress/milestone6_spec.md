@@ -111,7 +111,7 @@ Rules:
 |---|---|---|
 | `model_ms`, `model_calls` | `before_model` / `after_model` | `perf_counter` delta per call, summed. Mirrors how `WorkflowMiddleware` already uses these hooks |
 | `tool_ms`, `tool_calls`, `tool_errors` | `wrap_tool_call(request, handler)` | name from `request.tool_call["name"]` — **the same access `PauseMiddleware` uses**; reading top-level `tool_name` is the M3 bug that let every call run ungated. `tool_errors` increments when `handler` raises or returns an error ToolMessage |
-| `duration_ms` | `cli.run_turn`, around the whole turn | wall clock incl. everything below. **`run_turn`, not `run_repl`** — §3.2 |
+| `duration_ms` | `cli.run_turn`, around the whole turn | wall clock incl. everything below. **`run_turn`, not `run_repl`** — §3.2. Covers the `--stream` branch too: it bypasses the resilience layer and the HITL loop but is still a completed turn, and a mode that silently produced no record would be a hole shaped exactly like a bug |
 | `retry_sleep_ms`, `retry_count` | `cli._invoke_resilient` | §4 |
 | `paced_sleep_ms` | `ratelimit` module counter, sampled at turn boundaries | §5 |
 | `hitl_wait_ms` | `hitl.run_interrupt_loop` | §6 |
@@ -126,20 +126,38 @@ Current assembly order in `cli.main` is: `build_workflow_middleware(...)` → `t
 **Append `TelemetryMiddleware` immediately after the workflow middleware and before the tracker.**
 Rationale: telemetry should observe the *whole* turn including anything the later middlewares add.
 
-**But this is the one composition fact not verified in this repo**: whether an earlier entry's
-`wrap_tool_call` is the *outer* or *inner* wrapper is deepagents/langchain behaviour, and it decides
-whether `tool_ms` includes `PauseMiddleware`'s HITL approval wait. Do not guess.
+**RESOLVED — telemetry is the OUTER wrapper, and no subtraction is needed.** The composition fact
+and the conclusion drawn from it are two separate findings; both are recorded because the second one
+reverses what this section originally planned to do about the first.
 
-**Resolution step, first thing in T2:** add a throwaway two-middleware probe (both logging enter/exit
-around `wrap_tool_call`), run one stubbed tool call, and record the observed nesting in this section
-as a fact. Then:
+**Finding 1 — first in the list is outermost.** `langchain.agents.factory._chain_tool_call_wrappers`
+(langchain 1.3.15) composes in middleware order with the docstring *"Compose wrappers into middleware
+stack (first = outermost)"*, and `compose_two(outer, inner)` calls `outer(request, call_inner)`.
+Read off the resolved dependency rather than inferred from a timing probe, so the answer is the
+mechanism, not a measurement of it. Telemetry is appended before `PauseMiddleware`, so telemetry
+wraps the gate.
 
-- If telemetry ends up **outer**: subtract `hitl_wait_ms` from `tool_ms` before recording, so
-  `tool_ms` stays "time the tool actually ran."
-- If telemetry ends up **inner**: `tool_ms` already excludes the gate; `hitl_wait_ms` is then
-  measured only in the interrupt loop (§6) and the decomposition still balances.
+**Finding 2 — the HITL wait is not inside `wrap_tool_call` at all**, so being outer costs nothing.
+`PauseMiddleware.wrap_tool_call` calls `interrupt.raise_interrupt(...)`, i.e. langgraph's
+`interrupt()`, which **raises `GraphInterrupt` and suspends the graph**. The human is asked in
+`hitl.run_interrupt_loop`, which runs in `run_turn` *after* `agent.invoke` has already returned.
+Nothing blocks on a human inside the wrapper, so the planned subtraction would have removed time
+that was never counted — it would have made `tool_ms` wrong in the other direction. Do not
+implement it.
 
-Either way the invariant is the same: **`tool_ms` never contains human wait time.**
+The invariant is unchanged and now holds structurally: **`tool_ms` never contains human wait time.**
+
+**But finding 2 has a consequence this section originally missed**, and it is the real reason the
+probe was worth doing. Because the gate raises *through* telemetry's wrapper:
+
+- **`GraphInterrupt` and `HaltTurn` must not count as tool errors.** They are control flow, not a
+  failed tool. Counting them would put every gated call in the reliability column — invariant 2a's
+  mistake one level down.
+- **A gated tool call enters `wrap_tool_call` twice** — once for the suspend, once on resume. Only
+  the entry that actually reaches the tool may increment `tool_calls`, or a HITL run reports double
+  the tool work it did.
+- **Neither entry contributes to `tool_ms` unless the tool ran.** Time spent building the approval
+  prompt is harness overhead and belongs in the residual.
 
 ### 3.2 How the middleware's numbers reach the record — and where the record is written
 
@@ -148,6 +166,22 @@ Two halves measure one turn: the **middleware** owns `model_ms` / `tool_ms` / `t
 `duration_ms`, `failed`, `retry_*`, `context_trimmed` and the write (it is the only thing that
 brackets the whole turn including a raise). They have to meet somewhere; an earlier draft did not
 say where.
+
+**CORRECTION — `before_agent` is not the turn boundary, and the reset must not live there.** This
+section (and §3's table) assumed `before_agent` fires once per turn. It fires once per **invoke**,
+and a turn invokes several times: the resilience layer re-invokes on a retry, and every HITL resume
+is another invoke. A reset there wipes `retry_sleep_ms`/`retry_count` accumulated *between* invokes
+and every pre-suspend tool and model count on a gated turn. `run_turn` is the only thing that
+brackets a whole turn, so `TelemetryMiddleware.begin_turn()` is called from there and nowhere else;
+the middleware defines no `before_agent` at all.
+
+**Same defect, same fix, for cost.** §8 says to read `tracker.turn.cost` because
+"`CostTrackerMiddleware.before_agent` resets `turn`" — true, and that is precisely the problem:
+`tracker.turn` holds only the *last invoke's* cost on a retried or gated turn. The per-turn cost is
+therefore a **delta against `tracker.session`**, which is never reset: snapshot at `begin_turn`,
+subtract at write. Correct for any number of invokes, and it makes the per-turn costs sum to the
+session total by construction — which is what invariant 7 actually needs, rather than something the
+test has to hope for.
 
 **The accumulator is a constructor argument, threaded like `tracker` already is.** `cli.main` builds
 one `TelemetryMiddleware` and passes it into `run_repl` / `run_batch`, which pass it into `run_turn`

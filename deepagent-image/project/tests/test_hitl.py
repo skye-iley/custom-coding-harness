@@ -528,3 +528,106 @@ def test_command_denied_handler_never_raises_on_audit_failure(tmp_path, monkeypa
     monkeypatch.setattr(audit, "record_interrupt", _boom)
     handler("mount", "'mount' creates or enters a namespace", "block")
     assert "failed to record namespace denial" in capsys.readouterr().err
+
+
+# --- Milestone 6 §6: the on_wait observer -------------------------------------
+#
+# Human think time is wall clock inside the turn that is neither the harness's
+# nor the model's. Without a term for it, the decomposition invariant (4a) fails
+# the first time anyone runs with HITL on -- the shape of invariant that gets
+# weakened instead of fixed.
+
+
+def test_on_wait_is_called_once_per_resolution(tmp_path):
+    r1 = it.new_request(it.KIND_INPUT, "first", default="a")
+    r2 = it.new_request(it.KIND_INPUT, "second", default="b")
+    seq = iter([_result_with(r2), {"messages": ["fin"]}])
+    waits = []
+
+    hitl.run_interrupt_loop(
+        _result_with(r1), lambda v: next(seq),
+        channel=None, headless=True, config=_cfg(), workspace=tmp_path,
+        on_wait=waits.append,
+    )
+    assert len(waits) == 2
+    assert all(isinstance(ms, int) and ms >= 0 for ms in waits)
+
+
+def test_on_wait_measures_the_resolution_not_the_resume(tmp_path):
+    """Only the human decision is timed. The audit write and the resume invoke
+    are harness cost and belong in the residual -- counting them would flatter the
+    harness by attributing its own overhead to the operator."""
+    import time as _time
+
+    r = it.new_request(it.KIND_INPUT, "slow?", default="x")
+    waits = []
+
+    def slow_resume(value):
+        _time.sleep(0.05)
+        return {"messages": ["fin"]}
+
+    hitl.run_interrupt_loop(
+        _result_with(r), slow_resume,
+        channel=None, headless=True, config=_cfg(), workspace=tmp_path,
+        on_wait=waits.append,
+    )
+    assert waits and waits[0] < 50
+
+
+def test_on_wait_records_a_slow_human(tmp_path):
+    r = it.new_request(it.KIND_INPUT, "take your time", default="x")
+    waits = []
+
+    class _SlowChannel:
+        def ask(self, request):
+            import time as _time
+
+            _time.sleep(0.05)
+            return "answered"
+
+    hitl.run_interrupt_loop(
+        _result_with(r), lambda v: {"messages": ["fin"]},
+        channel=_SlowChannel(), headless=False, config=_cfg(), workspace=tmp_path,
+        on_wait=waits.append,
+    )
+    assert waits and waits[0] >= 50
+
+
+def test_on_wait_defaults_to_none_and_changes_nothing(tmp_path):
+    """Every existing caller passes nothing and behaves exactly as before -- the
+    reason this is an observer rather than a widened return value."""
+    import inspect
+
+    assert inspect.signature(hitl.run_interrupt_loop).parameters["on_wait"].default is None
+    r = it.new_request(it.KIND_INPUT, "x", default="a")
+    out = hitl.run_interrupt_loop(
+        _result_with(r), lambda v: {"messages": ["fin"]},
+        channel=None, headless=True, config=_cfg(), workspace=tmp_path,
+    )
+    assert out == {"messages": ["fin"]}
+
+
+def test_on_wait_fires_even_when_the_headless_policy_aborts(tmp_path):
+    """`finally`, so an InterruptAborted still attributes the time it took to
+    decide -- and a broken observer must never break the loop it only watches."""
+    r = it.new_request(it.KIND_APPROVE, "run rm?")
+    waits = []
+    with pytest.raises(hitl.InterruptAborted):
+        hitl.run_interrupt_loop(
+            _result_with(r), lambda v: {"messages": ["fin"]},
+            channel=None, headless=True, config=_cfg("strict", "blocking"),
+            workspace=tmp_path, on_wait=waits.append,
+        )
+    assert len(waits) == 1
+
+
+def test_a_raising_on_wait_does_not_break_the_loop(tmp_path):
+    def boom(_ms):
+        raise RuntimeError("observer blew up")
+
+    r = it.new_request(it.KIND_INPUT, "x", default="a")
+    out = hitl.run_interrupt_loop(
+        _result_with(r), lambda v: {"messages": ["fin"]},
+        channel=None, headless=True, config=_cfg(), workspace=tmp_path, on_wait=boom,
+    )
+    assert out == {"messages": ["fin"]}

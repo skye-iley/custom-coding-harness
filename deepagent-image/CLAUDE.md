@@ -282,6 +282,94 @@ never import `providers.py` (the import goes providers → cost, §2.4).
   keys/network) — run by `smoke` via `python3 -m pytest tests/` (needs pytest +
   harness deps; the `test` image stage has both).
 
+## Telemetry (Milestone 6)
+
+Per-turn measurements become durable, decomposable and publishable. **Defaults ON**;
+`DEEPAGENTS_TELEMETRY=0` in `.env` (or the shell) is the whole off switch — env-only,
+no CLI flag, not persisted to the profile (`milestone6_spec.md` §7).
+
+Two files, both in the **state dir** (`archive.state_dir`), never the workspace:
+
+- `<state-dir>/usage.jsonl` — one JSON object per turn, `schema: 1` first, append-only.
+  Tokens (fresh-input split, same as the ledger row), cost/energy, the wall-clock
+  decomposition, per-tool-name call counts, and the anomaly flags (`failed`,
+  `retry_count`, `context_trimmed`).
+- `<state-dir>/session.json` — the per-run summary, **derived** from those records.
+  `past.sqlite` stays authoritative for session totals; two files disagreeing is
+  worse than one file missing.
+
+**The placement is the point, not a detail.** Telemetry is an *audit surface* — evidence
+about the agent, produced by the harness, read by a human — so the audited party must not
+be able to rewrite it. Same reasoning M4 slice D applied to `denials.jsonl`. Stated
+precisely: **file-tool-proof always** (pathguard + the workspace-rooted backend cannot
+address the state dir), **shell-proof only under `DEEPAGENTS_JAIL=1`**. With the jail off,
+a container shell can still reach it by absolute path. Do not round that up.
+
+**Wall clock decomposes**, each component measured at its own seam and only the residual
+inferred:
+
+| Field | Seam |
+|---|---|
+| `model_ms`, `model_calls` | `TelemetryMiddleware.before_model` / `after_model` |
+| `tool_ms`, `tool_calls`, `tool_errors` | `wrap_tool_call`, name off `request.tool_call` |
+| `retry_sleep_ms`, `retry_count` | the `sleep=` wrapper `cli._invoke_resilient` injects |
+| `paced_sleep_ms` | `ratelimit`'s module counter around `InMemoryRateLimiter.acquire` |
+| `hitl_wait_ms`, `interrupts` | `hitl.run_interrupt_loop`'s `on_wait` observer |
+| `duration_ms` | `cli.run_turn`, around the whole turn |
+| residual | `duration_ms` minus the rest — the only inferred number |
+
+Three things worth knowing before touching this code:
+
+- **It is its own middleware, not a hook on the cost tracker.** M1 appends no tracker at
+  all on an unpriced model — which is `ollama:gemma4`, the shipped default and the
+  local-benchmark case. Telemetry riding on it would vanish exactly where it is wanted.
+  Tokens are parsed off `usage_metadata` via `cost._latest_usage` + `cost._split_tokens`
+  (use those; two parsers is how the numbers drift). Cost/energy come from the tracker
+  when one exists, else **`null` — never `0.0`**, which reads as "free" and is a different
+  claim.
+- **The record is written from `run_turn`'s `finally`**, not `after_agent` and not the
+  callers' `except` blocks. `after_agent` never fires for a turn that raises, which is the
+  record an operator most wants; `run_turn` has no general `except`; and `duration_ms` has
+  to bracket the HITL resume loop, which runs after `after_agent` already fired.
+- **`run_turn` is also the only place the accumulator resets** (`begin_turn()`). `before_agent`
+  looks like the turn boundary and is not — it fires once per *invoke*, and a turn invokes
+  several times (a resilience retry; every HITL resume). A reset there silently erases the
+  retry numbers and every pre-suspend tool count. `tracker.turn` has exactly this defect, which
+  is why per-turn cost is a **delta against `tracker.session`** (never reset) rather than a read
+  of `tracker.turn` — that also makes the per-turn costs sum to the session total by
+  construction. If you add a hook here, ask which of the two it fires per.
+- **`TelemetryMiddleware` is the OUTER `wrap_tool_call`** (langchain composes middleware
+  order first-is-outermost), so `PauseMiddleware`'s `GraphInterrupt` / `HaltTurn` pass
+  straight through it. They are control flow, not tool failures: they must not count as
+  `tool_errors`, and a gated call must not be counted twice (it enters once to suspend,
+  once on resume). `cli._is_control_flow` is that classifier.
+
+Read access, keyless (no API key, no network, no model — but see the note under "Admin
+Commands" about `harness/__init__.py`):
+
+```bash
+harness telemetry show [--run <run_id>] [--state-dir <path>]   # default: most recent
+harness telemetry list [--topic LABEL] [--limit N]
+harness telemetry pr-block [--run <run_id>]                    # used by open-pr.sh
+```
+
+`show` falls back to deriving from the records when `session.json` is absent (a crashed run
+has records and no summary) and **says which source it used**.
+
+**PR body:** `workflows/git-pr/open-pr.sh` builds its body into a temp file and passes
+`--body-file`, appending the rendered block when a summary parses. Any failure — missing
+file, bad JSON, non-zero exit, missing interpreter — leaves the body byte-identical to the
+old hardcoded string and exits 0. A telemetry gap must never be why a PR does not open.
+
+**Headless join:** `_batch_payload` carries `run_id`, `topic` and `usage_log` alongside
+`thread_id` (which repeats across resumes and is therefore not the `past.sqlite` key). That
+is what lets a benchmark sweep join 300 instances' stdout to the ledger.
+
+**Tests:** `tests/test_telemetry.py` + `tests/test_scrub.py` (host), the Milestone 6 block
+in `tests/test_cli.py` (image), the `open-pr.sh` cases in `tests/test_workflows.py`, plus
+`tests/test_live_model.py::test_a_real_turn_produces_a_decomposable_record` — the one thing
+a stub cannot check, since a stub populates `usage_metadata` however the test wrote it.
+
 ## Present / past memory (Milestone 2)
 
 The harness keeps **two** stores in the harness **state dir** (`archive.state_dir`),
@@ -1116,6 +1204,11 @@ harness config                              # full interactive wizard, then conf
 harness config show                         # print resolved config, no prompts
 harness config set <field> <value>          # one-shot, non-interactive
 harness config security                     # security-only wizard + .agentignore/NetJail quick-edit
+
+# Run telemetry (Milestone 6) -- reads <state-dir>/usage.jsonl + session.json
+harness telemetry show [--run <run-id>] [--state-dir <path>]
+harness telemetry list [--topic LABEL] [--limit N]
+harness telemetry pr-block [--run <run-id>]  # the markdown block open-pr.sh appends
 ```
 
 **Requires the host dev venv** — create it with `scripts/dev-setup.{ps1,sh}`, then
@@ -1140,6 +1233,7 @@ how to disable them, and what behavior they enable/disable:
 | Cost Tracking | M1 | n/a (auto) | on | Never; budgets are optional | No per-turn usage line; budgets ignored |
 | HITL | M3 | n/a (config file) | off | (not set by env) | Only if `.harness-config.yaml` exists in project root | No approval gates; agent runs freely |
 | Unified Config profile | M5 | n/a (`.harness-profile.yaml`) | off (no file) | Never; hand-edit `.env`/flags for a one-off | No `.harness-profile.yaml` present ⇒ every knob resolves exactly as it did pre-M5 (env var → default) |
+| Telemetry | M6 | `DEEPAGENTS_TELEMETRY` | 1 | Rarely — the run you want telemetry for is the one you did not expect to go wrong | No `usage.jsonl`, no `session.json`, no PR block, no middleware appended, no new stderr line |
 
 **Removable contract:** Each "off" state is byte-for-byte identical to the prior milestone 
 (see [Glossary](../docs/README.md#glossary)). E.g., `DEEPAGENTS_MASK=0` ⇒ M3 parity.
