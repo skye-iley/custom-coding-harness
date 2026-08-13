@@ -126,7 +126,14 @@ netjail_up() {
 
   # Host-service forwarders. Each is attached to the egress net (has the host
   # route) plus the jail net (agent-visible), and relays exactly one TCP port.
+  # Live allowlist if the operator has one, else the tracked .example template.
+  # The live pair is gitignored so edits can't pollute a clone; the template
+  # carries the shipped defaults so a fresh checkout works with nothing copied.
+  # A READ never materializes the live file — only config_cli's write path does
+  # (harness/config_cli.py: netjail_read_path / netjail_seed). Mirrored in
+  # smoke.sh and both .ps1 twins.
   local services="$NETJAIL_DIR/host-services.txt"
+  [[ -f "$services" ]] || services="$NETJAIL_DIR/host-services.txt.example"
   if [[ -f "$services" ]]; then
     local name port
     while read -r name port _; do
@@ -150,6 +157,7 @@ netjail_up() {
   # Egress proxy: domain-allowlisted HTTP(S) forward proxy for git/pip/npm. Only
   # started when the allowlist has at least one real entry.
   local domains="$NETJAIL_DIR/allowed-domains.txt"
+  [[ -f "$domains" ]] || domains="$NETJAIL_DIR/allowed-domains.txt.example"   # see the services note above
   if [[ -f "$domains" ]] && grep -qvE '^[[:space:]]*(#|$)' "$domains"; then
     # Generate the tinyproxy Filter file: anchor each plain domain so it matches
     # the domain and its subdomains (and only those), not arbitrary substrings.
@@ -382,12 +390,19 @@ mask_scan() {
   # script (RESOLVED_MASK_MODE), shared with the agent container.
   local mode_env=()
   [[ -n "${RESOLVED_MASK_MODE:-}" ]] && mode_env=(-e "DEEPAGENTS_MASK_MODE=$RESOLVED_MASK_MODE")
+  # USER_FLAGS applies here too, not just to the agent container. The scan WRITES
+  # mask-snapshot.txt into $STATE_HOST_DIR, which the host user just created via
+  # mkdir -p; unmapped, the scan runs as the image's uid 10001 and gets EACCES.
+  # The launcher then fails closed and refuses to launch at all — so on a native
+  # Linux engine, omitting the map here makes masking (the default) unusable.
+  # Invisible on Docker Desktop/WSL2, which squash mount ownership.
   local scan_output scan_err
   scan_err="$(mktemp)"
   scan_output="$(docker run --rm \
     -v "$MOUNT_WORKSPACE:/project/workspace:ro" \
     -v "$STATE_HOST_DIR:/project/state" \
     -e DEEPAGENTS_STATE_DIR=/project/state \
+    ${USER_FLAGS[@]+"${USER_FLAGS[@]}"} \
     ${mode_env[@]+"${mode_env[@]}"} \
     deepagent-harness python3 -m harness mask-scan 2>"$scan_err")" \
     || { echo "[mask] FATAL: mask-scan failed — refusing to launch unmasked. Fix the scan or set DEEPAGENTS_MASK=0 to disable masking." >&2; [[ -s "$scan_err" ]] && cat "$scan_err" >&2; rm -f "$scan_err"; exit 1; }

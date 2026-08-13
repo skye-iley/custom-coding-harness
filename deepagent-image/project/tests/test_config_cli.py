@@ -718,3 +718,104 @@ def test_format_settings_lines_is_the_shared_renderer(tmp_path):
         env={}, profile_path=tmp_path / "none.yaml", hitl_path=tmp_path / "none-hitl.yaml"
     )
     assert cc.format_settings_lines(settings, sources) == cfg.format_config_lines(settings, sources)
+
+
+# --- NetJail allowlists: tracked template vs. gitignored live file ------------
+#
+# The live host-services.txt / allowed-domains.txt were tracked until the wizard
+# above grew quick-edit loops that rewrite them in place, which made every
+# allowlist experiment a dirty tracked file one `git add -A` away from shipping a
+# local grant to everyone. They are now gitignored, with the shipped defaults in
+# a tracked `.example`; readers fall through to the template, and only a WRITE
+# materializes the live file.
+
+
+def test_netjail_list_entries_falls_back_to_the_example_template(tmp_path):
+    """A fresh clone has no live file, and must still see the shipped defaults."""
+    live = tmp_path / "host-services.txt"
+    (tmp_path / "host-services.txt.example").write_text(
+        "# shipped default\nollama 11434\n", encoding="utf-8"
+    )
+    assert cc.netjail_list_entries(live) == ["ollama 11434"]
+
+
+def test_netjail_list_entries_prefers_the_live_file_over_the_template(tmp_path):
+    live = tmp_path / "allowed-domains.txt"
+    (tmp_path / "allowed-domains.txt.example").write_text("example.com\n", encoding="utf-8")
+    live.write_text("local-only.test\n", encoding="utf-8")
+    assert cc.netjail_list_entries(live) == ["local-only.test"]
+
+
+def test_reading_never_materializes_the_live_file(tmp_path):
+    """smoke reads these lists and may not write into the repo tree, so the
+    fallback has to be read-only. `netjail_seed` is the only creator."""
+    live = tmp_path / "host-services.txt"
+    (tmp_path / "host-services.txt.example").write_text("ollama 11434\n", encoding="utf-8")
+    cc.netjail_list_entries(live)
+    cc.netjail_read_path(live)
+    assert not live.exists()
+
+
+def test_add_entry_seeds_the_live_file_and_leaves_the_template_untouched(tmp_path):
+    live = tmp_path / "allowed-domains.txt"
+    template = tmp_path / "allowed-domains.txt.example"
+    template.write_text("# header\nexample.com\n", encoding="utf-8")
+    cc.netjail_add_entry(live, "api.github.com")
+    assert live.is_file()
+    # The operator inherits the template's comments, not a bare one-line file.
+    assert "# header" in live.read_text(encoding="utf-8")
+    assert cc.netjail_list_entries(live) == ["example.com", "api.github.com"]
+    assert template.read_text(encoding="utf-8") == "# header\nexample.com\n"
+
+
+def test_remove_entry_edits_the_seeded_copy_not_the_template(tmp_path):
+    """The index came from netjail_list_entries, which may have listed the
+    TEMPLATE's entries — so a delete must seed first or it edits a tracked file
+    (or, before seeding existed, silently did nothing)."""
+    live = tmp_path / "host-services.txt"
+    template = tmp_path / "host-services.txt.example"
+    template.write_text("# header\nollama 11434\nredis 6379\n", encoding="utf-8")
+    removed = cc.netjail_remove_entry(live, 0)
+    assert removed == "ollama 11434"
+    assert cc.netjail_list_entries(live) == ["redis 6379"]
+    assert cc.netjail_list_entries(template) == ["ollama 11434", "redis 6379"]
+
+
+def test_seed_is_idempotent_and_does_not_clobber_local_edits(tmp_path):
+    live = tmp_path / "host-services.txt"
+    (tmp_path / "host-services.txt.example").write_text("ollama 11434\n", encoding="utf-8")
+    live.write_text("mine 9999\n", encoding="utf-8")
+    cc.netjail_seed(live)
+    assert live.read_text(encoding="utf-8") == "mine 9999\n"
+
+
+def test_repo_ships_templates_and_ignores_the_live_netjail_files():
+    """The shape the fallback depends on: templates tracked, live pair ignored.
+    Renaming one without the other silently reverts the pollution fix."""
+    net_dir = cc.netjail_dir()
+    if not net_dir.is_dir():
+        pytest.skip("netjail/ is host-side only (not COPYed into the image)")
+    gitignore = net_dir.parent.parent / ".gitignore"
+    if not gitignore.is_file():
+        pytest.skip("no .gitignore (not a checked-out repo)")
+    ignored = gitignore.read_text(encoding="utf-8")
+    for name in ("host-services.txt", "allowed-domains.txt"):
+        assert (net_dir / f"{name}.example").is_file(), f"missing tracked template for {name}"
+        assert f"deepagent-image/netjail/{name}\n" in ignored, f"{name} is not gitignored"
+
+
+def test_both_launchers_and_both_smoke_scripts_resolve_the_template_fallback():
+    """Four hand-written mirrors of the same resolution (fork 3: the launchers
+    need no host Python). A script that misses it silently runs with an EMPTY
+    allowlist on a fresh clone — NetJail's fail-closed design then blocks
+    everything, which reads as a jail bug rather than a missing file."""
+    scripts = Path(__file__).resolve().parent.parent.parent / "scripts"
+    if not scripts.is_dir():
+        pytest.skip("launchers are host-side only (scripts/ is not COPYed into the image)")
+    for name in ("run-docker.sh", "smoke.sh", "run-docker.ps1", "smoke.ps1"):
+        path = scripts / name
+        if not path.is_file():
+            pytest.skip(f"{name} not present")
+        text = path.read_text(encoding="utf-8")
+        for stem in ("host-services.txt", "allowed-domains.txt"):
+            assert f"{stem}.example" in text, f"{name} never falls back to {stem}.example"

@@ -216,7 +216,13 @@ function Netjail-Up {
     if ($nets -notcontains $EgressNet) { docker network create $EgressNet | Out-Null }
 
     # Host-service forwarders: one socat relay per host-services.txt line.
+    # Live allowlist if the operator has one, else the tracked .example template.
+    # The live pair is gitignored so edits can't pollute a clone; the template
+    # carries the shipped defaults so a fresh checkout works with nothing copied.
+    # A READ never materializes the live file -- only config_cli's write path does
+    # (harness/config_cli.py: netjail_read_path / netjail_seed). Mirror of run-docker.sh.
     $servicesFile = Join-Path $NetjailDir "host-services.txt"
+    if (-not (Test-Path $servicesFile)) { $servicesFile = Join-Path $NetjailDir "host-services.txt.example" }
     if (Test-Path $servicesFile) {
         foreach ($line in Get-Content $servicesFile) {
             $t = $line.Trim()
@@ -240,6 +246,7 @@ function Netjail-Up {
 
     # Egress proxy: domain-allowlisted HTTP(S) forward proxy for git/pip/npm.
     $domainsFile = Join-Path $NetjailDir "allowed-domains.txt"
+    if (-not (Test-Path $domainsFile)) { $domainsFile = Join-Path $NetjailDir "allowed-domains.txt.example" }  # see the services note above
     $allowed = @()
     if (Test-Path $domainsFile) {
         $allowed = Get-Content $domainsFile | ForEach-Object { $_.Trim() } |
