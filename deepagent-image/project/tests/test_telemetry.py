@@ -63,7 +63,7 @@ def test_schema_key_is_present_and_first():
 def test_every_record_carries_the_same_key_set(tmp_path):
     sink = tmp_path / "usage.jsonl"
     tm.record_turn(sink, _record(turn=1), env={})
-    tm.record_turn(sink, _record(turn=2, failed=True, tool_calls={}), env={})
+    tm.record_turn(sink, _record(turn=2, outcome=tm.OUTCOME_ERROR, tool_calls={}), env={})
     records = tm.read_records(sink)
     assert len(records) == 2
     assert set(records[0]) == set(records[1])
@@ -197,8 +197,84 @@ def _three_turns(tmp_path) -> Path:
                                  tool_errors=1, retry_count=1, retry_sleep_ms=100), env={})
     tm.record_turn(sink, _record(turn=3, input=300, output=30, duration_ms=3000,
                                  model_ms=1500, tool_ms=500, tool_calls={"execute": 2},
-                                 failed=True, context_trimmed=True), env={})
+                                 outcome=tm.OUTCOME_ERROR, context_trimmed=True), env={})
     return sink
+
+
+# --- outcome vs. failure (invariant 2a, generalized) --------------------------
+
+
+def test_failed_is_derived_from_outcome_and_only_error_counts():
+    """`failed` is a view of `outcome`, so the two cannot disagree.
+
+    The distinction is the whole point of the field: a budget cap firing, an
+    operator's Ctrl-C, and a fail-closed headless abort are the harness doing what
+    it was configured to do. Counting them as failures puts a governance signal in
+    the reliability column, which is the mistake invariant 2a already rejects for
+    an operator deny.
+    """
+    assert _record(outcome=tm.OUTCOME_ERROR).failed is True
+    for good in (tm.OUTCOME_OK, tm.OUTCOME_DENIED, tm.OUTCOME_BUDGET,
+                 tm.OUTCOME_CANCELLED, tm.OUTCOME_ABORTED):
+        record = _record(outcome=good)
+        assert record.failed is False, good
+        assert record.to_dict()["failed"] is False, good
+        assert record.to_dict()["outcome"] == good
+
+
+def test_summary_counts_every_outcome_and_they_sum_to_turns(tmp_path):
+    # The identity is what makes the block auditable: a reader can check the
+    # outcomes account for every turn without trusting the harness's arithmetic.
+    sink = tmp_path / "usage.jsonl"
+    for i, outcome in enumerate(
+        (tm.OUTCOME_OK, tm.OUTCOME_BUDGET, tm.OUTCOME_OK,
+         tm.OUTCOME_ERROR, tm.OUTCOME_DENIED, tm.OUTCOME_CANCELLED),
+        start=1,
+    ):
+        tm.record_turn(sink, _record(turn=i, outcome=outcome), env={})
+    s = tm.derive_session(tm.read_records(sink))
+    assert s["outcomes"] == {"ok": 2, "denied": 1, "budget": 1, "cancelled": 1, "error": 1}
+    assert sum(s["outcomes"].values()) == s["turns"] == 6
+    # Only the genuine failure lands in the reliability column.
+    assert s["turns_failed"] == 1
+
+
+def test_a_budget_stop_is_not_reported_as_a_failed_turn(tmp_path):
+    """The regression this field exists for.
+
+    A sweep run under `--max-cost` used to report every capped instance as a
+    failed turn — indistinguishable from a crash, and read as harness
+    unreliability by exactly the benchmark aggregation the milestone is for.
+    """
+    sink = tmp_path / "usage.jsonl"
+    tm.record_turn(sink, _record(turn=1, outcome=tm.OUTCOME_BUDGET), env={})
+    s = tm.derive_session(tm.read_records(sink))
+    assert s["turns_failed"] == 0
+    assert s["outcomes"] == {"budget": 1}
+    assert "1 budget" in tm.render_pr_block(s)
+
+
+def test_a_record_written_before_outcome_existed_still_counts(tmp_path):
+    """Same schema version, one fewer key: `outcome` was added additively, so a
+    sink written by the previous build has `failed` and no `outcome`.
+
+    Falling back to `failed` matters more than it looks — reconstructing `ok`
+    for every old record would report zero failures on a run that had them, which
+    is a silent wrong answer rather than a missing one."""
+    sink = tmp_path / "usage.jsonl"
+    old_ok = {k: v for k, v in _record(turn=1).to_dict().items() if k != "outcome"}
+    old_failed = {**old_ok, "turn": 2, "failed": True}
+    for payload in (old_ok, old_failed):
+        tm.record_turn(sink, payload, env={})
+    s = tm.derive_session(tm.read_records(sink))
+    assert s["turns"] == 2
+    assert s["turns_failed"] == 1
+    assert s["outcomes"] == {"ok": 1, "error": 1}
+
+
+def test_show_names_the_outcome_mix():
+    s = tm.derive_session([_record(outcome=tm.OUTCOME_CANCELLED).to_dict()])
+    assert "cancelled=1" in tm.format_show(s, "read from session.json")
 
 
 def test_summary_totals_equal_the_sum_of_the_records(tmp_path):
@@ -335,7 +411,9 @@ def test_pr_block_carries_the_marker_and_the_aggregates(tmp_path):
     block = tm.render_pr_block(s)
     assert tm.PR_BLOCK_MARKER in block
     assert "### Run telemetry" in block
-    assert "3 (1 failed)" in block
+    # Named, not just counted: "1 error" and "1 budget" are different facts about
+    # a run, and the PR body is where a reviewer forms the first impression.
+    assert "3 (1 error)" in block
     assert "660" in block
     assert "ollama:gemma4" in block
 

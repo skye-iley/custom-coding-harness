@@ -64,6 +64,33 @@ Two smaller notes: `cost.CostTrackerMiddleware` gained a `has_energy` property (
 and `cli._cost_totals_for_row` was split so `_cost_and_provenance` can ask the same "is this a real
 number or a floor" question of `tracker.turn` that the ledger row asks of `tracker.session`.
 
+**3. `failed` was measuring two different things, and the boolean could not say which.**
+Found in the pre-merge review. The build excluded an operator deny from `failed` on invariant 2a's
+reasoning — a governance signal does not belong in the reliability column — and then let
+`run_turn`'s `except BaseException` flag `BudgetExceeded`, `KeyboardInterrupt` and
+`InterruptAborted` as failures anyway. Those are the same kind of event: a `--max-cost` cap firing,
+an operator's Ctrl-C, and the headless policy failing closed are all the harness doing what it was
+configured to do. A SWE-bench sweep run under a cost cap would have reported every capped instance
+as a harness failure, indistinguishable from a crash — in the one number a sweep is most likely to
+aggregate.
+
+Two ways to fix it, and the cheap one loses information: excluding the three from `failed` makes a
+capped turn indistinguishable from a completed one. So the record now carries **`outcome`**
+(`ok`/`denied`/`budget`/`cancelled`/`aborted`/`error`) and `failed` became a *derived property*
+(`outcome == "error"`), which is what stops the two from ever disagreeing again. The summary gains
+an `outcomes` map that sums to `turns`, and the PR block names the mix (`3 (1 budget)`) instead of
+counting failures that were not failures. Additive, so no `SCHEMA_VERSION` bump — §2's own rule —
+and `derive_session` falls back to `failed` for a record written before the field existed, since
+reconstructing `ok` for those would report zero failures on a run that had them.
+
+**Also found in that review, and unrelated to the above:** `open-pr.sh` hardcoded `cd /project`
+before invoking `-m harness telemetry pr-block`. Correct in the image, wrong everywhere else — and
+`tests/test_workflows.py`'s `open-pr.sh` cases run on the *host*, where they had been skipping for
+an unrelated reason (the probe imported `harness.telemetry`, which pulled `cli` and failed without
+langchain). Merging M5 §0.1 F6 removed that reason, the cases started running, and the hardcoded
+path failed them. The root is now derived from the script's own location (`workflows/git-pr/` is two
+levels under it), which is the same directory in the image and the right one on a host.
+
 Chosen over the `HarnessProfile` chain deliberately: telemetry is one of the two core-identity items
 with **no dependency on the trust-boundary chain** (`design_doc.md` → Product Identity → "Core
 identity — independent of the chain above"), so it cannot be blocked by the one open question there

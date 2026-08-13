@@ -1478,6 +1478,39 @@ def test_operator_deny_is_not_a_failure(tmp_path):
     assert cli.run_turn(_HaltAgent(), "hi", {}, telemetry=t) is None
     records = tm.read_records(t.sink)
     assert len(records) == 1 and records[0]["failed"] is False
+    assert records[0]["outcome"] == tm.OUTCOME_DENIED
+
+
+def test_governance_stops_are_outcomes_not_failures(tmp_path, monkeypatch):
+    """Invariant 2a applied to the other three events that arrive as exceptions.
+
+    A budget cap, an operator Ctrl-C and a fail-closed headless abort are each the
+    harness doing what it was configured to do. The deny case above was already
+    excluded from `turns_failed` on exactly this reasoning while these three were
+    counted — an inconsistency a sweep run under `--max-cost` would have read as
+    harness unreliability on every capped instance.
+    """
+    monkeypatch.setenv("DEEPAGENTS_MAX_RETRIES", "0")
+    hitl_mod = _load("harness.hitl")
+    cost_mod = _load("harness.cost")
+
+    cases = [
+        (cost_mod.BudgetExceeded("max cost"), tm.OUTCOME_BUDGET),
+        (KeyboardInterrupt(), tm.OUTCOME_CANCELLED),
+        (hitl_mod.InterruptAborted(None, "no default"), tm.OUTCOME_ABORTED),
+        (RuntimeError("provider 500"), tm.OUTCOME_ERROR),
+    ]
+    for exc, expected in cases:
+        class _Agent:
+            def invoke(self, *a, **k):
+                raise exc
+
+        t = _telemetry(tmp_path / expected)
+        with pytest.raises(type(exc)):
+            cli.run_turn(_Agent(), "hi", {}, telemetry=t)
+        record = tm.read_records(t.sink)[0]
+        assert record["outcome"] == expected, exc
+        assert record["failed"] is (expected == tm.OUTCOME_ERROR), exc
 
 
 def test_sink_failure_never_breaks_a_turn(tmp_path, capsys):
@@ -1882,7 +1915,7 @@ def test_per_turn_costs_sum_to_the_session_total(tmp_path):
     for _ in range(3):
         t.begin_turn()
         tracker.session.add(usage, tracker._pricing, "m", rates=tracker._rates)
-        rec = t.build_record(duration_ms=1, failed=False)
+        rec = t.build_record(duration_ms=1, outcome=tm.OUTCOME_OK)
         tm.record_turn(t.sink, rec)
 
     records = tm.read_records(t.sink)

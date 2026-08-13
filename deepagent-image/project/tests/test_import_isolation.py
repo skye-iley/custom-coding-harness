@@ -1,4 +1,15 @@
-"""Guards the one-directional harness import contract.
+"""Guards the one-directional harness import contract, and the keyless-path
+contract F6 added on top of it (milestone5.md §0.1 F6).
+
+Two separate invariants live here:
+
+1. `harness.cost` must never import a sibling (the acyclic guard, below).
+2. The **keyless** modules — `config_cli`, `doctor`, `entry`, and the `harness`
+   package itself — must import without pulling the runtime stack, so
+   `harness config` / `harness doctor` run on a host that has no langgraph or
+   deepagents installed. Unlike the cost guard, these load through the *real*
+   package (`import harness.config_cli`), because `harness/__init__.py` running
+   or not is exactly what is under test.
 
 `harness.cost` holds the cost/energy math and must NEVER import another harness
 module — above all `harness.providers`. The dependency runs providers -> cost, so
@@ -80,3 +91,116 @@ def test_cost_imports_cleanly_in_subprocess():
     # Belt-and-suspenders: the import itself must succeed with exit 0 (the helper
     # uses check=True, so a failed import would raise CalledProcessError here).
     assert "harness" in _modules_after_importing_cost()
+
+
+# --- the keyless path stays keyless (milestone5.md §0.1 F6) -----------------
+
+_PROJECT_ROOT = _HARNESS.parent
+
+# The runtime stack a keyless subcommand must not drag in.
+#
+# langchain AND langgraph are deliberately absent from this list. cost.py
+# soft-imports `langchain.agents.middleware.types` and falls back to `object`
+# when it is missing, and in the image langchain's agent middleware is itself
+# built on langgraph — so `import harness.config_cli` legitimately shows both
+# there (via config_cli -> providers -> cost) while showing neither on a bare
+# host. Asserting against them would fail in the image for a reason that has
+# nothing to do with F6. What stays forbidden is everything the *harness*
+# controls: the two modules that pull the stack unconditionally, plus the two
+# hard deps only they have.
+#
+# Both environments still catch a regression. In the image, re-eagerizing the
+# import puts `harness.cli` in sys.modules. On a bare host it fails harder:
+# there is no langgraph to import at all, so the subprocess dies and check=True
+# turns that into a failure here — which is exactly what `harness config` did
+# on a dev host before this fix.
+_RUNTIME_STACK = ("deepagents", "dotenv", "harness.cli", "harness.agent")
+
+
+def _modules_after(statement: str) -> set[str]:
+    """Run `statement` in a clean interpreter rooted at project/; return sys.modules.
+
+    This one imports through the real package on purpose — no bare-`harness`
+    shim like the cost helper uses — because whether `harness/__init__.py` pulls
+    the runtime stack is the property under test.
+    """
+    # Concatenated rather than an indented f-string template: a multi-line
+    # `statement` interpolated into one would leave its first line indented and
+    # the rest flush, which textwrap.dedent cannot repair (IndentationError).
+    script = (
+        "import sys\n"
+        f"sys.path.insert(0, r{str(_PROJECT_ROOT)!r})\n"
+        + textwrap.dedent(statement).strip("\n")
+        + "\n"
+        'print("\\n".join(sorted(set(sys.modules))))\n'
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return set(out.stdout.split())
+
+
+def _assert_no_runtime_stack(loaded: set[str], what: str) -> None:
+    offenders = [m for m in _RUNTIME_STACK if m in loaded]
+    assert not offenders, (
+        f"importing {what} pulled in {offenders}; the keyless path must stay "
+        "runnable on a host with no runtime stack installed (milestone5.md §0.1 F6)."
+    )
+
+
+def test_importing_the_package_does_not_load_cli():
+    # The F6 headline: `harness/__init__.py` used to do an unconditional
+    # `from harness.cli import main`, so this alone loaded langgraph.
+    _assert_no_runtime_stack(_modules_after("import harness"), "harness")
+
+
+def test_config_cli_imports_without_the_runtime_stack():
+    # What config_cli.py's own docstring has always claimed about itself, now
+    # true through the package too.
+    _assert_no_runtime_stack(
+        _modules_after("import harness.config_cli"), "harness.config_cli"
+    )
+
+
+def test_doctor_imports_without_the_runtime_stack():
+    _assert_no_runtime_stack(_modules_after("import harness.doctor"), "harness.doctor")
+
+
+def test_telemetry_imports_without_the_runtime_stack():
+    # Milestone 6 invariant 22, in its strong form. The M6 branch could only claim
+    # the narrow version ("adds no import cost config/doctor do not already pay")
+    # because at the time the package pulled cli unconditionally; with F6 landed
+    # the strong claim holds, so it gets pinned rather than left as prose.
+    #
+    # This is also what keeps `harness telemetry` readable on a bare host: reading
+    # a finished run's numbers must not require the stack that produced them.
+    _assert_no_runtime_stack(
+        _modules_after("import harness.telemetry"), "harness.telemetry"
+    )
+
+
+def test_entry_routes_without_importing_cli():
+    # The second half of the fix: lazy routes are worthless if reaching them
+    # means importing cli.py first, which is what living in cli.py meant.
+    _assert_no_runtime_stack(_modules_after("import harness.entry"), "harness.entry")
+
+
+def test_package_getattr_does_not_shadow_submodule_imports():
+    # __getattr__ must raise AttributeError on a miss: `from harness import config`
+    # asks the package for the attribute first and only falls back to importing
+    # the submodule when that raises. Returning a placeholder would break every
+    # sibling import in the package (cli.py's `from harness import archive, ...`).
+    loaded = _modules_after(
+        "from harness import config\n"
+        "import harness\n"
+        "try:\n"
+        "    harness.definitely_not_a_module\n"
+        "except AttributeError:\n"
+        "    pass\n"
+        "else:\n"
+        "    raise SystemExit('missing attribute did not raise AttributeError')\n"
+    )
+    assert "harness.config" in loaded

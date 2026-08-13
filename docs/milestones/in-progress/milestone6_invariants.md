@@ -64,10 +64,26 @@ Two are load-bearing and pull in opposite directions, so neither can be quietly 
    `except`, so a test that only exercises the REPL leaves headless — the benchmark path — unproven
    (`milestone6_spec.md` §3.2).
 
-2a. **An operator deny is not a failure.** A turn the HITL gate halts (`hitl.HaltTurn`, `on_deny:
-    halt`) records `failed: false` with whatever tool counts it accrued. Conflating "the human said
-    no" with "the turn broke" would put a governance signal in the reliability column, and a
-    benchmark sweep reading `turns_failed` would be measuring the operator.
+2a. **A governance stop is not a failure — and `failed` is derived, not measured.** Every turn
+    records an `outcome` (`ok` / `denied` / `budget` / `cancelled` / `aborted` / `error`), and
+    `failed` is exactly `outcome == "error"` — a property on `TurnRecord`, so the two cannot
+    disagree. `turns_failed` and the `outcomes` map in the summary both fold over it, and the
+    outcomes sum to `turns`.
+
+    Four of the five non-`ok` outcomes are the harness doing what it was configured to do: the HITL
+    gate halting on a deny (`hitl.HaltTurn`, `on_deny: halt`), a `--max-cost`/`--max-tokens` cap
+    firing (`cost.BudgetExceeded`), an operator Ctrl-C (`KeyboardInterrupt`), and the headless
+    interrupt policy failing closed (`hitl.InterruptAborted`). Conflating any of them with "the turn
+    broke" puts a governance signal in the reliability column, and a benchmark sweep reading
+    `turns_failed` would be measuring the operator or its own budget rather than the harness.
+
+    **Widened during the pre-merge review, and the narrow version is why.** As first built this
+    invariant covered the deny case only, so `run_turn`'s `except BaseException` still flagged the
+    other three as failures — a sweep run under `--max-cost` would have reported every capped
+    instance as a harness failure, which is the same error one level down. `cli._turn_outcome` is
+    the single classifier; a fifth governance exception is one line there, not a fifth place to
+    remember. Pinned by `test_governance_stops_are_outcomes_not_failures` (cli) and
+    `test_failed_is_derived_from_outcome_and_only_error_counts` (telemetry).
 
 3. **The sink never breaks a turn.** An unwritable sink, a full disk, or a serialization error
    degrades to a stderr warning; it never propagates into `run_turn`. *(Same rule `audit.py` and the
@@ -246,19 +262,22 @@ Two are load-bearing and pull in opposite directions, so neither can be quietly 
     thing the test asserts — is unchanged, and the alternative would give the repo two definitions
     of where state lives, which is the drift the one-authority rule exists to prevent.
 
-22. **`harness telemetry` needs no key, no network, and no model — and adds no import cost that
-    `config`/`doctor` do not already pay.** Asserted two ways: `harness.telemetry` itself imports
-    nothing from the package but `harness.scrub` (so the module is stdlib-weight), and the `dispatch`
-    route imports it lazily, inside the branch.
+22. **`harness telemetry` needs no key, no network, no model — and no runtime stack.** Asserted
+    three ways: `harness.telemetry` imports nothing from the package but `harness.scrub` (so the
+    module is stdlib-weight); `entry.dispatch` imports it lazily, inside the branch; and
+    `tests/test_import_isolation.py` asserts `harness.telemetry` loads without pulling
+    `cli`/`agent`/deepagents/dotenv, the same guard `harness.entry` / `config_cli` / `doctor` carry.
 
-    **Stated this narrowly on purpose.** An earlier draft said "routes through `dispatch` without
-    importing `cli.py`", which is not achievable and never was: `harness/__init__.py` does
-    `from harness.cli import main` **unconditionally**, so every `python3 -m harness <subcommand>`
-    — `config` and `doctor` included — already pulls in langchain/langgraph/deepagents before
-    `dispatch` runs. That is M5 §0.1 F6's known, deferred limitation (the fix is a lazy `__init__`
-    plus an entry-point change), and M6 does not fix it. An invariant asserting the unachievable
-    version would have to be weakened the first time it was run, which is the failure mode invariant
-    16 exists to warn about. The checkable property is the one above.
+    **Restated once, in each direction, and the history is the point.** The version first written
+    here said "routes through `dispatch` without importing `cli.py`", and the pre-build pass
+    narrowed it to "adds no import cost that `config`/`doctor` do not already pay" — because at that
+    time `harness/__init__.py` did `from harness.cli import main` **unconditionally**, so no
+    subcommand was stdlib-weight. That narrowing was correct for the tree as it stood. **M5 §0.1 F6
+    then landed on `main`** (PR #44: a lazy `__init__.__getattr__` plus the stdlib-only
+    `harness/entry.py`), removing the fact the narrowing was fitted to, so the strong form is now
+    both achievable and checked. The rule the two edits share: an invariant tracks what the tree can
+    actually hold, and it moves when the tree moves — never to fit an implementation that fell
+    short. Compare invariant 16.
 
 ## Joinability (a sweep must be able to aggregate)
 

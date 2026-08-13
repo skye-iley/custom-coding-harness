@@ -292,8 +292,9 @@ Two files, both in the **state dir** (`archive.state_dir`), never the workspace:
 
 - `<state-dir>/usage.jsonl` — one JSON object per turn, `schema: 1` first, append-only.
   Tokens (fresh-input split, same as the ledger row), cost/energy, the wall-clock
-  decomposition, per-tool-name call counts, and the anomaly flags (`failed`,
-  `retry_count`, `context_trimmed`).
+  decomposition, per-tool-name call counts, how the turn ended (`outcome`, with
+  `failed` derived from it), and the anomaly counters (`retry_count`,
+  `context_trimmed`).
 - `<state-dir>/session.json` — the per-run summary, **derived** from those records.
   `past.sqlite` stays authoritative for session totals; two files disagreeing is
   worse than one file missing.
@@ -343,9 +344,17 @@ Three things worth knowing before touching this code:
   straight through it. They are control flow, not tool failures: they must not count as
   `tool_errors`, and a gated call must not be counted twice (it enters once to suspend,
   once on resume). `cli._is_control_flow` is that classifier.
+- **A turn records *how* it ended, and `failed` is derived from that** — never set on its
+  own. `outcome` is one of `ok` / `denied` / `budget` / `cancelled` / `aborted` / `error`,
+  and `failed` is the property `outcome == "error"`. Only `error` reaches `turns_failed`;
+  the summary also carries an `outcomes` map that sums to `turns`. The reason is invariant
+  2a generalized: a deny, a `--max-cost` cap, a Ctrl-C and a fail-closed headless abort are
+  all the harness doing what it was told, and a sweep reading `turns_failed` must not be
+  measuring the operator or its own budget. `cli._turn_outcome` is the one classifier —
+  a new governance exception is a line there, not a new flag.
 
-Read access, keyless (no API key, no network, no model — but see the note under "Admin
-Commands" about `harness/__init__.py`):
+Read access, keyless in the strong sense (no API key, no network, no model, and no runtime
+stack — the route lives in `harness/entry.py`, so it never imports `cli.py`):
 
 ```bash
 harness telemetry show [--run <run_id>] [--state-dir <path>]   # default: most recent
@@ -577,7 +586,11 @@ layered by dependency so most of it also runs on a bare host with just pytest:
   `pytest tests/` with pytest and nothing else, so membership is decided by whether
   a module imports cleanly, not by an enumeration someone has to remember to
   extend. (It used to be enumerated in `ci.yml`, the list drifted, and 246 tests
-  quietly stopped running in that job.)
+  quietly stopped running in that job.) One of them polices the tier itself:
+  `test_import_isolation` carries the cost-↛-sibling acyclic guard **plus** M5
+  §0.1 F6's keyless-path guard — `harness`, `harness.entry`, `harness.config_cli`,
+  `harness.doctor` and `harness.telemetry` must each import without pulling
+  `cli`/`agent`/deepagents/dotenv.
 - **Runtime-dependent (need deepagents/langchain/langgraph):** guarded with
   `pytest.importorskip(...)` so a bare host reports SKIPPED instead of erroring,
   and the `test` image runs them for real. Guard at **module** level when the whole
@@ -644,10 +657,11 @@ Installs `project/requirements.txt` + pytest into `deepagent-image/.venv`
   script warns when yours differs). `smoke` builds clean and stays the check before
   a PR.
 
-Related but separate: the keyless admin commands are dragged into langchain by
-`harness/__init__.py` importing `cli` unconditionally, so this venv makes them
-*work* without fixing *why* they need it. The real fix is a lazy `__init__` plus an
-entry-point change — Milestone 5 §0.1 F6, still deferred.
+Related but separate, and no longer a reason to build this venv: the keyless admin
+commands (`config`, `doctor`, `threads`/`past`, `telemetry`, …) used to be dragged
+into langchain by `harness/__init__.py` importing `cli` unconditionally. Milestone 5
+§0.1 F6 fixed that — a lazy `__init__` plus `harness/entry.py` — so they now run on
+a bare interpreter. This venv is for the image-only *test tiers*, not for them.
 
 ### Fast dev loop — run the image tiers without rebuilding
 
@@ -1055,10 +1069,13 @@ the baseline record of defaults when nothing else overrides it.
     resolved relative to `config_cli.py`'s own path since `netjail/` isn't copied into the image,
     so this only works run on the host, same pre-spinup context every other knob here assumes).
     It adds **no langchain/deepagents dependency of its own** (stdlib + `harness.config` +
-    `harness.providers` only) -- that is why it is a separate module from `cli.py`. It does
-    **not** mean the wizard runs on a host without the runtime stack: `harness/__init__.py`
-    imports `cli` unconditionally, so any `harness.*` import still loads langgraph. Making
-    that true needs a lazy `__init__` + an entry-point change, deferred (§0.1 F6).
+    `harness.providers` only) -- that is why it is a separate module from `cli.py`. Since
+    §0.1 F6 that also means what it sounds like: **the wizard runs on a host with no runtime
+    stack installed.** `harness/__init__.py` resolves `main` through a lazy `__getattr__`
+    instead of importing `cli` eagerly, and subcommand routing lives in the stdlib-only
+    `harness/entry.py`, so `python3 -m harness config` / `doctor` never import `cli.py`.
+    Both halves were needed -- a lazy route inside an eager module is still eager.
+    Guarded by `tests/test_import_isolation.py`.
     Both write paths (`set` and the wizard) **refuse to run from a cwd with no `providers/`
     directory** and name the right one: they write `Path.cwd()/.harness-profile.yaml`, so run
     from the repo root they'd produce a profile `run-docker` never mounts and report success.
@@ -1211,15 +1228,17 @@ harness telemetry list [--topic LABEL] [--limit N]
 harness telemetry pr-block [--run <run-id>]  # the markdown block open-pr.sh appends
 ```
 
-**Requires the host dev venv** — create it with `scripts/dev-setup.{ps1,sh}`, then
-`source deepagent-image/.venv/bin/activate` (`.venv\Scripts\Activate.ps1` on Windows).
-See "Host dev venv" above.
+"Keyless" here means no API key, no network and no model — **and, since M5 §0.1 F6
+landed, no runtime stack either.** `entry.dispatch` routes each of these to its
+stdlib-only module without importing `cli`, and `harness/__init__.py` resolves
+`main` through a lazy `__getattr__`, so `python3 -m harness telemetry show` runs on
+a bare interpreter with nothing installed. `tests/test_import_isolation.py` pins
+that for `harness`, `harness.entry`, `harness.config_cli`, `harness.doctor` and
+`harness.telemetry` — adding a package-level import to any of them fails there.
 
-"Keyless" here means these commands need no API key, no network, and no model — not
-that they are dependency-free. `harness/__init__.py` imports `cli` unconditionally,
-so any `harness <subcommand>` pulls in langchain/langgraph/deepagents even though
-`config_cli.py` and `memadmin.py` add no such dependency of their own. That is
-Milestone 5 §0.1 F6, deferred; until it is fixed, host-side admin needs the venv.
+The host dev venv (`scripts/dev-setup.{ps1,sh}`) is therefore **not** required for
+these commands any more. It is still what lets the *image-only test tiers* run
+outside Docker — see "Host dev venv" above.
 
 ## Feature Toggles & Removable Contracts
 

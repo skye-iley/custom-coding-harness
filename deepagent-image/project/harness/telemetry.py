@@ -53,6 +53,39 @@ SCHEMA_VERSION = 1
 USAGE_FILE = "usage.jsonl"
 SESSION_FILE = "session.json"
 
+# How a turn ended. `failed` is derived from this (`outcome == OUTCOME_ERROR`) and
+# not measured separately, so the reliability column cannot drift from the reason.
+#
+# The split exists because four different events used to arrive as one `failed`
+# flag, and only the last of them is the harness breaking:
+#
+#   ok        the turn returned an answer
+#   denied    the HITL gate denied a tool call under `on_deny: halt`
+#   budget    a --max-cost / --max-tokens cap stopped the turn
+#   cancelled the operator pressed Ctrl-C mid-turn
+#   aborted   the headless interrupt policy fail-closed (EXIT_INTERRUPT_ABORT)
+#   error     a provider error outlasted the retries, or the harness raised
+#
+# The first five are *outcomes* — the harness did what it was configured to do.
+# Counting them as failures puts a governance signal in the reliability column,
+# which a benchmark sweep then reads as harness unreliability (invariant 2a). The
+# original code excluded `denied` on exactly that reasoning and then included the
+# other three, which is the inconsistency this field removes.
+OUTCOME_OK = "ok"
+OUTCOME_DENIED = "denied"
+OUTCOME_BUDGET = "budget"
+OUTCOME_CANCELLED = "cancelled"
+OUTCOME_ABORTED = "aborted"
+OUTCOME_ERROR = "error"
+OUTCOMES = (
+    OUTCOME_OK,
+    OUTCOME_DENIED,
+    OUTCOME_BUDGET,
+    OUTCOME_CANCELLED,
+    OUTCOME_ABORTED,
+    OUTCOME_ERROR,
+)
+
 # Marks the generated block in a PR body so a future updater can find it without
 # re-parsing prose.
 PR_BLOCK_MARKER = "<!-- deepagents:telemetry -->"
@@ -131,10 +164,19 @@ class TurnRecord:
     tool_calls: dict[str, int] = field(default_factory=dict)
     tool_errors: int = 0
 
-    failed: bool = False
+    outcome: str = OUTCOME_OK
     retry_count: int = 0
     context_trimmed: bool = False
     interrupts: int = 0
+
+    @property
+    def failed(self) -> bool:
+        """Derived, never stored separately: only ``error`` is a failure.
+
+        A property rather than a field so the two can't disagree. `failed` is
+        still written to disk (readers and the summary use it, and dropping a
+        field would need a schema bump) — but it is a *view* of `outcome`."""
+        return self.outcome == OUTCOME_ERROR
 
     def to_dict(self) -> dict:
         """The on-disk object, ``schema`` first and mandatory."""
@@ -165,6 +207,7 @@ class TurnRecord:
             "model_calls": int(self.model_calls),
             "tool_calls": {str(k): int(v) for k, v in (self.tool_calls or {}).items()},
             "tool_errors": int(self.tool_errors),
+            "outcome": (self.outcome if self.outcome in OUTCOMES else OUTCOME_ERROR),
             "failed": bool(self.failed),
             "retry_count": int(self.retry_count),
             "context_trimmed": bool(self.context_trimmed),
@@ -273,6 +316,30 @@ def _sum_optional(records: list[dict], key: str) -> float | None:
     return sum(float(v) for v in vals)
 
 
+def _outcome_counts(records: list[dict]) -> dict[str, int]:
+    """``{outcome: n}`` over the records, in ``OUTCOMES`` order, zeroes omitted.
+
+    Sparse on purpose: a run where every turn succeeded reports ``{"ok": 7}``, not
+    five zeros the reader has to skim past. Ordered by ``OUTCOMES`` rather than by
+    count so two runs' summaries line up column-for-column.
+
+    An unrecognized value (a record from a newer schema, or a hand-edited file) is
+    counted under its own key rather than dropped — losing a turn from the tally
+    would make the outcomes stop summing to ``turns``, and that identity is what
+    makes the block auditable.
+    """
+    counts: dict[str, int] = {}
+    for r in records:
+        name = r.get("outcome")
+        if not name:
+            # Pre-`outcome` record: reconstruct the only distinction it carried.
+            name = OUTCOME_ERROR if r.get("failed") else OUTCOME_OK
+        counts[str(name)] = counts.get(str(name), 0) + 1
+    known = {k: counts[k] for k in OUTCOMES if k in counts}
+    extra = {k: v for k, v in counts.items() if k not in OUTCOMES}
+    return {**known, **extra}
+
+
 def derive_session(
     records: list[dict],
     *,
@@ -362,7 +429,15 @@ def derive_session(
         "ended": ended or (records[-1].get("ts") if records else None),
         "duration_ms": total_ms,
         "turns": len(records),
-        "turns_failed": sum(1 for r in records if r.get("failed")),
+        # Only `error` counts. A record written before `outcome` existed carries
+        # `failed` alone, so fall back to it — a reader of an older sink must not
+        # silently report zero failures.
+        "turns_failed": sum(
+            1
+            for r in records
+            if (r["outcome"] == OUTCOME_ERROR if r.get("outcome") else r.get("failed"))
+        ),
+        "outcomes": _outcome_counts(records),
         "tokens": tokens,
         "cost_usd": (round(cost, 6) if cost is not None else None),
         "cost_provenance": provenance,
@@ -450,8 +525,18 @@ def render_pr_block(summary: dict | None) -> str:
     tokens = summary.get("tokens") or {}
     time_block = summary.get("time") or {}
     turns = summary.get("turns", 0)
-    failed = summary.get("turns_failed", 0)
-    turns_text = f"{turns}" + (f" ({failed} failed)" if failed else "")
+    # Everything that did not end `ok`, named. A reviewer reading the PR body
+    # needs to know a run stopped on its budget rather than crashed, and
+    # "(2 failed)" cannot say that. Plain-`ok` runs get no parenthetical at all.
+    other = {
+        k: v for k, v in (summary.get("outcomes") or {}).items()
+        if k != OUTCOME_OK and v
+    }
+    if other:
+        turns_text = f"{turns} ({', '.join(f'{v} {k}' for k, v in other.items())})"
+    else:
+        failed = summary.get("turns_failed", 0)
+        turns_text = f"{turns}" + (f" ({failed} failed)" if failed else "")
     tokens_text = (
         f"{tokens.get('total', 0):,} "
         f"({tokens.get('input', 0):,} in / {tokens.get('output', 0):,} out)"
@@ -499,6 +584,10 @@ def format_show(summary: dict, source: str) -> str:
         ("ended", summary.get("ended")),
         ("duration", format_duration(summary.get("duration_ms"))),
         ("turns", f"{summary.get('turns', 0)} ({summary.get('turns_failed', 0)} failed)"),
+        (
+            "outcomes",
+            ", ".join(f"{k}={v}" for k, v in (summary.get("outcomes") or {}).items()) or "-",
+        ),
         (
             "tokens",
             f"{tokens.get('total', 0)} (in={tokens.get('input', 0)} out={tokens.get('output', 0)}"
@@ -570,10 +659,12 @@ def _summary_for(state_dir: Path, run_id: str | None) -> tuple[dict | None, str]
 def telemetry_main(argv: list[str]) -> int:
     """``harness telemetry show|list|pr-block``.
 
-    Needs no API key, no network and no model. (It does **not** claim to be a
-    stdlib-only *process*: ``harness/__init__.py`` imports ``cli`` unconditionally,
-    so every subcommand already pays that cost — M5 §0.1 F6's deferred limitation,
-    which M6 does not fix. What holds is that this route adds nothing on top.)
+    Needs no API key, no network and no model — and, since M5 §0.1 F6 landed
+    (``harness/entry.py`` + the lazy ``harness/__init__`` ``__getattr__``), no
+    runtime stack either. ``entry.dispatch`` routes here without importing
+    ``cli``, and this module imports nothing from the package but
+    ``harness.scrub`` at module level, so reading a run's numbers costs a bare
+    interpreter. ``tests/test_import_isolation.py`` pins that.
     """
     parser = argparse.ArgumentParser(prog="harness telemetry", add_help=True)
     parser.add_argument("action", choices=("show", "list", "pr-block"))

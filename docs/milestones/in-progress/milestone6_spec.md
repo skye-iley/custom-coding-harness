@@ -28,6 +28,12 @@
 > | 11 | "the keyless path stays keyless" | narrowed — `harness/__init__.py` already imports `cli` unconditionally |
 > | 13 | record from `run_turn`'s existing `except` | there is no such `except`; see §3.2 |
 > | 15.1 **(new)** | — | the full list of signatures this milestone changes |
+>
+> **Two of those rows were themselves superseded at merge time**, by the pre-merge review and by M5
+> §0.1 F6 landing on `main` first. Row 10's `/project` is now derived from the script's own location
+> (it has to be right on a host too — that is where the `open-pr.sh` tests run), and row 11's
+> narrowing is undone: `harness telemetry` really is stdlib-only now, because `harness/entry.py`
+> routes it without importing `cli`. Both are written out where they live, §10 and §11.
 
 ## 1. Module layout
 
@@ -84,6 +90,7 @@ One JSON object per line, UTF-8, `\n`-terminated, written with a single `write()
   "model_calls": 3,
   "tool_calls": {"read_file": 2, "execute": 1},
   "tool_errors": 0,
+  "outcome": "ok",
   "failed": false,
   "retry_count": 0,
   "context_trimmed": false
@@ -203,9 +210,14 @@ callers' `except` blocks. Three reasons, each of which alone decides it:
 
 So: `run_turn` starts the clock, resets the accumulator (belt-and-braces — `before_agent` also
 resets it, but a turn that fails before the first model call never reaches that hook), and in
-`finally` assembles the record from the accumulator plus its own numbers and appends it. `failed` is
-`True` when the `finally` runs with an exception in flight — except for `HaltTurn`, which is an
-ordinary operator deny, not a failed turn.
+`finally` assembles the record from the accumulator plus its own numbers and appends it.
+
+The in-flight exception decides the record's **`outcome`** (`cli._turn_outcome`), and `failed` is
+derived from that as `outcome == "error"` — never set independently. `HaltTurn` is `denied`,
+`BudgetExceeded` is `budget`, `KeyboardInterrupt` is `cancelled`, `InterruptAborted` is `aborted`,
+and anything else is `error`. *(As first built only `HaltTurn` was excluded from `failed`; the other
+three still counted as failures, which invariant 2a's own reasoning forbids. See `milestone6.md`
+§0.1 finding 3.)*
 
 `_run_turn_hitl` (the `run_repl` wrapper) stays a pass-through. It must not become a second write
 site, or a HITL run records every turn twice.
@@ -394,6 +406,7 @@ summary is absent, so the run is still readable.
   "run_id": "...", "thread_id": "...", "topic": "...",
   "started": "...", "ended": "...", "duration_ms": 412330,
   "turns": 7, "turns_failed": 1,
+  "outcomes": {"ok": 5, "budget": 1, "error": 1},
   "tokens": {"input": 41022, "output": 5120, "cache_read": 0, "cache_write": 0, "total": 46142},
   "cost_usd": null, "cost_provenance": null, "energy_wh": 0.121,
   "time": {"model_ms": 210400, "tool_ms": 88300, "retry_sleep_ms": 61000,
@@ -467,14 +480,20 @@ memory (§9: a crashed run has records and no summary). It says which source it 
 claims about the same numbers.
 
 **What "keyless" does and does not mean here — state it, do not inherit the claim.**
-`harness/__init__.py` does `from harness.cli import main` **unconditionally**, so *any*
-`python3 -m harness <subcommand>` already imports `cli.py` and with it langchain/langgraph/deepagents
-— `config` and `doctor` included. That is M5 §0.1 F6's known, deferred limitation (fixing it needs a
-lazy `__init__` plus an entry-point change), and M6 does not fix it. So the property this milestone
-can actually hold is the narrower one: **`telemetry` needs no API key, no network, and no model, and
-its route adds nothing to the import cost that `config`/`doctor` do not already pay.** Invariant 22
-is restated to that. Do not write "stays keyless" in a way that implies a stdlib-only import — the
-repo has already been burned once by a boundary claim outrunning the code.
+When this spec was written, `harness/__init__.py` did `from harness.cli import main`
+**unconditionally**, so *any* `python3 -m harness <subcommand>` already imported `cli.py` and with it
+langchain/langgraph/deepagents — `config` and `doctor` included. So the property the milestone could
+actually hold was the narrower one: **`telemetry` needs no API key, no network, and no model, and its
+route adds nothing to the import cost that `config`/`doctor` do not already pay.**
+
+> **Superseded during the merge to `main`.** M5 §0.1 F6 landed first (PR #44): a lazy
+> `__init__.__getattr__` plus the stdlib-only `harness/entry.py`. The `telemetry` route therefore
+> moved from `cli.dispatch` (which no longer exists — `cli.dispatch` is now a re-export of
+> `entry.dispatch`) into `entry.py`, and the **strong** claim now holds: `harness telemetry` loads no
+> runtime stack at all. Invariant 22 is restated to the strong form and
+> `tests/test_import_isolation.py` pins it. The paragraph above is kept rather than rewritten because
+> the reasoning it records — do not write "stays keyless" in a way that implies a stdlib-only import
+> the code does not deliver — is what made the claim safe to strengthen only once the code caught up.
 
 ## 12. Headless join (T5)
 

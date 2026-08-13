@@ -62,6 +62,7 @@ from harness.cost import (
     format_session_total,
 )
 from harness._compat import compat_import
+from harness.entry import dispatch  # noqa: F401  (re-export: cli.dispatch is a public name)
 from harness.loaders import load_hooks, load_mcp_tools
 
 # Same pattern cost.py and archive.py use: only the middleware needs the real
@@ -562,6 +563,33 @@ def _is_control_flow(exc: BaseException) -> bool:
         return type(exc).__name__ in ("GraphInterrupt", "GraphBubbleUp", "ParentCommand")
 
 
+def _turn_outcome(exc: BaseException) -> str:
+    """How a turn that raised should be recorded (``telemetry.OUTCOMES``).
+
+    Only a genuine failure counts as ``error``. The other three are the harness
+    doing exactly what it was configured to do:
+
+    * ``BudgetExceeded`` — a ``--max-cost``/``--max-tokens`` cap fired. The cap
+      worked; a sweep run under one would otherwise report every capped instance
+      as a harness failure.
+    * ``KeyboardInterrupt`` — the operator cancelled the turn.
+    * ``InterruptAborted`` — the headless interrupt policy fail-closed (S5,
+      ``EXIT_INTERRUPT_ABORT``). A policy decision, not a break.
+
+    This is invariant 2a's reasoning — an operator deny is an outcome, not a
+    failure — applied to the other three events that arrive the same way. Keeping
+    it here rather than at each raise site means one classifier to change when a
+    fourth governance exception appears, and one place a test can pin.
+    """
+    if isinstance(exc, BudgetExceeded):
+        return telemetry_mod.OUTCOME_BUDGET
+    if isinstance(exc, KeyboardInterrupt):
+        return telemetry_mod.OUTCOME_CANCELLED
+    if isinstance(exc, hitl.InterruptAborted):
+        return telemetry_mod.OUTCOME_ABORTED
+    return telemetry_mod.OUTCOME_ERROR
+
+
 @dataclasses.dataclass
 class _TurnAccumulator:
     """The middleware's half of one turn's numbers (``milestone6_spec.md`` §3.2).
@@ -745,7 +773,7 @@ class TelemetryMiddleware(_AgentMiddleware):
 
     # --- the write -----------------------------------------------------------
 
-    def build_record(self, *, duration_ms: float, failed: bool) -> "telemetry_mod.TurnRecord":
+    def build_record(self, *, duration_ms: float, outcome: str) -> "telemetry_mod.TurnRecord":
         acc = self.acc
         acc.close_model_span()  # a turn that died mid-model still reports its time
         delta = _session_delta(self.tracker, self._cost_at_start)
@@ -775,18 +803,18 @@ class TelemetryMiddleware(_AgentMiddleware):
             model_calls=acc.model_calls,
             tool_calls=dict(acc.tool_calls),
             tool_errors=acc.tool_errors,
-            failed=failed,
+            outcome=outcome,
             retry_count=acc.retry_count,
             context_trimmed=acc.context_trimmed,
             interrupts=acc.interrupts,
         )
 
-    def write(self, *, duration_ms: float, failed: bool) -> None:
+    def write(self, *, duration_ms: float, outcome: str) -> None:
         """Append this turn's record. Never raises into the turn path (invariant 3):
         an unwritable sink degrades to one stderr line per run, then silence."""
         try:
             telemetry_mod.record_turn(self.sink, self.build_record(
-                duration_ms=duration_ms, failed=failed
+                duration_ms=duration_ms, outcome=outcome
             ))
         except Exception as exc:  # noqa: BLE001
             if not self._warned:
@@ -910,7 +938,7 @@ def run_turn(
         # resilience retry, every HITL resume). See TelemetryMiddleware.begin_turn.
         telemetry.begin_turn()
     started = time.perf_counter()
-    failed = False
+    outcome = telemetry_mod.OUTCOME_OK
     try:
         try:
             if stream:
@@ -938,25 +966,21 @@ def run_turn(
             # on_deny='halt': the gate abandoned the turn on a deny. Pair the dangling
             # tool_call in checkpoint state so the next turn doesn't resume with an
             # unanswered call, then return to the human prompt with no model reply.
-            #
-            # NOT a failed turn (invariant 2a): an operator deny is an outcome, and
-            # conflating it with "the turn broke" would put a governance signal in
-            # the reliability column that a benchmark sweep then reads as harness
-            # unreliability.
+            outcome = telemetry_mod.OUTCOME_DENIED
             try:
                 agent.update_state(config, {"messages": [halt.tool_message]})
             except Exception as exc:  # noqa: BLE001 - repair is best-effort, never fatal
                 _stage(f"halt: could not repair tool_call state ({type(exc).__name__}: {exc})")
             _stage(f"tool call '{halt.tool_name}' denied — turn halted; back to you")
             return None
-        except BaseException:
-            failed = True
+        except BaseException as exc:
+            outcome = _turn_outcome(exc)
             raise
         return final_message_text(result)
     finally:
         if telemetry is not None:
             telemetry.write(
-                duration_ms=(time.perf_counter() - started) * 1000, failed=failed
+                duration_ms=(time.perf_counter() - started) * 1000, outcome=outcome
             )
 
 
@@ -2038,61 +2062,6 @@ def run_batch(
     ))
     _stage("session closed")
     return exit_code
-
-
-def dispatch(argv: list[str]) -> int:
-    """Shared entry for both `python3 main.py` and `python3 -m harness`.
-
-    Routes the optional dev-time `sync-models` subcommand; anything else runs
-    the agent loop. Kept in one place so the two entry points can't drift —
-    previously only `-m harness` handled `sync-models` and `main.py sync-models`
-    silently swallowed it as an agent task.
-    """
-    if argv and argv[0] == "sync-models":
-        from harness.sync_models import sync_models_main
-
-        return sync_models_main(argv[1:])
-    if argv and argv[0] in ("threads", "past"):
-        # Keyless lifecycle admin over the two sqlite stores (Milestone 2 §2.6).
-        from harness.memadmin import memadmin_main
-
-        return memadmin_main(argv)
-    if argv and argv[0] == "mask-scan":
-        from harness.mask_scan import mask_scan_main
-
-        return mask_scan_main(argv[1:])
-    if argv and argv[0] == "doctor":
-        from harness.doctor import doctor_main
-
-        return doctor_main(argv[1:])
-    if argv and argv[0] == "config":
-        # Milestone 5, C6/C7: keyless pre-spinup config wizard. A separate module
-        # (not cli.py's REPL-side /config) so it stays dependency-light -- no
-        # deepagents/langgraph/langchain pulled in just to run the wizard.
-        from harness.config_cli import config_main
-
-        return config_main(argv[1:])
-    if argv and argv[0] == "telemetry":
-        # Milestone 6 T5. Lazy import inside the branch, like every route above:
-        # the module is stdlib-weight (it imports nothing from the package but
-        # harness.scrub), so this route adds no dependency of its own.
-        #
-        # It needs no key, no network and no model. It is NOT a stdlib-only
-        # *process*: harness/__init__.py imports cli unconditionally, so `config`
-        # and `doctor` already pay langchain's import cost too -- M5 §0.1 F6's
-        # known, deferred limitation, which M6 does not fix (invariant 22).
-        from harness.telemetry import telemetry_main
-
-        return telemetry_main(argv[1:])
-    if argv and argv[0] == "seccomp-sync":
-        from harness.seccomp import seccomp_sync_main
-
-        return seccomp_sync_main(argv[1:])
-    if argv and argv[0] == "apparmor-sync":
-        from harness.apparmor import apparmor_sync_main
-
-        return apparmor_sync_main(argv[1:])
-    return main()
 
 
 def main() -> int:

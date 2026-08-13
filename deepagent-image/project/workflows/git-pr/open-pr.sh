@@ -36,9 +36,17 @@ EOF
 #
 # Two things this invocation has to get right:
 #   * CWD -- we cd'd to the workspace above, and the harness package is not
-#     installed, it is a directory at /project. So `-m harness` from here fails
-#     with "No module named harness". Run it in a SUBSHELL that cds to /project,
-#     because the `gh` call below still needs the workspace CWD.
+#     installed, it is a directory at the project root. So `-m harness` from here
+#     fails with "No module named harness". Run it in a SUBSHELL that cds to that
+#     root, because the `gh` call below still needs the workspace CWD.
+#
+#     The root is derived from THIS SCRIPT'S OWN PATH (`workflows/git-pr/` is two
+#     levels under it), not hardcoded to `/project`. Both are the same directory
+#     in the image, but only the derived one is also right on a host checkout --
+#     and the host is where the `open-pr.sh` cases in tests/test_workflows.py run.
+#     With `/project` hardcoded those cases could only ever pass inside the
+#     container; on a bare host the `cd` failed, the block came out empty, and the
+#     test read as a telemetry bug rather than a path assumption.
 #   * Interpreter -- prefer the harness venv explicitly. The workspace conda env
 #     must never be the interpreter that imports harness code (the two-stack rule),
 #     and on PATH it may well be the one `python3` resolves to.
@@ -47,11 +55,12 @@ EOF
 # leaves the body at the text above and exits 0. The `|| true` wraps the block
 # generation only, never the PR creation: a telemetry gap must not be the reason
 # a PR does not open.
+HARNESS_ROOT="$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd || echo /project)"
 HARNESS_PY=/opt/venv/bin/python3
 [ -x "$HARNESS_PY" ] || HARNESS_PY="$(command -v python3 || true)"
 if [ -n "$HARNESS_PY" ]; then
   TELEMETRY_BLOCK="$(
-    (cd /project && "$HARNESS_PY" -m harness telemetry pr-block \
+    (cd "$HARNESS_ROOT" && "$HARNESS_PY" -m harness telemetry pr-block \
         --state-dir "$STATE_DIR" 2>/dev/null) || true
   )"
   if [ -n "$TELEMETRY_BLOCK" ]; then

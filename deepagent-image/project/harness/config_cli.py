@@ -16,13 +16,14 @@ docstring) for the model menu and API-key detection; nothing here imports
 `harness.cli` or calls `providers.resolve_chat_model`, which only runs when an
 actual agent run starts.
 
-That is a statement about *this file*, not about running the wizard on a bare
-host: `harness/__init__.py` does an unconditional `from harness.cli import
-main`, so importing `harness.config_cli` through the package still loads
-`cli.py` and therefore langgraph. Making the wizard genuinely runnable without
-the runtime stack means a lazy `__getattr__` in `__init__.py` plus an
-entry-point change (`__main__.py` routing `config`/`doctor` before `cli` is
-imported) -- deliberately not done here, see milestone5.md §0.1.
+This now holds through the package too, not just for this file. It previously
+did not: `harness/__init__.py` did an unconditional `from harness.cli import
+main`, so importing `harness.config_cli` still loaded `cli.py` and therefore
+langgraph, and `dispatch` lived in `cli.py`, so routing to the wizard imported
+the very module the split existed to avoid. Both are fixed (milestone5.md §0.1
+F6): `__init__.py` resolves `main` through a lazy `__getattr__`, and the routes
+live in the stdlib-only `harness/entry.py`. `tests/test_import_isolation.py`
+guards it.
 
 Deviation from the fuller spec sketch (milestone5_spec.md §9): the
 interactive menus here are plain numbered `input()` choices, not an arrow-key
