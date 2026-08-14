@@ -1,6 +1,6 @@
 # Milestone 4.1 — LSM Parity (Slice J: vendored AppArmor profile)
 
-> **Status:** ✅ **All three gates closed and measured on a live host.** `DEEPAGENTS_JAIL=1`
+> **Status:** ✅ **Complete — all three gates closed and measured on a live host.** `DEEPAGENTS_JAIL=1`
 > starts end-to-end on a stock AppArmor-confined Ubuntu host with **no extra `docker run` flags**
 > (measured 2026-08-14, Ubuntu VM, kernel `7.0.0-29-generic`, Docker 29.7.2).
 >
@@ -30,7 +30,7 @@
 > probe job is deleted. CI's jail gate is now red/green on an AppArmor-confined host instead of a
 > skip. **J4 (SELinux) is closed as an out-of-scope gap that now says so at run time** rather than
 > silently — see §14. Follow-up to
-> `docs/milestones/in-progress/milestone4.md` — it builds **slice J** (§0 table, §4, §11.6, §16
+> `docs/milestones/complete/milestone4.md` — it builds **slice J** (§0 table, §4, §11.6, §16
 > fork 10, invariant 38), the one M4 slice left unbuilt after A–H landed on `feat/milestone_4`.
 >
 > **Why it is its own milestone doc rather than a §11.6 expansion:** J is gated on a
@@ -41,7 +41,7 @@
 > that structurally could not see this gate.
 >
 > **Read first:** `milestone4.md` §11.4 (the shipped jail), §11.6 (the problem statement this doc
-> turns into a build), §16 fork 10 (the pinned decision), `milestone4_invariants.md` 37–38, and
+> turns into a build), §16 fork 10 (the pinned decision), `milestone4.md` §19 invariants 37–38, and
 > `deepagent-image/seccomp/README.md` (the syscall-filter twin whose shape J mirrors).
 >
 > This document is implementation-ready. §1–§4 are the *what/why*; §5 onward is the *how*: module
@@ -98,12 +98,14 @@ LSM**, and make the profile's narrowness a CI-checked regression guard rather th
   supplying the flag, and the `DEEPAGENTS_JAIL_SYSTEMPATHS=default` control fails at `--proc` with
   zero LSM denials. This bullet is *new*: the milestone was written believing AppArmor was the last
   gate, and the measurement disproved that.
-- `milestone4.md` §1/§11.6/§0, `milestone4_invariants.md` 37–38, `deepagent-image/CLAUDE.md`, and
+- `milestone4.md` §1/§11.6/§0, `milestone4.md` §19 invariants 37–38, `deepagent-image/CLAUDE.md`, and
   `ENV_VARS.md` no longer describe the jail's reach as "no-LSM hosts plus `unconfined` opters."
 
-**Explicitly NOT done-when:** CI running the jail gate as a hard red/green. That depends on whether a
-GitHub-hosted runner will load a profile at all, which is **unmeasured** (§10, fork J2). Pinning the
-gate before measuring it is the exact error this milestone exists to correct.
+**Explicitly NOT done-when** *(as written at plan time)***:** CI running the jail gate as a hard
+red/green. That depended on whether a GitHub-hosted runner would load a profile at all, which was
+**unmeasured** (§10, fork J2). Pinning the gate before measuring it is the exact error this milestone
+exists to correct. — **Resolved after the fact:** the probe job answered green (run `31836729538`),
+so `JAIL_CHECK=1` *is* now pinned in the `smoke` job. The order held: measure, then pin. See §10.1.
 
 ## 2. Why this, and why now
 
@@ -886,7 +888,9 @@ Conventions per `deepagent-image/CLAUDE.md` → "Test suite layout": no keys, no
 
 ## 17. Invariants this adds
 
-Append to `milestone4_invariants.md` (37–38 already exist; 38 flips to **built** when this ships):
+Appended to M4's invariant list — now **`milestone4.md` §19**, since both milestones are complete
+and the standalone `milestone4_invariants.md` folded in there (37–38 already existed; 38 flipped to
+**built**, and 42–45 were added by forks J5/J2/J4 after this section was first written):
 
 39. **The launcher never runs the jail with the wrong LSM stance.** With `DEEPAGENTS_JAIL=1` on a
     Linux engine, `run-docker` selects `deepagent-userns`, probes that the **daemon** can apply it,
@@ -933,9 +937,9 @@ Append to `milestone4_invariants.md` (37–38 already exist; 38 flips to **built
 
 ---
 
-**Cross-refs:** `docs/milestones/in-progress/milestone4.md` §4 (slice J intent), §11.4 (the shipped
+**Cross-refs:** `docs/milestones/complete/milestone4.md` §4 (slice J intent), §11.4 (the shipped
 jail + the LSM-scope caveat), §11.6 (the problem statement), §13 (knobs), §16 fork 10 (the pinned
-decision), §17 PR7; `milestone4_invariants.md` 31 (the seccomp twin), 37–38;
+decision), §17 PR7; `milestone4.md` §19 invariants 31 (the seccomp twin), 37–38;
 `deepagent-image/seccomp/README.md` + `harness/seccomp.py` (the shape J mirrors);
 `deepagent-image/CLAUDE.md` → "bwrap fs jail"; code seams — `harness/jail.py`
 (`classify_bwrap_failure`, `apparmor_confinement`, `apparmor_hint`, `procfs_covering_mounts`,

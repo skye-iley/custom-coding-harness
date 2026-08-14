@@ -443,7 +443,8 @@ jail_setup() {
   JAIL_ARGS+=(-e "DEEPAGENTS_JAIL=1")
   echo "Jail: bwrap fs jail ON (narrow seccomp profile)" >&2
 
-  # M4 slice J (§11.6): seccomp is only ONE of the two gates. On an AppArmor host
+  # M4 slice J (§11.6): seccomp is only ONE of THREE gates (the third — the kernel's
+  # procfs restriction — is handled further down, M4.1 §13.7). On an AppArmor host
   # (Ubuntu/Debian Docker) the generated `docker-default` profile carries a literal
   # `deny mount,`, so bwrap gets past `unshare` and then fails at its first mount —
   # and entering a user namespace does not shed AppArmor confinement, so nothing the
@@ -486,9 +487,17 @@ jail_setup() {
   # The re-exec happens before anything heavy loads, and inside the jail /proc is
   # bwrap's own fresh procfs, which never carried these masks. The kernel checks the
   # dangerous targets (/proc/kcore, /proc/sysrq-trigger) against capabilities in the
-  # INITIAL user namespace, which no container process holds. Residual exposure is
-  # the window before the re-exec and anything running outside the jail -- narrow,
-  # not zero, which is why the launcher says what it gave up.
+  # INITIAL user namespace, which no container process holds.
+  #
+  # The load-bearing fact, and the one that holds on a host with NO AppArmor (Docker
+  # Desktop/WSL2, SELinux, LSM-less): the image runs as USER agent, non-root. The
+  # unmasked targets are root-owned and mode 0400/0200 -- /proc/kcore unreadable,
+  # /proc/sysrq-trigger unwritable -- so dropping the masks does not hand them to the
+  # agent. On an AppArmor host the profile's `deny @{PROC}/sysrq-trigger rwklx,` and
+  # `deny @{PROC}/kcore rwklx,` (carried through byte-for-byte) are a second layer.
+  # Residual exposure is world-readable /proc entries in the window before the re-exec
+  # and anything running outside the jail -- narrow, not zero, which is why the
+  # launcher says what it gave up.
   local systempaths
   systempaths="$(_resolve_host_setting "${DEEPAGENTS_JAIL_SYSTEMPATHS:-}" DEEPAGENTS_JAIL_SYSTEMPATHS jail_systempaths "unconfined")"
   if [[ "$systempaths" == "unconfined" ]]; then

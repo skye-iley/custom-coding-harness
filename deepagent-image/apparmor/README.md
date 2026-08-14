@@ -50,7 +50,7 @@ is not failing).
 
 Upstream's single `deny mount,` is replaced by exactly these. **Every rule here is backed by a
 kernel denial that demanded it** — measured 2026-08-14 on Ubuntu (kernel `7.0.0-29-generic`, Docker
-29.7.2). See `docs/milestones/in-progress/milestone4.1.md` §13.1a for the round-by-round log.
+29.7.2). See `docs/milestones/complete/milestone4.1.md` §13.1a for the round-by-round log.
 
 | Rule | What needs it |
 |---|---|
@@ -96,7 +96,7 @@ blocking the jail on hosts where an LSM is loaded.
 ## Why not `apparmor=unconfined`
 
 Because that drops the **whole** profile to fix one line — categorically the
-trade `docs/milestones/in-progress/milestone4.md` §16 fork 7 already rejected in
+trade `docs/milestones/complete/milestone4.md` §16 fork 7 already rejected in
 its seccomp form (`seccomp=unconfined`). The honest accounting:
 
 - **Largely, but not wholly, redundant.** Docker independently applies OCI

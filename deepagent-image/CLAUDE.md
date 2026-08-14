@@ -846,8 +846,9 @@ is image-only (smoke).
 
 ## Workspace visibility / secret masking (Milestone 4)
 
-> **Status: in-progress** — code on `feat/milestone_4`, slices A–H landed
-> (H opt-in). Full spec in `docs/milestones/in-progress/milestone4.md`.
+> **Status: complete** — slices A–J all landed and merged (H opt-in). Full spec in
+> `docs/milestones/complete/milestone4.md`; the LSM/procfs gates it depends on are
+> `docs/milestones/complete/milestone4.1.md`. The 45 boundary invariants are `milestone4.md` §19.
 
 The harness can enforce a trust boundary on the workspace filesystem:
 
@@ -917,7 +918,8 @@ asserts the committed artifact, so the guard runs in the ordinary host tier).
 
 ### AppArmor: the second gate (slice J)
 
-seccomp is only **one of two** gates, and both must allow. On Ubuntu/Debian Docker — most Linux
+seccomp is only **one of three** gates, and all must allow — the third (the kernel's procfs
+restriction) is the subsection after this one. On Ubuntu/Debian Docker — most Linux
 container hosts — Docker also applies a generated `docker-default` AppArmor profile whose literal
 `deny mount,` blocks bwrap at its first mount, *after* `unshare` has already succeeded. No seccomp
 change affects this, and entering a user namespace does not shed AppArmor confinement, so the jail

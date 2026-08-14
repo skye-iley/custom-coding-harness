@@ -28,8 +28,8 @@ Exit codes:
        * procfs: both profiles allowed and the kernel refused the fresh `--proc`,
          because Docker's maskedPaths still cover the container's procfs. Needs
          `--security-opt systempaths=unconfined` (milestone4.1.md §13.7).
-     Both are environmental, not regressions. smoke turns either into a hard
-     failure under JAIL_CHECK=1.
+     All three are environmental, not regressions. smoke turns any of them into
+     a hard failure under JAIL_CHECK=1.
   1  a check FAILED -- a real boundary regression
 """
 import os

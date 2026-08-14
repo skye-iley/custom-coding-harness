@@ -131,17 +131,26 @@ RELAXED_MOUNT_RULES = (
     # Linux cannot create a read-only bind in one call: bwrap binds, then remounts
     # re-supplying the SOURCE mount's existing flags (nosuid/nodev/relatime/... on
     # the observed host). That set is host- and mount-dependent, so exact matching
-    # would need one rule per combination. `rw` is deliberately absent so this
-    # stays the read-only remount rule and cannot serve as a general bind grant.
+    # would need one rule per combination. `rw` is deliberately absent, so this
+    # cannot authorize a read-WRITE mount. Be precise about what that does and does
+    # not buy: `bind` is inside the set, so as written this is a general *read-only*
+    # bind grant, unrestricted by fstype or target. It is not narrower than the
+    # `mount options=(rw, bind),` rule above it, which is already unrestricted -- so
+    # it widens nothing -- but do not read it as "the ro-remount rule only".
     "mount options in (ro, silent, remount, bind, nosuid, nodev, noexec, noatime, relatime, nodiratime, strictatime),",
-    # NO proc rule. bwrap DOES mount a fresh procfs, but nothing here has to permit
-    # it: the mount happens at `newroot/proc` pre-pivot and is covered by the bind
-    # rules above. A `mount fstype=proc -> /proc/,` rule shipped here through the
-    # first measurement and was removed in a second one (2026-08-14, fork J6) --
-    # deleting it changed nothing, so it was authorizing nothing. Kept as a comment
-    # because "we checked, and the obvious-looking rule is not needed" is the part a
-    # future reader would otherwise re-derive. The kernel's own procfs restriction,
-    # which IS what governs that mount, is not an LSM matter at all (§13.7).
+    # NO proc rule, and this is a measurement, not a derivation. bwrap DOES mount a
+    # fresh procfs at `newroot/proc` pre-pivot. A `mount fstype=proc -> /proc/,` rule
+    # shipped here through the first measurement and was deleted in a second one
+    # (2026-08-14, fork J6): removing it changed nothing, so it was authorizing
+    # nothing -- most likely because its target (`/proc/`) never matched the actual
+    # mount point (`newroot/proc`) in the first place. WHICH remaining rule the kernel
+    # accepts that mount under is NOT established: none of the rules above is an
+    # obvious fit (a fresh procfs is not a bind, and bwrap's rw flags fall outside the
+    # `in` set). Do not "restore" a proc rule on the strength of that gap -- the only
+    # admissible evidence is an `apparmor="DENIED"` line demanding one. Kept as a
+    # comment because "we checked, and the obvious-looking rule is not needed" is the
+    # part a future reader would otherwise re-derive. The kernel's own procfs
+    # restriction, which is a separate matter entirely, is not an LSM one (§13.7).
     "pivot_root,",
     # bwrap makes the old root rprivate before detaching it, AFTER all setup ops --
     # which is why this denial only surfaced once rules 1-5 were correct and the

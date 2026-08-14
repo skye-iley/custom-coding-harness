@@ -129,7 +129,7 @@ This document records the problem, design, and solution for archival. The fix is
 ## Workspace visibility / secret masking (Milestone 4)
 
 > **Status: in-progress** — code on `feat/milestone_4`, slices A–G landed.
-> Full spec in `docs/milestones/in-progress/milestone4.md`.
+> Full spec in `docs/milestones/complete/milestone4.md`.
 
 The harness can enforce a trust boundary on the workspace filesystem:
 
@@ -178,7 +178,7 @@ See `docs/features/workspace_visibility.md` (§3) for full `.agentignore` syntax
 **M4 follow-up (Milestone 4, in-progress):** Slices D (permission_denied interrupt wiring) 
 of M4 complete the S4 path-guard integration deferred here. When M4 merges, this gap is closed; 
 `on_path_denied` escalates denials to the HITL approval loop. See 
-`docs/milestones/in-progress/milestone4.md` (§11.3 "Escalation deferred") for current state.
+`docs/milestones/complete/milestone4.md` (§11.3 "Escalation deferred") for current state.
 ```
 
 **Impact:** Readers know M3 gaps are addressed in later work.

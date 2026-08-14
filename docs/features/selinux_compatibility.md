@@ -12,7 +12,7 @@
 
 ## 1. Why this is open
 
-Slice J's whole premise (`docs/milestones/in-progress/milestone4.1.md` §2) is that an *inferred*
+Slice J's whole premise (`docs/milestones/complete/milestone4.1.md` §2) is that an *inferred*
 boundary is worth less than no claim at all. Slice H shipped "verified" on Docker Desktop/WSL2, a host
 class that loads no LSM policy and therefore structurally could not see the AppArmor gate. M4.1 fixed
 that for AppArmor by measuring on a live host — 7 rules, four of them wrong as derived (§13.1a).
@@ -91,4 +91,4 @@ its LSM is the defect M4.1 was written to correct.
 - Tests: `tests/test_jail.py` SELinux cases, `tests/test_doctor.py::
   test_doctor_reports_selinux_as_an_untested_gap_not_an_apparmor_problem`.
 - Rationale + the misdiagnosis this replaced: `milestone4.1.md` §14 fork J4; invariant 44 in
-  `milestone4_invariants.md`.
+  `docs/milestones/complete/milestone4.md` §19.
