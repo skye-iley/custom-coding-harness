@@ -106,6 +106,7 @@ See [ENV_VARS.md](./ENV_VARS.md#not-in-env--launcher-environment-host-side) for 
 | `EPHEMERAL` | `-Ephemeral` | off | Mount a throwaway copy of the workspace; revert on close. |
 | `SAVE_WORKSPACE` | `-SaveWorkspace` | off | Snapshot the ephemeral copy before discard; implies ephemeral. |
 | `NET_JAIL` | `-NetJail` | off | Deny-all-egress network jail (see `netjail/`). |
+| `DEEPAGENTS_JAIL_SYSTEMPATHS` | `-JailSystempaths` | unset → `unconfined` | Docker's `/proc` masks under the jail — the **third** gate (M4.1 §13.7). Default passes `--security-opt systempaths=unconfined`, without which the kernel refuses bwrap's fresh `--proc`. `default` keeps the masks; the jail then won't start on most Linux hosts, which is how the LSM-only control is reproduced. Only consulted when `DEEPAGENTS_JAIL` is on; read from the host env, `.env`, or the profile like its AppArmor twin. |
 | `DEEPAGENTS_JAIL_APPARMOR` | — | unset → auto | AppArmor stance for the bwrap jail. Read from the host env **or `.env`**, same as `DEEPAGENTS_JAIL`, but it only affects `docker run` flags — nothing reads it inside the container. Unset → **auto**: pass nothing where no LSM is in force, select slice J's `deepagent-userns` where it is loaded, and **abort pre-flight** where an LSM is in force but the profile is not loaded. `unconfined` → `--security-opt apparmor=unconfined` (works everywhere; drops the whole profile). Any other value is passed through as a host-loaded profile name. See "AppArmor: the second gate" below. |
 
 (`MAP_HOST_USER`/`HOST_UID`/`HOST_GID` are Linux-only mount-ownership knobs and have no `.ps1`
@@ -845,8 +846,9 @@ is image-only (smoke).
 
 ## Workspace visibility / secret masking (Milestone 4)
 
-> **Status: in-progress** — code on `feat/milestone_4`, slices A–H landed
-> (H opt-in). Full spec in `docs/milestones/in-progress/milestone4.md`.
+> **Status: complete** — slices A–J all landed and merged (H opt-in). Full spec in
+> `docs/milestones/complete/milestone4.md`; the LSM/procfs gates it depends on are
+> `docs/milestones/complete/milestone4.1.md`. The 45 boundary invariants are `milestone4.md` §19.
 
 The harness can enforce a trust boundary on the workspace filesystem:
 
@@ -916,7 +918,8 @@ asserts the committed artifact, so the guard runs in the ordinary host tier).
 
 ### AppArmor: the second gate (slice J)
 
-seccomp is only **one of two** gates, and both must allow. On Ubuntu/Debian Docker — most Linux
+seccomp is only **one of three** gates, and all must allow — the third (the kernel's procfs
+restriction) is the subsection after this one. On Ubuntu/Debian Docker — most Linux
 container hosts — Docker also applies a generated `docker-default` AppArmor profile whose literal
 `deny mount,` blocks bwrap at its first mount, *after* `unshare` has already succeeded. No seccomp
 change affects this, and entering a user namespace does not shed AppArmor confinement, so the jail
@@ -943,14 +946,57 @@ sudo deepagent-image/scripts/install-apparmor-profile.sh          # load (enforc
 if an LSM is in force asks whether `deepagent-userns` is loaded. Not loaded ⇒ it **aborts before
 `docker run`** with the install command. It never falls back to `unconfined` on its own.
 
-**⚠️ Built, but not yet measured on an AppArmor host.** Every machine this was developed on is
-Docker Desktop/WSL2, which loads no AppArmor policy — the same blind spot that let slice H ship
-claiming more reach than it had. So the mount rule set is *derived from bwrap's syscall sequence,
-not confirmed against a live denial log*. Treat `DEEPAGENTS_JAIL=1` on Ubuntu/Debian as untested
-until a run on such a host is recorded (CI's non-gating `apparmor-load-probe` job exists to produce
-exactly that record). If it denies something, read `dmesg | grep 'apparmor="DENIED"'` and add **only**
-the rule the denial demands, with a justification in `apparmor/README.md` — a broad `mount,` catch-all
-is `unconfined` in disguise and `verify_profile` rejects it.
+**✅ Measured 2026-08-14** on an Ubuntu VM (kernel `7.0.0-29-generic`, Docker 29.7.2), twice. The
+rule set is no longer derived: it went **7 → 8 with four corrections**, then **8 → 7** when fork J6
+deleted a `mount fstype=proc -> /proc/,` rule and re-measured no change — it was authorizing nothing.
+`jail-check.py` passes 5/5 under the vendored profile with zero `deepagent-userns` denials.
+Round-by-round logs: `milestone4.1.md` §13.1a and §13.1b. Note what J6 shows: a profile can pass
+every test and still be too wide, because `verify_profile` checks the set matches
+`RELAXED_MOUNT_RULES`, not that each member earns its place. Deletion + re-measurement is the only
+instrument for that. If you ever change `RELAXED_MOUNT_RULES`, the process is unchanged — read
+`dmesg | grep 'apparmor="DENIED"'` and add **only** the rule the denial demands, with a justification
+in `apparmor/README.md`; a broad `mount,` catch-all is `unconfined` in disguise and `verify_profile`
+rejects it. Reinstall after every `apparmor-sync`: the kernel holds the old rules until replaced, and
+nothing in-container can detect a stale load.
+
+**⚠️ There is a THIRD gate, and it is why the jail long did not start on a stock Ubuntu/Debian
+host.**
+The AppArmor measurement surfaced it: with the LSM satisfied, bwrap dies at
+
+```
+bwrap: Can't mount proc on /newroot/proc: Operation not permitted
+```
+
+`EPERM`, no denial logged. That is the kernel's `mount_too_revealing()` check — a fresh procfs
+cannot be mounted from a non-initial user namespace while the visible procfs is covered by
+submounts, and Docker's `maskedPaths`/`readonlyPaths` are 13 such mounts. Independent of seccomp
+*and* AppArmor.
+
+**Fork J5 is wired and measured** (2026-08-14, `milestone4.1.md` §13.1b: 5/5 through the launcher
+with no hand-added flags; the `DEEPAGENTS_JAIL_SYSTEMPATHS=default` control fails at `--proc` with
+**zero** LSM denials, which is the evidence the pass rests on):
+`run-docker.{sh,ps1}` and `smoke.{sh,ps1}` pass `--security-opt systempaths=unconfined` from the
+same `DEEPAGENTS_JAIL=1` block that passes seccomp and AppArmor, announcing it;
+`DEEPAGENTS_JAIL_SYSTEMPATHS=default` keeps Docker's `/proc` masks (the **LSM-only control**, no
+script edit needed). `classify_bwrap_failure` has a third `procfs` class — separated from `lsm` by
+**errno**, EPERM vs. EACCES, since both fail at a mount — and `preflight` / `jail-check.py` /
+`doctor` each diagnose it by name instead of `unknown`. `doctor` reads the container's own
+`/proc/self/mountinfo` rather than a forwarded flag, and reports covering mounts as a **warning**,
+not an error: slice H passed 5/5 on Docker Desktop/WSL2 *with* those masks, so they are the
+configuration that trips the kernel check, not proof it trips here.
+
+Why this is not the trade `apparmor=unconfined` was: what it drops is not protecting the jailed
+process. The re-exec happens before anything heavy loads, and inside the jail `/proc` is bwrap's
+own fresh procfs, which never carried Docker's masks; the dangerous targets are checked against
+capabilities in the **initial** user namespace, which no container process holds. The residual —
+the window before the re-exec, and anything outside the jail — is narrow, **not zero**.
+
+**Do not** instead bind the container's `/proc` and drop `--unshare-pid`: the harness and the
+agent's shell run as the same uid, so `/proc/<harness-pid>/environ` would hand the shell every
+provider key, and `_agent_shell_env`'s allowlist does not cover reading another process's environ
+(§13.7). Related, and true of the **shipped default** today: with `DEEPAGENTS_JAIL=0` the shell is a
+plain passthrough in the container's PID namespace, so `cat /proc/1/environ` returns the harness's
+keys — measured. The nested `sandbox-exec` jail is what closes it, and only under the jail.
 
 Other options:
 - **`DEEPAGENTS_JAIL_APPARMOR=unconfined`** — works on any host, but drops the **whole**
@@ -961,8 +1007,34 @@ Other options:
 - Docker Desktop/WSL2 loads no AppArmor policy, so nothing is needed there.
 
 Regenerate with `python3 -m harness apparmor-sync` (dev-time, needs network); `--check` verifies the
-committed artifacts offline. **SELinux hosts (RHEL/Fedora) are a third environment and are untested**;
-rootless Docker and Podman likewise.
+committed artifacts offline.
+
+**CI gates on this** (M4.1 fork J2, closed 2026-08-14). The `smoke` job loads `deepagent-userns` into
+the runner kernel and runs `JAIL_CHECK=1 smoke.sh`, so an rc-77 skip is now a build failure — the
+guard runs on an AppArmor-confined Linux engine, the host class that broke the jail, rather than on
+the Docker Desktop/WSL2 host that structurally cannot see the LSM gate. A masks-on control step runs
+beside it, non-gating, so the pass is pinned to `systempaths=unconfined` and not to two variables at
+once. If a runner image change reddens it, re-measure and re-record in `milestone4.1.md` §10.1 —
+never unpin `JAIL_CHECK` back to a green skip.
+
+**SELinux hosts (RHEL/Fedora) are a third environment and are untested** (fork J4) — rootless Docker
+and Podman likewise. Untested here means *named*, not ignored: `jail.selinux_confinement()` reads the
+context, an SELinux context is never reported as an AppArmor profile (they share the legacy
+`/proc/self/attr/current`, and parsing one as a profile name used to make `doctor` demand an AppArmor
+profile on a host with no AppArmor), an LSM mount denial routes through `jail.lsm_hint()` to a
+known-gap message rather than AppArmor install instructions, and `harness doctor` reports a
+**warning** — the jail may work there or may not, and nobody has measured it. `--security-opt
+label=disable` is the usual escape hatch, named and marked **unverified**; it drops SELinux labelling
+for the whole container, wider than the one rule the AppArmor path narrows. Closing the gap means a
+measured run (`ausearch -m AVC` in place of `dmesg | grep apparmor="DENIED"`), not an inference.
+
+**Do not read the J4 work as SELinux support.** Whether bwrap builds the namespace under
+`container_t` is unmeasured in both directions — AppArmor's result predicts nothing, since type
+enforcement is a different mechanism from a literal `deny mount,`. Tracked as a **pre-release
+compatibility check** in `docs/features/selinux_compatibility.md`: the measurement protocol, what each
+outcome obliges (nothing to vendor / a narrow policy module under the same generated+verified contract
+/ an announced `label=disable` knob / a documented "does not run here"), and the rule that no claim of
+support exists until a measurement does.
 
 ### Quick-Start: In-Workspace `.agentignore` File
 

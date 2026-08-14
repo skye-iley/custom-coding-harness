@@ -262,6 +262,57 @@ def test_jail_on_with_the_committed_profile_passes(tmp_path, monkeypatch, capsys
     assert rc == 0
 
 
+# --- the procfs gate (M4.1 §13.7, fork J5) ------------------------------------
+#
+# The third gate is invisible to both profile checks: seccomp and AppArmor can be
+# perfect and bwrap still dies at `--proc`. Doctor's job here is to make that EPERM
+# legible -- the measurement spent a round diagnosing it as an LSM problem.
+
+
+def _procfs_case(tmp_path, monkeypatch, covering):
+    """jail on, in-container, both profile paths pinned clean, bwrap probe stubbed."""
+    from harness import jail as doctor_jail
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    _jail_on(monkeypatch)
+    monkeypatch.setenv("DEEPAGENTS_IN_CONTAINER", "1")
+    monkeypatch.delenv("DEEPAGENTS_JAIL_APPARMOR", raising=False)
+    monkeypatch.setattr(doctor_jail, "apparmor_confinement_detail", lambda: (None, None))
+    monkeypatch.setattr(doctor_jail, "procfs_covering_mounts", lambda: covering)
+    # The real probe would shell out to bwrap, which is not the property under test
+    # (and is absent on a dev host).
+    monkeypatch.setattr(doctor_jail, "preflight", lambda: [])
+    return ws, state
+
+
+def test_doctor_reports_dockers_proc_masks_as_the_third_gate(tmp_path, monkeypatch, capsys):
+    ws, state = _procfs_case(tmp_path, monkeypatch, ["/proc/kcore", "/proc/sys"])
+
+    rc = doctor.doctor_main([str(ws), str(state)])
+    err = _records(capsys)
+    # A WARNING, not an error: slice H passed 5/5 on Docker Desktop/WSL2 with these
+    # masks in place, so their presence is the configuration that trips the kernel
+    # check, not proof it trips here. The bwrap probe is the authority.
+    assert rc == 0
+    assert "/proc/kcore" in err
+    assert "systempaths=unconfined" in err
+    # Must clear the other two gates by name, or the operator re-checks two correct
+    # profiles -- the dead end §13.7 documents.
+    assert "neither seccomp nor AppArmor" in err
+
+
+def test_doctor_reports_an_uncovered_procfs_as_fine(tmp_path, monkeypatch, capsys):
+    ws, state = _procfs_case(tmp_path, monkeypatch, [])
+
+    rc = doctor.doctor_main([str(ws), str(state)])
+    err = _records(capsys)
+    assert rc == 0
+    assert "procfs is uncovered" in err
+
+
 # --- AppArmor / LSM pre-flight (M4 slice J, invariants 37/38) -----------------
 
 
@@ -329,11 +380,49 @@ def test_doctor_quiet_when_no_lsm_in_force(tmp_path, monkeypatch, capsys):
     _jail_on(monkeypatch)
     monkeypatch.delenv("DEEPAGENTS_JAIL_APPARMOR", raising=False)
     monkeypatch.setattr(doctor_jail, "apparmor_confinement_detail", lambda: (None, None))
+    # Pinned like the AppArmor half above: on an SELinux dev host the real reader
+    # would return a context and this would (correctly) take the J4 branch instead.
+    monkeypatch.setattr(doctor_jail, "selinux_confinement", lambda: None)
 
     rc = doctor.doctor_main([str(ws), str(state)])
     err = _records(capsys)
     assert rc == 0
     assert "no AppArmor confinement in force" in err
+
+
+def test_doctor_reports_selinux_as_an_untested_gap_not_an_apparmor_problem(
+    tmp_path, monkeypatch, capsys
+):
+    """M4.1 fork J4. RHEL/Fedora is a third host class and nothing was measured there.
+
+    Two failures this pins, both of which the code had before J4: the SELinux context
+    read off the shared legacy attr was reported as an AppArmor *profile name*, so
+    doctor hard-errored telling the operator to load an AppArmor profile on a host
+    with no AppArmor; and there was no other mention of SELinux anywhere in the
+    run-time surface, so the alternative was silence. It is a warning, not an error —
+    doctor may not claim the boundary is broken any more than it may claim it holds.
+    """
+    from harness import jail as doctor_jail
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    _jail_on(monkeypatch)
+    monkeypatch.delenv("DEEPAGENTS_JAIL_APPARMOR", raising=False)
+    monkeypatch.setattr(doctor_jail, "apparmor_confinement_detail", lambda: (None, None))
+    monkeypatch.setattr(
+        doctor_jail, "selinux_confinement", lambda: "system_u:system_r:container_t:s0:c52,c87"
+    )
+
+    rc = doctor.doctor_main([str(ws), str(state)])
+    err = _records(capsys)
+    assert rc == 0
+    assert "SELinux" in err and "container_t" in err
+    assert "UNTESTED" in err
+    # Must not route an SELinux host into the AppArmor install instructions.
+    assert "install-apparmor-profile.sh" not in err
+    assert "no AppArmor confinement in force" not in err
 
 
 def test_doctor_passes_when_the_narrowed_profile_is_in_force(tmp_path, monkeypatch, capsys):

@@ -53,6 +53,9 @@ foreach ($pair in $pairs) {
 # would relax five syscalls container-wide, start no jail, and turn nsguard off.
 $markers = @("mask-scan", "refusing to launch unmasked", "DEEPAGENTS_MASK", "DEEPAGENTS_MASK_MODE",
              "deepagent-userns", "install-apparmor-profile", "DEEPAGENTS_JAIL_APPARMOR",
+             # M4.1 fork J5: the third gate. Dropped from one launcher only, that
+             # platform's jail dies at `--proc` with an EPERM naming neither profile.
+             "systempaths=unconfined", "DEEPAGENTS_JAIL_SYSTEMPATHS",
              "/project/.harness-profile.yaml",
              "PIDS_LIMIT=", "DEEPAGENTS_JAIL=1", "DEEPAGENTS_MASK_MODE=")
 $rdPs1 = Join-Path (Join-Path $Root "scripts") "run-docker.ps1"

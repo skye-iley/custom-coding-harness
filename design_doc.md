@@ -55,9 +55,10 @@ field registry (M5/M5.1). **Still one agent, one trust boundary, no routing and 
 | 2 | Persistent workspace + gitconfig mount | ✅ Built | `run-docker` bind-mounts workspace; mounts `~/.gitconfig` read-only |
 | 2 | Conversation checkpoint (SqliteSaver) | ✅ Built | `checkpoints.sqlite` in the harness **state dir**, thread-keyed. Defaults to `<workspace>/.deepagents/`; `DEEPAGENTS_STATE_DIR` relocates it and `run-docker` points it at `/project/state`, outside the workspace mount (M2) |
 | 2 | Dual-container (orchestrator + executor) | ⬜ Planned | One container today |
-| 2 | Workspace visibility / secret masking | ✅ Built (Milestone 4) | `harness/mask.py`: `.agentignore` (gitignore-parity), 3-tier policy, deny/allow modes, un-negatable designated-secret floor, docker mount-mask (masked paths present-but-empty). `DEEPAGENTS_MASK=0` ⇒ M3 parity. See `docs/milestones/in-progress/milestone4.md` |
-| 2 | Bubblewrap fs-tool jail | ✅ Built, **opt-in** (Milestone 4 slice H) | `DEEPAGENTS_JAIL=1` re-execs the harness into a bwrap mount namespace (`harness/jail.py`), so every fs tool — shell included — inherits an allow-list bind whitelist; `/project` read-only, floor overmounted empty, state dir out of reach. **Off by default:** needs `--security-opt seccomp=seccomp/userns.json` (docker-default + 5 relaxed syscalls) on the outer container, an operator's trade. `harness/nsguard.py` is the shell-seam tripwire for those syscalls. Gate verified on Docker Desktop/WSL2 |
-| 2 | AppArmor profile for the jail | 🟡 Partial (Milestone 4.1) | `apparmor/deepagent-userns` = moby's `docker-default` with only its `deny mount,` narrowed; `apparmor-sync --check`, installer, and `run-docker`/`doctor` wiring all built. **Not yet measured on a live AppArmor host** — the mount rule set is derived, not confirmed; CI's non-gating `apparmor-load-probe` carries that measurement. Without it the jail does not start on Ubuntu/Debian Docker. SELinux untested |
+| 2 | Workspace visibility / secret masking | ✅ Built (Milestone 4) | `harness/mask.py`: `.agentignore` (gitignore-parity), 3-tier policy, deny/allow modes, un-negatable designated-secret floor, docker mount-mask (masked paths present-but-empty). `DEEPAGENTS_MASK=0` ⇒ M3 parity. See `docs/milestones/complete/milestone4.md` |
+| 2 | Bubblewrap fs-tool jail | ✅ Built, **opt-in** (Milestone 4 slice H) | `DEEPAGENTS_JAIL=1` re-execs the harness into a bwrap mount namespace (`harness/jail.py`), so every fs tool — shell included — inherits an allow-list bind whitelist; `/project` read-only, floor overmounted empty, state dir out of reach. **Off by default:** needs `--security-opt seccomp=seccomp/userns.json` (docker-default + 5 relaxed syscalls) on the outer container, an operator's trade. `harness/nsguard.py` is the shell-seam tripwire for those syscalls. Gate verified on Docker Desktop/WSL2 **and, since M4.1, on a live AppArmor-confined Ubuntu host and in CI** (`smoke` pins `JAIL_CHECK=1`) |
+| 2 | AppArmor profile for the jail | ✅ Built (Milestone 4.1) | `apparmor/deepagent-userns` = moby's `docker-default` with only its `deny mount,` narrowed; `apparmor-sync --check`, installer, and `run-docker`/`doctor` wiring all built. **Measured on a live AppArmor host** (2026-08-14, Ubuntu VM, kernel `7.0.0-29-generic`, Docker 29.7.2) — the rule set is measured, not derived, and CI's `smoke` job loads the profile and pins `JAIL_CHECK=1`, so the jail is a red/green gate. SELinux untested and **named as such** at run time (`docs/features/selinux_compatibility.md`) |
+| 2 | The kernel's procfs gate (third gate) | ✅ Built (Milestone 4.1 fork J5) | `mount_too_revealing()` refuses bwrap's fresh `--proc` while Docker's `maskedPaths`/`readonlyPaths` cover the container's procfs — EPERM, no LSM denial, independent of seccomp *and* AppArmor. Both launchers and both smoke scripts pass `--security-opt systempaths=unconfined` under `DEEPAGENTS_JAIL=1`; `DEEPAGENTS_JAIL_SYSTEMPATHS=default` keeps the masks as the LSM-only control. `classify_bwrap_failure` has a third `procfs` class (told from `lsm` by errno) |
 | 2 | `HarnessProfile` dynamic bind mounts | ⬜ Planned | Fixed bind list; no per-agent profile |
 | 2 | Path Guard middleware (`validate_path`) | ✅ Built (Milestone 4 slice C/D) | `harness/pathguard.py` commonpath traversal guard on the fs tools. A denial always prints `path-guard DENIED` to stderr (HITL or not) and, under HITL, appends to `<state-dir>/denials.jsonl` — outside the workspace, so the agent can't truncate the record. **Audit-only:** never offers an interactive approve, because every denial it can currently raise is a true workspace escape |
 | 2 | Resource limits (`--cpus`/`--pids-limit`/mem) | ✅ Built | `run-docker.{sh,ps1}` set `--cpus`/`--memory`/`--pids-limit` (defaults 2/4g/512, overridable). Docker host-boundary control, not a sandbox |
@@ -78,9 +79,9 @@ field registry (M5/M5.1). **Still one agent, one trust boundary, no routing and 
 | 9 | Host CLI frontend (Typer/Rich) + TUI | 🟡 Partial | No Typer/Rich CLI and **no TUI**; interactive use is the in-container REPL above. What does exist is a set of keyless argparse subcommands usable from the host — `harness config` / `config security` / `doctor` / `threads` / `past` / `mask-scan` — routed by `dispatch`. Running those on a host *without* the runtime stack installed is M5 §0.1 F6 (`fix/f6-lazy-entrypoints`, PR #44) |
 | 9 | Unified config surface (flags + `/config` + wizard, one precedence chain) | ✅ Built (Milestones 5 + 5.1) | One resolver (`harness/config.py`): CLI flag > env > `.harness-profile.yaml` > default, provenance-tagged. In-session `/config` for live knobs, `harness config` wizard for the ones fixed at container start. M5.1 made one `FieldSpec` registry the single declaration everything derives from, and validates enum values at every point of entry. See `docs/milestones/complete/milestone5.md` |
 | 9 | Human-in-the-loop (interrupt spine + `ask_human` tool + `.harness-config.yaml`) | ✅ Built (Milestone 3) | LangGraph `interrupt()` over the SqliteSaver checkpoint; one human channel, all 3 trigger sources (deterministic pause middleware, `ask_human` tool, system `provider_error`). Off unless `.harness-config.yaml` exists. `permission_denied` shipped **audit-only** in M4 slice D (see Path Guard above). **Still not implemented:** `missing_price` system event, `shadow` policy, clock-pause on interrupt, host TUI. See §9 + `docs/milestones/complete/milestone3.md` |
-| 10 | Security verification test suite | ✅ Built (Milestone 4 slice G) | `test_mask`, `test_pathguard`, `test_jail`, `test_nsguard`, `test_seccomp`, `test_apparmor`, `test_doctor` — the boundary invariants of `milestone4_invariants.md`, run in CI. The committed seccomp/AppArmor artifacts are asserted offline, so a widened profile fails the host tier |
+| 10 | Security verification test suite | ✅ Built (Milestone 4 slice G) | `test_mask`, `test_pathguard`, `test_jail`, `test_nsguard`, `test_seccomp`, `test_apparmor`, `test_doctor` — the boundary invariants of `docs/milestones/complete/milestone4.md` §19, run in CI. The committed seccomp/AppArmor artifacts are asserted offline, so a widened profile fails the host tier |
 | 11 | Future extensions & roadmap | 🔬 Research | By definition |
-| 12 | CI pipeline for the harness repo | ✅ Built (Milestone 4 slice F) | `.github/workflows/ci.yml`: `host-tests`, `image-tests`, `smoke`, `parity` (the `.ps1`↔`.sh` guard), plus a deliberately **non-gating** `apparmor-load-probe` that exists to produce the M4.1 measurement no dev host can |
+| 12 | CI pipeline for the harness repo | ✅ Built (Milestone 4 slice F) | `.github/workflows/ci.yml`: `host-tests`, `image-tests`, `smoke`, `parity` (the `.ps1`↔`.sh` guard). Since M4.1 fork J2 the `smoke` job loads the narrowed AppArmor profile into the runner kernel and pins `JAIL_CHECK=1`, so the bwrap jail is a **gate**, not an environmental skip; a masks-on control runs beside it non-gating. The `apparmor-load-probe` job that measured this was deleted once it answered |
 | 12 | Config-validate / `harness doctor` | ✅ Built (Milestone 4 slice E) | `harness/doctor.py`: pre-flight validation of the resolved config, mask policy, state-dir placement (errors when an in-container state dir lands inside the workspace), and the seccomp/AppArmor artifacts + a live bwrap unshare probe |
 | 12 | Headless one-shot-to-PR mode | ✅ Built (Milestone 3) | `cli.run_batch` / `--headless` (`DEEPAGENTS_HEADLESS`): run task(s) to completion, emit one JSON result on stdout, meaningful exit code. **PR URL not yet in the JSON** (git-pr logs it to stderr at session.end). Pulled in as M3 prereq P2 |
 | 12 | Provider resilience (retry/backoff + context-overflow fallback) | ✅ Built (Milestone 3) | `harness/resilience.py` + `cli._invoke_resilient`: bounded jittered backoff on 429/5xx/reset (`DEEPAGENTS_MAX_RETRIES`/`_RETRY_BASE`) + one-shot context-overflow trim (pre-§7 stopgap). Pulled in as M3 prereq P1 |
@@ -100,7 +101,7 @@ field registry (M5/M5.1). **Still one agent, one trust boundary, no routing and 
 
 ### Core identity — dependency chain (ship order = dependency order)
 
-1. **M4 slice H — bwrap fs-tool jail** (`docs/milestones/in-progress/milestone4.md` §4H/§11.4;
+1. **M4 slice H — bwrap fs-tool jail** (`docs/milestones/complete/milestone4.md` §4H/§11.4;
    design_doc §2 Bubblewrap Configuration). **Built, opt-in (`DEEPAGENTS_JAIL=1`)** — the real
    allow-list boundary, routing **both** shell and file tools through the jail via a re-exec of the
    harness into a bwrap namespace. Everything below that claims per-agent isolation is aspirational
@@ -142,7 +143,8 @@ field registry (M5/M5.1). **Still one agent, one trust boundary, no routing and 
 > **Status:** 🟡 Partial — built: single container + conda isolation + secret provisioning +
 > persistent workspace + resource limits + opt-in container-wide NetJail (deny-all egress +
 > allowlist) + workspace masking + path guard + the **opt-in bwrap fs-tool jail** (M4 slice H,
-> `DEEPAGENTS_JAIL=1`, with the AppArmor half unmeasured on a live LSM host). Still **planned**:
+> `DEEPAGENTS_JAIL=1`; all three kernel gates closed and measured on a live AppArmor host by M4.1,
+> with SELinux/rootless still untested and saying so). Still **planned**:
 > dual-container, `HarnessProfile` binds, per-agent network policy, config-driven allowlist
 > selection. See the status matrix above.
 
@@ -326,7 +328,7 @@ def validate_path(target_path: str, base_dir: str = "/workspace") -> str:
 > designated-secret floor, and the docker mount-mask that makes masked paths present-but-empty.
 > `DEEPAGENTS_MASK=0` restores M3 behaviour byte-for-byte. Full spec:
 > **`docs/features/workspace_visibility.md`**; shipped scope in
-> `docs/milestones/in-progress/milestone4.md`.
+> `docs/milestones/complete/milestone4.md`.
 
 The bind mount exposes the *whole* workspace tree — including secrets the user's own repo carries
 (`.env`, `id_rsa`, `.aws/credentials`) — to the agent's file **and** shell tools. A policy +
@@ -1036,7 +1038,7 @@ system_interrupts:                # which harness events raise (vs. log/crash)
 ## 10. Security, Verification, & Testing Plan
 > **Status:** 🟡 Partial — the **security verification suite is built** (Milestone 4 slice G:
 > `test_mask`, `test_pathguard`, `test_jail`, `test_nsguard`, `test_seccomp`, `test_apparmor`,
-> `test_doctor`, driven by `milestone4_invariants.md` and run in CI). The risk analysis below and
+> `test_doctor`, driven by `docs/milestones/complete/milestone4.md` §19 and run in CI). The risk analysis below and
 > the automation-validation tests remain a plan. See the status matrix above.
 
 ### Risk Analysis & Mitigation
@@ -1128,7 +1130,10 @@ system_interrupts:                # which harness events raise (vs. log/crash)
 
 ### 12.1 CI pipeline for the harness repo
 > **Status:** ✅ Built (Milestone 4 slice F) — `.github/workflows/ci.yml` runs `host-tests`,
-> `image-tests`, `smoke` and `parity` on push/PR, plus a non-gating `apparmor-load-probe`. The
+> `image-tests`, `smoke` and `parity` on push/PR. `smoke` now loads the M4.1 AppArmor profile into
+> the runner kernel and pins `JAIL_CHECK=1`, so the bwrap jail is a red/green gate rather than an
+> environmental skip (`milestone4.1.md` §10.1); the `apparmor-load-probe` measurement job that
+> established this is possible has been deleted, its answer recorded there. The
 > rationale below is kept as the record of why; the job list there is the plan, the workflow file
 > is the truth.
 

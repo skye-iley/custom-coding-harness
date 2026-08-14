@@ -30,7 +30,7 @@ Not yet wired: budget/clock **pause-on-interrupt** (§6 "pause the clock"); `swi
 on the provider-error prompt. Graph-side dispatch (`interrupt()`, `PauseMiddleware`, `ask_human`) is
 image-only — exercised by smoke, not the host test suite.
 
-**M4 follow-up (Milestone 4, in-progress):** Slices A–G of M4 complete the S4 path-guard integration deferred here. When M4 merges, this gap is closed; `on_path_denied` escalates denials to the HITL approval loop. See `docs/milestones/in-progress/milestone4.md` (§11.3 "Escalation deferred") for current state.
+**M4 follow-up (Milestone 4, in-progress):** Slices A–G of M4 complete the S4 path-guard integration deferred here. When M4 merges, this gap is closed; `on_path_denied` escalates denials to the HITL approval loop. See `docs/milestones/complete/milestone4.md` (§11.3 "Escalation deferred") for current state.
 
 ---
 

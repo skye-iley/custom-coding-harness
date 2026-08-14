@@ -270,6 +270,81 @@ def test_unrecognized_failure_is_unknown_not_silently_skipped():
     assert jail.classify_bwrap_failure("") == "unknown"
 
 
+# --- the third gate: the kernel's procfs restriction (M4.1 §13.7, fork J5) ----
+#
+# Same failure phase as an LSM denial (a mount), so the ONLY signal separating them
+# is errno: EACCES "Permission denied" vs. EPERM "Operation not permitted", with no
+# AppArmor denial logged for the latter. Reporting it as `lsm` or `unknown` sends the
+# operator to re-check two profiles that are both already correct.
+
+
+def test_procfs_gate_is_not_classified_as_an_lsm_denial():
+    # Verbatim stderr from the 2026-08-14 Ubuntu VM measurement, with BOTH the
+    # narrow seccomp profile and the vendored AppArmor profile in force.
+    err = "bwrap: Can't mount proc on /newroot/proc: Operation not permitted"
+    assert jail.classify_bwrap_failure(err) == "procfs"
+
+
+def test_procfs_gate_is_not_reported_as_unknown():
+    # It used to be: `unknown` sends the operator to check "both gates", neither of
+    # which is the problem. This is the regression guard for that diagnosis.
+    err = "bwrap: Can't mount proc on /newroot/proc: Operation not permitted"
+    assert jail.classify_bwrap_failure(err) != "unknown"
+
+
+def test_eperm_on_a_non_proc_mount_is_not_the_procfs_gate():
+    # EPERM on a bind is some other refusal; claiming the procfs gate would send the
+    # operator to drop Docker's /proc masks for nothing.
+    err = "bwrap: Unable to mount source on /newroot/usr: Operation not permitted"
+    assert jail.classify_bwrap_failure(err) == "unknown"
+
+
+def test_procfs_covering_mounts_finds_dockers_masks():
+    # Abridged /proc/self/mountinfo from a stock container: a proc mount plus the
+    # maskedPaths/readonlyPaths submounts that make it "too revealing".
+    mountinfo = "\n".join(
+        [
+            "23 28 0:21 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw",
+            "30 23 0:35 / /proc/asound ro,relatime - tmpfs tmpfs ro",
+            "31 23 0:36 / /proc/kcore rw,nosuid - tmpfs tmpfs rw",
+            "32 23 0:21 /sys /proc/sys ro,relatime - proc proc rw",
+            "24 28 0:22 / /sys ro,nosuid,nodev,noexec,relatime - sysfs sysfs ro",
+        ]
+    )
+    assert jail.procfs_covering_mounts(mountinfo) == [
+        "/proc/asound",
+        "/proc/kcore",
+        "/proc/sys",
+    ]
+
+
+def test_procfs_covering_mounts_ignores_proc_itself_and_lookalikes():
+    # /proc is the covered mount, not a covering one; /procfoo is a different tree.
+    mountinfo = "\n".join(
+        [
+            "23 28 0:21 / /proc rw,relatime - proc proc rw",
+            "40 28 0:41 / /procfoo rw,relatime - tmpfs tmpfs rw",
+            "",
+            "short line",
+        ]
+    )
+    assert jail.procfs_covering_mounts(mountinfo) == []
+
+
+def test_procfs_covering_mounts_is_empty_when_mountinfo_is_unreadable(monkeypatch):
+    # "No evidence", not "a diagnosis": the caller uses this to EXPLAIN a failure,
+    # so a missing file must not manufacture one.
+    monkeypatch.setattr(jail, "_MOUNTINFO_PATH", "/nonexistent/mountinfo")
+    assert jail.procfs_covering_mounts() == []
+
+
+def test_procfs_hint_names_the_fix_and_clears_the_other_two_gates(monkeypatch):
+    monkeypatch.setattr(jail, "_MOUNTINFO_PATH", "/nonexistent/mountinfo")
+    hint = jail.procfs_hint()
+    assert "systempaths=unconfined" in hint
+    assert "seccomp" in hint and "AppArmor" in hint
+
+
 def test_apparmor_confinement_reads_the_profile_name(tmp_path, monkeypatch):
     attr = tmp_path / "apparmor_current"
     attr.write_text("docker-default (enforce)")
@@ -331,6 +406,79 @@ def test_apparmor_confinement_falls_back_to_the_legacy_attr_path(tmp_path, monke
     monkeypatch.setattr(jail, "_APPARMOR_ATTR_PATH", str(tmp_path / "nope"))
     monkeypatch.setattr(jail, "_LEGACY_ATTR_PATH", str(legacy))
     assert jail.apparmor_confinement() == "docker-default"
+
+
+# --- SELinux: a third host class, named rather than misdiagnosed (M4.1 fork J4) --
+
+
+def _selinux_attrs(tmp_path, monkeypatch, context="system_u:system_r:container_t:s0:c52,c87"):
+    """A RHEL/Fedora-shaped host: no AppArmor attr, an SELinux context on the legacy one."""
+    legacy = tmp_path / "current"
+    legacy.write_bytes(context.encode() + bytes(1))
+    monkeypatch.setattr(jail, "_APPARMOR_ATTR_PATH", str(tmp_path / "nope"))
+    monkeypatch.setattr(jail, "_SELINUX_ATTR_PATH", str(tmp_path / "also-nope"))
+    monkeypatch.setattr(jail, "_LEGACY_ATTR_PATH", str(legacy))
+    return context
+
+
+def test_an_selinux_context_is_not_reported_as_an_apparmor_profile(tmp_path, monkeypatch):
+    """Regression: the legacy attr is shared between LSMs.
+
+    `system_u:system_r:container_t:s0:c52,c87` parsed as a profile *name*, so doctor
+    hard-errored "confined by AppArmor profile '<context>'" and sent an operator with
+    no AppArmor at all to go install an AppArmor profile.
+    """
+    _selinux_attrs(tmp_path, monkeypatch)
+    assert jail.apparmor_confinement() is None
+    assert jail.apparmor_confinement_detail() == (None, None)
+
+
+def test_selinux_confinement_reads_the_context(tmp_path, monkeypatch):
+    context = _selinux_attrs(tmp_path, monkeypatch)
+    assert jail.selinux_confinement() == context
+
+
+def test_selinux_confinement_prefers_the_per_lsm_attr(tmp_path, monkeypatch):
+    specific = tmp_path / "selinux_current"
+    specific.write_text("system_u:system_r:svirt_lxc_net_t:s0:c1,c2")
+    monkeypatch.setattr(jail, "_APPARMOR_ATTR_PATH", str(tmp_path / "nope"))
+    monkeypatch.setattr(jail, "_SELINUX_ATTR_PATH", str(specific))
+    monkeypatch.setattr(jail, "_LEGACY_ATTR_PATH", str(tmp_path / "also-nope"))
+    assert jail.selinux_confinement() == "system_u:system_r:svirt_lxc_net_t:s0:c1,c2"
+
+
+def test_an_apparmor_profile_is_not_mistaken_for_an_selinux_context(tmp_path, monkeypatch):
+    """The guard runs both ways: shape-matching must not swallow the AppArmor host."""
+    attr = tmp_path / "apparmor_current"
+    attr.write_text("docker-default (enforce)")
+    monkeypatch.setattr(jail, "_APPARMOR_ATTR_PATH", str(attr))
+    monkeypatch.setattr(jail, "_SELINUX_ATTR_PATH", str(tmp_path / "nope"))
+    monkeypatch.setattr(jail, "_LEGACY_ATTR_PATH", str(tmp_path / "also-nope"))
+    assert jail.selinux_confinement() is None
+    assert jail.apparmor_confinement() == "docker-default"
+
+
+def test_selinux_hint_names_the_gap_and_marks_the_escape_hatch_unverified(tmp_path, monkeypatch):
+    _selinux_attrs(tmp_path, monkeypatch)
+    hint = jail.selinux_hint()
+    assert "SELinux" in hint and "container_t" in hint
+    assert "KNOWN GAP" in hint and "J4" in hint
+    # The escape hatch is named but must never read as a supported fix: slice J
+    # vendored a MEASURED AppArmor profile and nothing equivalent exists here.
+    assert "label=disable" in hint and "UNVERIFIED" in hint
+    # Never AppArmor instructions on a host with no AppArmor.
+    assert "install-apparmor-profile" not in hint
+
+
+def test_lsm_hint_picks_the_lsm_actually_in_force(tmp_path, monkeypatch):
+    _selinux_attrs(tmp_path, monkeypatch)
+    assert jail.lsm_hint() == jail.selinux_hint()
+
+    attr = tmp_path / "apparmor_current"
+    attr.write_text("docker-default (enforce)")
+    monkeypatch.setattr(jail, "_APPARMOR_ATTR_PATH", str(attr))
+    monkeypatch.setattr(jail, "_LEGACY_ATTR_PATH", str(tmp_path / "also-nope"))
+    assert jail.lsm_hint() == jail.apparmor_hint()
 
 
 def test_apparmor_hint_names_both_remedies():

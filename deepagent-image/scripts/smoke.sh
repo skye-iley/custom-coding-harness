@@ -14,9 +14,10 @@
 #                               # (default: they go to the container's tmp and vanish).
 #   JAIL_CHECK=1 ./smoke.sh     # REQUIRE the M4 slice H jail gate to pass. By default
 #                               # the gate runs but self-skips on a host that cannot
-#                               # build the jail — either the kernel/runtime refuses
-#                               # nested userns, or the host LSM denies bwrap's mounts;
-#                               # =1 turns that skip into a failure (pin the boundary).
+#                               # build the jail — the kernel/runtime refuses nested
+#                               # userns, the host LSM denies bwrap's mounts, or the
+#                               # kernel refuses its fresh procfs (§13.7); =1 turns
+#                               # that skip into a failure (pin the boundary).
 #   LIVE_MODEL=1 ./smoke.sh     # also run the live-model tier: real prompts to a real
 #                               # model, real replies asserted (tests/test_live_model.py).
 #                               # Default off, so the suite stays hermetic. Needs a
@@ -30,6 +31,12 @@
 #                               # Needed on Ubuntu/Debian Docker, where `docker-default`
 #                               # denies `mount` regardless of seccomp (milestone4.md
 #                               # §11.6). Drops the WHOLE profile, not just that rule.
+#   DEEPAGENTS_JAIL_SYSTEMPATHS=default ./smoke.sh
+#                               # keep Docker's /proc masks for the jail gate. The gate
+#                               # passes them dropped by default (systempaths=unconfined,
+#                               # milestone4.1.md §13.7 fork J5); `default` reproduces the
+#                               # LSM-only control — bwrap must then die at `--proc` with
+#                               # zero AppArmor denials in dmesg.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NETJAIL_DIR="$ROOT/netjail"
@@ -248,17 +255,30 @@ if [[ -n "$APPARMOR_CHOICE" ]]; then
     echo "M4 jail: using AppArmor profile '$APPARMOR_CHOICE' (loaded on the Docker daemon's host)." >&2
   fi
 fi
+# M4.1 fork J5 (§13.7): the third gate. Even with both profiles satisfied the kernel
+# refuses bwrap's fresh `--proc` while Docker's maskedPaths/readonlyPaths cover the
+# container's procfs. Mirror of run-docker: default to dropping them under the jail,
+# and honour DEEPAGENTS_JAIL_SYSTEMPATHS=default — which is how the LSM-only control
+# in §13.1 is reproduced (bwrap must then fail at `--proc` with zero AppArmor denials).
+SYSTEMPATHS_ARGS=()
+if [[ "${DEEPAGENTS_JAIL_SYSTEMPATHS:-unconfined}" == "unconfined" ]]; then
+  SYSTEMPATHS_ARGS=(--security-opt "systempaths=unconfined")
+else
+  echo "M4 jail: keeping Docker's /proc masks (DEEPAGENTS_JAIL_SYSTEMPATHS=${DEEPAGENTS_JAIL_SYSTEMPATHS}) — expect a procfs SKIP on a stock Linux host." >&2
+fi
 docker run --rm -i ${NET_ARGS[@]+"${NET_ARGS[@]}"} ${PROXY_ENV[@]+"${PROXY_ENV[@]}"} \
   --security-opt "seccomp=$SECCOMP_PROFILE" \
   ${APPARMOR_ARGS[@]+"${APPARMOR_ARGS[@]}"} \
+  ${SYSTEMPATHS_ARGS[@]+"${SYSTEMPATHS_ARGS[@]}"} \
   -e DEEPAGENTS_JAIL=1 \
   deepagent-harness python3 - < "$ROOT/scripts/jail-check.py"
 jail_rc=$?
 set -e
 if [[ $jail_rc -eq 77 ]]; then
-  # Environmental, not a regression, for either reason the gate can report: the
-  # kernel/runtime refuses nested userns, or the host LSM denies bwrap's mounts.
-  # Only a hard failure when the caller pinned it (CI).
+  # Environmental, not a regression, for any of the three reasons the gate can
+  # report: the kernel/runtime refuses nested userns, the host LSM denies bwrap's
+  # mounts, or the kernel refuses its fresh procfs (§13.7). Only a hard failure
+  # when the caller pinned it (CI).
   if [[ -n "$JAIL_CHECK" ]]; then
     echo "M4 jail: JAIL_CHECK=1 was set but this host cannot build the jail (see the SKIPPED reason above) — failing." >&2
     exit 1

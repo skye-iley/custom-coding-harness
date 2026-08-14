@@ -1,6 +1,6 @@
 # Milestone 4 — Manual Verification & Leak-Hunting Guide
 
-> Companion to `milestone4.md` (scope/design) and `milestone4_invariants.md` (the 30 checkable
+> Companion to `milestone4.md` (scope/design) and its §19 invariants (the checkable
 > properties). This file is the **operator's playbook**: concrete commands you run by hand to prove
 > the trust boundary actually holds and that no secret leaks through a tool, a commit, or a config
 > mistake.
@@ -667,7 +667,7 @@ docker run --rm --security-opt seccomp=deepagent-image/seccomp/userns.json \
 ---
 
 **Cross-refs:** `milestone4.md` (§10 resolver, §11 enforcement, §11.4 jail, §13 knobs, §14 threat
-model, §15 gotchas), `milestone4_invariants.md` (the numbered properties), `deepagent-image/CLAUDE.md`
+model, §15 gotchas), `milestone4.md` §19 (the numbered properties), `deepagent-image/CLAUDE.md`
 (Workspace visibility / secret masking section), and the code seams: `harness/mask.py`,
 `harness/mask_scan.py`, `harness/pathguard.py`, `harness/doctor.py`, `agent.py`
 (`_WorkspaceShellBackend._resolve_path`), `scripts/run-docker.{ps1,sh}` (mask pre-flight),

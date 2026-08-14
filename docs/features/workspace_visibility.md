@@ -1,6 +1,6 @@
 # Workspace Visibility & Secret Masking — Feature Plan
 
-> **Status:** 🚧 In-progress (v1) — implemented under `docs/milestones/in-progress/milestone4.md`
+> **Status:** 🚧 In-progress (v1) — implemented under `docs/milestones/complete/milestone4.md`
 > (Real Trust Boundary), code on `feat/milestone_4`, slices **A–H landed**, not yet merged. The policy
 > (`.agentignore` gitignore-parity, 3-tier policy, designated-secret floor), docker mount-mask,
 > path-guard middleware, `permission_denied` interrupt wiring, `harness doctor`, CI pipeline, and

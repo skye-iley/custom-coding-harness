@@ -19,10 +19,32 @@ bwrap: No permissions to create new namespace, likely because the kernel does
        not allow non-privileged user namespaces.
 ```
 
-which is the hard gate `docs/milestones/in-progress/milestone4.md` §17/PR6 puts
+which is the hard gate `docs/milestones/complete/milestone4.md` §17/PR6 puts
 in front of slice H (the bwrap fs jail).
 
-## ⚠️ This profile is only ONE of the two gates
+## ⚠️ This profile is only ONE of the THREE gates
+
+**seccomp, the host's LSM, and the kernel's own procfs restriction are
+independent, and bwrap must pass all three.** They fail at different points with
+different errnos, and `jail.classify_bwrap_failure` is what tells them apart —
+misreading one as another sends an operator to re-check something already
+correct, which is the dead end each of these cost a measurement round to
+diagnose:
+
+| Gate | Where it fails | Fingerprint | Fix |
+|---|---|---|---|
+| **seccomp** (this profile) | at `unshare` | `No permissions to create new namespace` | `--security-opt seccomp=userns.json` |
+| **LSM** (AppArmor) | first mount, EACCES | `Failed to make / slave: Permission denied` | slice J's `deepagent-userns` profile |
+| **kernel procfs** | at `--proc`, EPERM, *no denial logged* | `Can't mount proc on /newroot/proc: Operation not permitted` | `--security-opt systempaths=unconfined` |
+
+The third one is not an LSM matter at all: `mount_too_revealing()` refuses a
+fresh procfs from a non-initial user namespace while the visible one is covered
+by submounts, which is exactly what Docker's `maskedPaths`/`readonlyPaths` are.
+Both launchers and both smoke scripts pass `systempaths=unconfined` under
+`DEEPAGENTS_JAIL=1`; `DEEPAGENTS_JAIL_SYSTEMPATHS=default` keeps the masks and is
+the LSM-only control. See `docs/milestones/complete/milestone4.1.md` §13.7.
+
+### The LSM gate in detail
 
 **seccomp and the host's LSM are independent, and an operation must pass both.**
 Fixing the syscall filter does nothing about AppArmor. On Ubuntu/Debian — most
@@ -34,22 +56,26 @@ bwrap still fails:
 bwrap: Failed to make / slave: Permission denied
 ```
 
-Note where that lands: **past** `unshare`, at the first mount. That is the
-fingerprint distinguishing the two failures, and `jail.classify_bwrap_failure`
-uses it so nothing misreports an AppArmor denial as a seccomp problem. AppArmor
+Note where that lands: **past** `unshare`, at the first mount, with **EACCES**.
+That is what distinguishes it from a seccomp refusal (earlier, at `unshare`) and
+from the procfs gate (also a mount, but EPERM with no denial logged) — AppArmor
 denies by profile rather than by uid or capability, and confinement is **not**
 shed by entering a user namespace — so no userns work, and not even a setuid
 `bwrap`, escapes it from inside.
 
-**That second gate is slice J, and it is built:** `../apparmor/deepagent-userns`
-is `docker-default` with only its `deny mount,` narrowed, loaded into the host
-kernel by `../scripts/install-apparmor-profile.sh` and selected automatically by
-`run-docker`. See `../apparmor/README.md` — including its caveat that the rule
-set has not yet been exercised on a real AppArmor host. The blunt fallback,
-`DEEPAGENTS_JAIL_APPARMOR=unconfined`, still works everywhere at the cost of
-dropping the **whole** profile rather than one rule. Docker Desktop/WSL2 needs
-nothing (no LSM policy is loaded) — which is exactly why this gap survived to CI:
-every slice-H measurement was taken there.
+**That second gate is slice J, and it is built and measured:**
+`../apparmor/deepagent-userns` is `docker-default` with only its `deny mount,`
+narrowed, loaded into the host kernel by `../scripts/install-apparmor-profile.sh`
+and selected automatically by `run-docker`. The rule set is **measured on a live
+AppArmor host** (2026-08-14, Ubuntu VM, kernel `7.0.0-29-generic`, Docker 29.7.2),
+not derived — see `../apparmor/README.md` for the per-rule justification and
+`docs/milestones/complete/milestone4.1.md` §13.1a/§13.1b for the round-by-round
+denial logs. CI gates on it: the `smoke` job loads the profile into the runner
+kernel and runs `JAIL_CHECK=1`, so a jail that stops starting fails the build.
+The blunt fallback, `DEEPAGENTS_JAIL_APPARMOR=unconfined`, still works everywhere
+at the cost of dropping the **whole** profile rather than one rule. Docker
+Desktop/WSL2 needs nothing (no LSM policy is loaded) — which is exactly why this
+gap survived to CI: every slice-H measurement was taken there.
 
 ## Why not just `seccomp=unconfined`
 

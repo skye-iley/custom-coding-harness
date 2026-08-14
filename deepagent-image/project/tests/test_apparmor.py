@@ -188,13 +188,21 @@ def test_widened_mount_rule_set_is_rejected():
 
 
 def test_missing_mount_rule_is_rejected():
-    """Dropping one breaks the jail; catch it here rather than at bwrap exec."""
-    body = apparmor.split_header(_good_profile())[1].replace("  mount fstype=proc -> /proc/,\n", "")
+    """Dropping one breaks the jail; catch it here rather than at bwrap exec.
+
+    The victim is read off `RELAXED_MOUNT_RULES` rather than spelled out. That set
+    is *measured*, and it has moved twice — four corrections plus an addition in the
+    first measurement, then fork J6 deleting the `fstype=proc` rule this case used
+    to hardcode. A fixture naming one rule stops testing the property and starts
+    failing on the rule set changing, which is the thing it is supposed to allow.
+    """
+    victim = apparmor.RELAXED_MOUNT_RULES[0]
+    body = apparmor.split_header(_good_profile())[1].replace(f"  {victim}\n", "")
     text = apparmor._with_header(body, "test")
 
     problems = apparmor.verify_profile(text)
 
-    assert any("drifted" in p and "proc" in p for p in problems)
+    assert any("drifted" in p and victim in p for p in problems)
 
 
 def test_removing_an_upstream_deny_rule_is_rejected():

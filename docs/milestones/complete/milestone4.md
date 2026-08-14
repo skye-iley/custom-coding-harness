@@ -1,12 +1,19 @@
 # Milestone 4 — Real Trust Boundary (Workspace Visibility + Path Guard)
 
-> **Status:** 🚧 In-progress (v1 — slices A–H built, on `feat/milestone_4`, not yet merged; H opt-in).
-> **Slice H (bwrap fs-tool jail) is core v1 scope, not a stretch, and is now built:**
-> `DEEPAGENTS_JAIL=1` gates a userns jail verified under a vendored narrow seccomp profile, routed by
-> **re-exec of the harness process** rather than per-tool wrappers (§11.4). Deferred v2 (overlayfs
-> view) stays out of scope regardless. See PR1–PR6 for the slices shipped. The checkable boundary
-> invariants live separately in
-> `milestone4_invariants.md` (folds in here on completion — see the lifecycle in `docs/README.md`).
+> **Status:** ✅ **Complete** — slices A–J all built and merged to `main`.
+> **Slice H (bwrap fs-tool jail) is core v1 scope, not a stretch:** `DEEPAGENTS_JAIL=1` gates a
+> userns jail routed by **re-exec of the harness process** rather than per-tool wrappers (§11.4).
+> It stays **opt-in by design** (§16 fork 7) — enabling it needs a narrow seccomp relaxation on the
+> outer container, an operator's trade, not a silent default. **Slice J (LSM parity) shipped as
+> `milestone4.1.md`** and closed all three kernel gates: the vendored `deepagent-userns` AppArmor
+> profile (rule set **measured** on a live host, not derived), plus `--security-opt
+> systempaths=unconfined` for the kernel's procfs restriction that neither profile can see. CI pins
+> `JAIL_CHECK=1` on an AppArmor-confined runner, so the jail starting is red/green. Deferred v2
+> (overlayfs view, slice I) stays out of scope; invariant 16 (approvable exception) stays deferred
+> with it. **Untested host classes are named rather than claimed** — SELinux and rootless
+> Docker/Podman: `docs/features/selinux_compatibility.md`.
+> The checkable boundary invariants are folded in below as **§19** (the standalone
+> `milestone4_invariants.md` is gone — see the lifecycle in `docs/README.md`).
 > Promotes the
 > `design_doc.md` **§2 Workspace Visibility & Secret Masking** + **Path Guard** designs, backed by the
 > **§10 security verification suite**, into a built, tested slice — and pulls in the two `design_doc.md`
@@ -41,7 +48,7 @@ later layers slot in without reworking policy (feature plan §7).
 | **G** §10 security verification suite | tests that *prove* the boundary holds (floor never leaks, no traversal escape) | §10 | v1 (support) | ships in PR1–3 |
 | **H** bwrap fs-tool jail | allow-list boundary; route **all** fs tools through the jail; narrow seccomp profile; **carries slice D's deferred approve branch** | feature plan §4.2 · detail §11.4 | **v1 — core, built** (opt-in, `DEEPAGENTS_JAIL=1`) | PR6 |
 | **I** overlayfs view | tool-agnostic true allow-list + upper-diff write-back | feature plan §4.3 | deferred v2 | — |
-| **J** AppArmor profile | vendored `docker-default` + narrowed `mount` rules, so the jail runs on AppArmor-confined hosts without dropping the whole LSM | detail §11.6 · §16 fork 10 · **full spec `milestone4.1.md`** | **built, pending live-host measurement** (see `milestone4.1.md` §13.1) | PR7 |
+| **J** AppArmor profile | vendored `docker-default` + narrowed `mount` rules, so the jail runs on AppArmor-confined hosts without dropping the whole LSM | detail §11.6 · §16 fork 10 · **full spec `milestone4.1.md`** | **built + measured** 2026-08-14 (rule set 7→8, four corrections). LSM gate closed; jail still blocked on a **third**, non-LSM gate — `milestone4.1.md` §13.7 / fork J5 | PR7 |
 
 ---
 
@@ -97,11 +104,17 @@ in **CI** that proves the boundary can't silently regress.
   force. On an AppArmor-confined host — Ubuntu/Debian Docker, and GitHub-hosted runners — the same
   gate **fails**, because `docker-default` denies `mount` independently of seccomp (§11.6). Closing
   that is slice J, which is now **built** (`milestone4.1.md`): a vendored `docker-default` with only
-  its `mount` rule narrowed, selected by `run-docker` automatically on an AppArmor host. **But J's
-  own live-host measurement has not been taken** — the dev machine loads no LSM — so today the
-  honest statement of reach is: *verified* on no-LSM hosts; *built but unmeasured* on AppArmor
-  hosts; plus operators who opt into `DEEPAGENTS_JAIL_APPARMOR=unconfined`. No doc may state it more
-  broadly until an AppArmor-host run is recorded, with the LSM named.
+  its `mount` rule narrowed, selected by `run-docker` automatically on an AppArmor host. **J's
+  live-host measurement has since been taken** (2026-08-14, Ubuntu VM, kernel `7.0.0-29-generic`,
+  Docker 29.7.2) and it moved the rule set twice — the derived seven had four wrong and one missing,
+  and a later round deleted one more as inert. It also surfaced a **third** gate neither profile can
+  see: the kernel's `mount_too_revealing()` refusing bwrap's fresh `--proc` while Docker's
+  `maskedPaths` cover the container's procfs, closed by `--security-opt systempaths=unconfined`
+  (fork J5). So today's honest statement of reach is: *measured* on no-LSM hosts **and** on
+  AppArmor-confined Linux, pinned in CI with `JAIL_CHECK=1`; **untested in both directions** on
+  SELinux and rootless Docker/Podman, which the run-time surface says out loud rather than guessing
+  (invariant 44, `docs/features/selinux_compatibility.md`). No doc may state it more broadly until
+  such a run is recorded, with the LSM named.
 
 ## 2. Why this milestone now
 
@@ -625,6 +638,21 @@ The seam:
 > boundary measurement must name the LSM it ran under** — that omission is what let this ship as
 > "verified" when it was verified on one host class.
 >
+> **Update 2026-08-14 — reproduced on an AppArmor host.** Ubuntu VM, kernel `7.0.0-29-generic`,
+> Docker 29.7.2, `docker-default` in force. Row 1 failed exactly as predicted above; with slice J's
+> `deepagent-userns` loaded, **all six rows reproduce** (`milestone4.1.md` §13.1a). Two things the
+> measurement changed, both of which belong here and not only in M4.1:
+>
+> 1. **Slice J's mount rule set was wrong** — four of seven rules, plus one missing. Derived rule
+>    sets are hypotheses. The corrected set is 8 rules, each backed by a denial.
+> 2. **There is a THIRD gate, and this doc's "two independent gates" framing is incomplete.** After
+>    seccomp and AppArmor both allow, the kernel's `mount_too_revealing()` check still refuses
+>    bwrap's fresh `--proc` — `EPERM`, no LSM denial — because Docker's `maskedPaths`/`readonlyPaths`
+>    cover the container's procfs. Reproducing rows 2–6 above required
+>    `--security-opt systempaths=unconfined`. Fork J5 in `milestone4.1.md` decides the fix; until it
+>    lands, `DEEPAGENTS_JAIL=1` on a stock Linux host still does not start. The lesson generalizes
+>    the one already written above: a gate you have not run against is a gate you have not counted.
+>
 > Now automated: `scripts/smoke.{sh,ps1}` `JAIL_CHECK=1` / `-JailCheck`. **Caveat for anyone
 > re-running this by hand:** stage the fixture workspace/state **outside `/tmp`** — `bwrap_args`
 > emits `--tmpfs /tmp` *after* the binds, so a fixture under `/tmp` is overmounted and every result
@@ -762,16 +790,18 @@ denylist entry ever collides with real work), `1`/`block` forces it on with the 
 > the live-host measurement that gates the whole thing, and invariants 39–41. Build from 4.1; this
 > section stays as the rationale.
 
-> **Status: BUILT (`milestone4.1.md`), pending one live-host measurement.** The profile
-> (`apparmor/deepagent-userns`), its generator (`harness/apparmor.py`, `apparmor-sync`), the host
-> install script, the launcher preflight, and the `doctor` branch have all landed on
-> `feat/milestone_4`. What has **not** happened is running it on an actual AppArmor-confined host:
-> the dev machine is Docker Desktop/WSL2, which loads no LSM policy and so structurally cannot
-> verify this slice — the same blind spot that produced the gap in the first place. So the mount
-> rule set below is **derived from bwrap's syscall sequence, not confirmed against a denial log**,
-> and `DEEPAGENTS_JAIL=1` on Ubuntu/Debian should be treated as untested until that run happens
-> (`milestone4.1.md` §13.1, CI's `apparmor-load-probe` job). The `apparmor=unconfined` escape hatch
-> (§13, `DEEPAGENTS_JAIL_APPARMOR`) remains available and remains the wider trade.
+> **Status: BUILT and MEASURED (`milestone4.1.md`).** The profile (`apparmor/deepagent-userns`), its
+> generator (`harness/apparmor.py`, `apparmor-sync`), the host install script, the launcher
+> preflight, and the `doctor` branch all landed on `feat/milestone_4`, and the live-host run this
+> status line used to be waiting on happened on 2026-08-14 (Ubuntu VM, kernel `7.0.0-29-generic`,
+> Docker 29.7.2). The mount rule set below is therefore **measured against a denial log, not derived
+> from bwrap's syscall sequence** — the derived set had four rules wrong and one missing, and a
+> second round then deleted one more as inert (`milestone4.1.md` §13.1a/§13.1b). `DEEPAGENTS_JAIL=1`
+> starts end-to-end on a stock AppArmor host with no extra `docker run` flags, and CI gates on it:
+> the `smoke` job loads the profile and pins `JAIL_CHECK=1` (§10.1 there). Two host classes stay
+> untested and say so at run time: SELinux (fork J4) and rootless Docker/Podman. The
+> `apparmor=unconfined` escape hatch (§13, `DEEPAGENTS_JAIL_APPARMOR`) remains available and remains
+> the wider trade.
 
 **The problem, precisely.** seccomp and AppArmor are **independent gates; an operation must pass
 both.** H's vendored `seccomp/userns.json` fixes the syscall filter. It has no effect on the LSM. On
@@ -821,14 +851,19 @@ the relaxation stays *narrow and diffable against upstream*.
   single `deny mount,` line with the narrowest rule set bwrap actually needs:
 
   ```
-  mount options=(rw, rslave) -> /,        # the MS_SLAVE remount that fails today
-  mount fstype=tmpfs,                     # --tmpfs /tmp, and dir-type mask overmounts
-  mount options=(rw, bind),               # --ro-bind / --bind
-  mount options=(rw, rbind),
-  mount options=(ro, remount, bind),      # the ro half of --ro-bind
-  mount fstype=proc -> /proc/,            # --proc /proc
+  mount options=(rw, silent, rslave) -> /,          # the MS_SLAVE remount that fails today
+  mount fstype=tmpfs,                               # --tmpfs /tmp, and dir-type mask overmounts
+  mount options=(rw, bind),                         # --bind
+  mount options=(rw, rbind),                        # the recursive ro system binds
+  mount options in (ro, silent, remount, bind, …),  # the ro half of --ro-bind
   pivot_root,
+  mount options=(rw, silent, rprivate) -> /oldroot/,# pre-detach, after all setup ops
   ```
+
+  **This block is the MEASURED set** (`milestone4.1.md` §13.1a/§13.1b), not the one this section
+  originally sketched: four rules were wrong, `/oldroot/` was missing, and a `mount fstype=proc ->
+  /proc/,` rule that looked obviously necessary turned out to authorize nothing and was deleted.
+  `harness/apparmor.py:RELAXED_MOUNT_RULES` is authoritative; do not paraphrase from here.
 
   Every other rule in the template is carried through byte-for-byte, and `verify_profile` asserts
   that: the profile must be upstream's template plus **exactly** this mount set, so a swap to a
@@ -1091,7 +1126,7 @@ authoritative config (raise-only, no `mask_remove`) and takes effect **next run*
    earlier revision of this fork that pinned the per-call worker**; invariants written against that
    design (a jailed worker that explicitly refuses a floor path; a `build_agent` method-set assertion;
    a jailed-vs-unjailed differential test) do not describe the shipped code and have been rewritten in
-   `milestone4_invariants.md`. The one substantive consequence: re-exec does **not** turn a masked read
+   `milestone4.md` §19. The one substantive consequence: re-exec does **not** turn a masked read
    into an explicit denial, so slice D's approve branch stays deferred (§11.4, invariant 16).
 9. **Still open (small):** whether the protection-*reduction* warning (§10 step 6) becomes a **blocking**
    `approve` interrupt under HITL, or stays a loud non-blocking stderr warning in all modes. Recommend
@@ -1167,6 +1202,134 @@ Ship the floor first; harden after. Each PR is independently reviewable and leav
 
 Conventions per `deepagent-image/CLAUDE.md` → "Test suite layout": no keys/network/real model calls;
 all writes to `tmp_path`; every floor/guard behaviour ships with a regression test.
+
+---
+
+## 19. Invariants (folded in from `milestone4_invariants.md` on completion)
+
+> The 45 checkable boundary properties that drove M4's tests, including the seven Milestone 4.1
+> added (37–45). Kept as a separate file while M4 was in-progress so they could drive testing
+> without the planning prose around them; folded here on completion per the milestone lifecycle in
+> `docs/README.md`. Where a property and the code disagree, the code is authoritative and the
+> invariant is the bug report.
+
+Milestone 4 = real trust boundary. Core goal: agent cannot read/exfil workspace secrets, cannot escape workspace, and boundary cannot silently regress. Invariants below = properties that MUST hold for that goal. Grouped, each phrased as checkable assertion.
+
+> **Slice H (bwrap fs-tool jail) is core v1 scope, not stretch** (`milestone4.md` §3), and is now
+> **built and opt-in** (`DEEPAGENTS_JAIL=1`). Invariants 5 (3rd/4th leg) and 14 (shell coverage) are
+> satisfied **with the jail on**; with it off (the default), v1's narrower legs still stand — see the
+> per-invariant notes below. Invariant 16 (approvable-exception flow) stays unreachable even with H
+> on: the shipped re-exec design overmounts masked paths empty rather than raising an explicit denial,
+> so the approvable case needs `hide` mode or the overlayfs view (slice I), not H.
+>
+> **Every H invariant below is conditional on the jail actually starting.** Invariants 31–36 were
+> first verified on Docker Desktop/WSL2, which loads no LSM policy — a host class that
+> structurally could not see two of the three gates. **Milestone 4.1 closed all three and measured
+> them on a live AppArmor host** (2026-08-14, Ubuntu VM, kernel `7.0.0-29-generic`, Docker 29.7.2):
+> the vendored `deepagent-userns` profile narrows `docker-default`'s `deny mount,` to a **measured**
+> rule set (invariants 37–41, 44), and `--security-opt systempaths=unconfined` opens the kernel's
+> procfs gate (invariants 42–43). CI now pins `JAIL_CHECK=1` on an AppArmor-confined runner
+> (invariant 45), so `DEEPAGENTS_JAIL=1` starting is a red/green property rather than a claim.
+> **What remains unmeasured is named, not assumed:** SELinux (RHEL/Fedora) and rootless
+> Docker/Podman are untested in **both directions** — invariant 44 is the rule that the run-time
+> surface must say so rather than answer confidently. See `docs/features/selinux_compatibility.md`.
+
+Floor (designated-secret tier — the inviolable core)
+
+1. Floor never readable. Designated-secret floor path reads empty to every process in container (file tools, shell, subprocesses) — not just file backend.
+2. Floor never negatable. No .agentignore !-negation, allow-list entry, or #!mode: allow can expose a floor path. Resolver drops such entries + warns.
+3. Floor never approvable. permission_denied interrupt never offers approve for a floor path. Hard-deny, no offer.
+4. Floor always emitted. Floor mask mounts applied even in allow mode, even with bwrap off, even when the rest of masking is minimized.
+5. Floor redundant. **With slice H on (`DEEPAGENTS_JAIL=1`) a third independent leg is real**: (1) docker mask always emits it, (2) the resolver drops any negation/allow of it, (3) `jail.bwrap_args` never binds a floor path and overmounts every masked entry empty *inside* the namespace — so a floor path is unreadable even if the docker overlay were disabled or misconfigured. **Verified end-to-end with the docker mask switched off entirely**: inside the jail a floor `.env` read 0 bytes against 20 bytes outside (`milestone4.md` §11.4 gate table). **With the jail off (the default), v1's two legs still stand and no more** — see the v1 note below, which remains accurate for that configuration. *(Tested: `test_jail.py` for the argv property; `scripts/smoke.{sh,ps1} JAIL_CHECK=1` for the runtime property.)* **Note:** an earlier revision claimed a 4th leg — "the jailed worker explicitly refuses a floor path" — and cited a `test_fsjail.py`. That belonged to the per-call-worker design that was **not** shipped (`milestone4.md` §16 fork 8); neither the module nor the test exists. Three legs, not four.
+5v1. *(jail off — the default)* **v1: enforced ≥2 ways independently** — docker mask always emits it, and the resolver drops any negation/allow of it. **The 3rd leg (file backend explicitly refuses a floor path) is NOT built in v1** — `agent.py:_resolve_path` only checks for workspace escape (`pathguard.validate_path`), it has no floor/mask awareness; a floor file simply reads empty because the docker overlay changed the real fs. The backend-refusal leg (and bwrap never-binds-it) is **aspirational — lands with slice H**. So in v1 no single layer failure exposes the floor across the two built legs, but the "≥3 independent" redundancy is not yet real. *(Tested: `TestFloorRedundancy` documents the two working legs and marks the 3rd aspirational.)*
+6. Floor unreachable via alias. Symlink whose realpath targets a floor path is itself masked (no re-exposure through a link).
+
+Mask (pattern-default + general tier)
+
+7. Masked reads empty. Any masked path (.env, *.pem, etc.) reads present-but-empty to every process — via real mounted-fs change, not tool-layer filter.
+8. Unmasked byte-identical. A non-masked source file is byte-for-byte unchanged vs. no-mask run.
+9. Frozen at launch. Mask set computed once host-side before docker run. No runtime edit to in-workspace .agentignore, and no refresh_workspace, can unmask the current session.
+10. Mask matches what agent sees. Scan runs against MountWorkspace (ephemeral copy when -Ephemeral), not the real tree.
+
+Path guard (defense-in-depth)
+
+11. commonpath, not startswith. Sibling escape (/workspace-evil vs /workspace) refused. ../ traversal, absolute path, in-workspace symlink-out all refused.
+12. Guard on resolved path. Check runs after virtual-mode de-nesting + super()._resolve_path, so symlink-out is caught.
+13. Legit ops never blocked. Real path under workspace passes (commonpath == base). Guard has zero false positives → stays always-on without breaking removable contract.
+14. Honest scope. Guard covers file tools only. Shell tool bounded by container root + mask, not the guard. Never described as sandboxing the shell. **Slice H closes this gap when on**: `execute` routes through `sandbox-exec`, so shell and file tools share one bind whitelist and the shell can no longer reach the state dir by absolute path (verified: inside the jail `/project` lists only `workspace`). The guard stays in front regardless — the jail is the boundary, the guard remains the cheap defense-in-depth layer, and keeping it means a denial still raises at the seam slice D wired. **With the jail off, this invariant reads exactly as written above.**
+
+permission_denied interrupt (completes M3 S4)
+
+> **v1: BUILT, audit-only (§11.3).** `cli._should_audit_path_denials` wires `hitl.make_path_denied_handler`
+> as `on_path_denied` when HITL is on and the `permission_denied` system interrupt is enabled. Every
+> `PathGuardDenied` v1 can produce is a true workspace escape (pathguard has no floor/mask awareness) —
+> never approvable by design (invariant 16) — so the handler does not raise a `GraphInterrupt` or offer
+> a choice; it audits directly (`audit.record_interrupt`, `resolved_by="system"`) and always denies.
+> The denial is surfaced on two channels with different gating — an always-on operator stderr line
+> (17b) and a HITL-gated structured record written **outside the workspace** so the agent cannot
+> truncate it (17a). Invariants 15, 17, 17a, 17b, 18 are built and tested. Invariant 16 remains
+> structurally-present-but-unreachable:
+> the "approve an in-bounds masked exception" flow needs a denial type that doesn't exist until the
+> bwrap file-tool jail (H) makes a masked-read denial explicit.
+
+15. Fail-closed. Headless / non-TTY / no-default → deny (default=False). Never hang, never default-allow. **Built.** No interrupt suspends the graph for this denial type (nothing to decide), so there is nothing to hang on; the pathguard itself is always fail-closed — a denial raises `PathGuardDenied` — and the audit-only handler never returns `True`. *(`test_hitl.py::test_path_denied_handler_always_denies`.)*
+16. *(still deferred, including under slice H)* Approvable scope bounded. Operator may approve one-off only for in-bounds, non-floor path. Escape (realpath outside workspace) never approvable. v1 had no approvable denial at all — a masked file is present-but-empty at the mount layer, never an explicit denial — so `hitl.make_path_denied_handler` has no code path returning `True`. **Slice H does not change this.** The jail was expected to turn a masked read into an explicit denial, which is true of a per-call jailed worker but *not* of the shipped re-exec design: masked paths are overmounted empty in the namespace, so a masked read still succeeds and returns empty. Every `PathGuardDenied` remains a true workspace escape, still never approvable. The approvable case needs `hide` mode (deferred v2) or the overlayfs view (slice I) — something that makes a masked read explicitly *fail*.
+17. Audited without leaking. Every denial recorded via audit.record_interrupt — path/tier/op in meta, never file contents. **Built.** `record_interrupt` now persists `meta` (previously silently dropped for every interrupt kind, not just this one — fixed alongside D) and scrubs it **recursively**, so a nested dict/list is not a way around the §10 backstop; `op`/`reason`/`audit_only` are recorded, `tier` is omitted (pathguard has no tier concept — every v1 denial is escape-type, not floor-tiered). *(`test_audit.py::test_meta_is_persisted`, `::test_meta_scrub_reaches_nested_values`, `test_hitl.py::test_path_denied_handler_audits_the_denial`, `::test_path_denied_record_is_marked_audit_only`.)*
+17a. **Denial record is agent-unreachable.** The record of an escape *attempt* never lands where the escaping agent can truncate it: it goes to `<state-dir>/denials.jsonl` (`audit.denials_path`), not the in-workspace `.agent_telemetry/interrupts.jsonl`, which is in-bounds for the path guard and freely writable by the agent's own file tools. This is invariant 20 applied to the audit trail. **Built**, with **one standing limit**: it closes the **file**-tool tamper path only — the shell tool is container-root-bounded rather than guard-covered (invariant 14), so it can still reach the state dir by absolute path until slice H. The other limit is now **closed**: the sink resolves through `archive.state_dir`, whose `<workspace>/.deepagents` fallback (when `DEEPAGENTS_STATE_DIR` is unset) would put the record back in the agent's reach. That fallback is already unreachable in practice for this sink — HITL-on implies `run-docker`, since the gitignored, un-`COPY`ed config file only reaches `/project` by bind-mount, and `run-docker` always sets the var — but it rested on an unchecked launcher convention until invariant 20a. *(`test_hitl.py::test_path_denied_record_lands_outside_the_workspace`.)*
+17b. **A denial is never silent to the operator.** `agent._resolve_path` prints `[harness] path-guard DENIED — …` to stderr on every refusal, **ungated by HITL**. The structured record (17/17a) is HITL-gated, but the default posture is HITL-off, where the only other trace is the tool-error string the *model* reads back and can route around. stdout stays clean (headless JSON contract). An audit-write failure is likewise reported, not swallowed. **Built.** *(`test_agent.py::test_backend_reports_denial_on_stderr`, `::test_backend_stays_quiet_when_a_handler_approves`, `test_hitl.py::test_path_denied_handler_never_raises_on_audit_failure`.)*
+18. Off-HITL = plain refusal. No .harness-config.yaml → denial is a normal refused tool result (PathGuardDenied), byte-for-byte a blocked call in M3. **Built.** The *refusal* is identical on-HITL vs. off-HITL; HITL adds only the structured record. The always-on stderr line (17b) means a denial is not byte-for-byte *silent* vs. M3 — deliberate, and scoped to an event M3 could not produce at all (the guard is M4-new, zero false positives per invariant 13). *(`test_agent.py::test_backend_denies_escape_without_a_handler` — asserts the backend's actual behaviour with `on_path_denied=None`; `test_cli.py::test_should_audit_path_denials_off_when_hitl_off` covers only the wiring predicate.)*
+
+git-pr (secret-handling hazard)
+
+19. Masked never committed. git-pr staging excludes the resolved mask set. A masked-empty .env is never staged → origin's real secret file untouched. (The one hazard the earlier draft missed.)
+
+State isolation
+
+20. Authoritative config agent-unreachable. <state>/agentignore + floor + snapshot live in state dir, outside the workspace mount. Agent file/shell tools (rooted at workspace) cannot read or edit them.
+20a. **"Outside the workspace" is asserted, not assumed.** Invariant 20 (and 17a) hold only if the state dir actually resolves outside the workspace — but `archive.state_dir` falls back to `<workspace>/.deepagents` whenever `DEEPAGENTS_STATE_DIR` is unset, which in-container is the whole isolation silently gone. **Built:** `doctor.state_dir_inside_workspace` (realpath + `commonpath`, so `<ws>-state` reads as the sibling it is) → **error** when `DEEPAGENTS_IN_CONTAINER=1`, turning a launcher convention into a CI-checkable property. Off-container the same layout is the documented bare-host default with no boundary to protect → **info**, so doctor does not fail every legitimate host run. *(`test_doctor.py::test_in_container_state_dir_inside_workspace_is_an_error`, `::test_bare_host_state_dir_inside_workspace_is_not_an_error`, `::test_state_dir_sibling_is_not_inside`.)*
+21. mask_add raise-only. Agent tool can only raise protection (next run), writes state-dir config. No mask_remove. Cannot unmask current session.
+
+Regression / config integrity
+
+22. Weakened floor fails CI — **partial in v1.** A floor **negation/allow** (a `!`/allow entry targeting a floor path) → doctor **error** → non-zero → CI red (built + tested: `test_doctor_detects_floor_negation`). A floor **removal** (the `#!floor:` block deleted entirely) → doctor **warning** (visible in the summary) but **rc 0 — does NOT fail CI**: doctor cannot know a floor "should" be present when the block is gone, and a legitimately floor-less workspace must still pass. So negation-weakening is caught; deletion-weakening is only surfaced, not blocked. A hard "floor is required → error" gate belongs in a seeded security regression test, not doctor semantics (tracked TODO in `test_doctor_warns_missing_floor`).
+23. doctor reuses runtime resolver. doctor validates via the real mask.resolve — validation cannot drift from enforcement.
+24. Protection reduction is loud. A path masked last launch but absent now → loud warning (snapshot diff). Never silent.
+25. CI keyless. Every tier runs with no provider keys. Security suite runs on every push/PR (host + image tiers).
+
+Contract / structural
+
+26. Removable seam. DEEPAGENTS_MASK=0 + no .harness-config.yaml ⇒ harness byte-for-byte M3 (scan, mounts, floor, snapshot all off).
+27. Two-stack. Resolver/scanner/doctor run in harness venv, stdlib only, no pip dep (pathspec re-implemented). Never touch workspace conda env.
+28. Acyclic imports. mask.py imports no harness sibling. permission_denied originates from guard/backend seam (may import interrupt), never from cost.py.
+29. Script parity. .ps1 ↔ .sh scan-parse + mask-emit identical, enforced by check-parity in CI.
+30. Every guard behaviour has a regression test. Each floor/guard property ships with a test that fails on buggy code, passes on fix.
+
+Jail (slice H — opt-in, `DEEPAGENTS_JAIL=1`)
+
+31. Seccomp relaxation stays narrow. The vendored profile is Docker's default with **exactly** `clone`, `unshare`, `mount`, `umount2`, `pivot_root` relaxed. `defaultAction` remains `SCMP_ACT_ERRNO`; a swap to `seccomp=unconfined`, or a widened relaxation set, fails `seccomp.verify_profile` → `seccomp-sync --check` → CI. Observable at runtime: under the profile `bpf`/`keyctl`/`perf_event_open` return EPERM (filtered); under unconfined they reach the kernel (EINVAL/EFAULT). *(`test_seccomp.py`.)*
+32. Jail fails closed. If the jail cannot be built (bwrap missing, userns refused, worker non-zero exit) the op is **refused** — never a silent fallback to in-process IO, which would downgrade the boundary invisibly mid-session. *(`test_agent.py` jail-unavailable case.)*
+33. All fs tools route through the jail — **structurally, not by assertion.** Under the shipped re-exec design (`milestone4.md` §11.4) the *harness process itself* is inside the namespace, so every tool it hosts — deepagents file tools, shell, any future MCP fs tool — is inside it too. A newly added fs tool cannot reopen the bypass because there is no bypass to reopen. This is strictly stronger than the construction-time method-set check an earlier revision specified (that check belonged to the per-call-worker design, §16 fork 8, and was never built — `agent.py` carries only the narrower `_resolve_path` upstream-API guard, which stays). *(Verified at runtime: `scripts/smoke.{sh,ps1} JAIL_CHECK=1` reads a masked path as empty and `/project` as read-only from a process the harness did not special-case.)*
+34. Jailed semantics match unjailed. **Free under re-exec** — no client-side reimplementation exists to drift, because the *same upstream method bodies* execute, merely inside a narrower mount namespace. The differential test an earlier revision required was the price of the per-call worker's stdlib-only reimplementation (§16 fork 8); that design was not shipped, so the test is moot rather than missing. What remains checkable is that the namespace does not corrupt ordinary IO: an unmasked file reads byte-identical inside the jail and the workspace stays writable. *(`scripts/smoke.{sh,ps1} JAIL_CHECK=1`; `test_jail.py` for the argv construction.)*
+35. Jail is opt-in and removable. `DEEPAGENTS_JAIL` defaults to `0`; off, no seccomp profile is passed, no bwrap is spawned, and the harness behaves exactly as slices A–G. Enabling it is a deliberate operator trade — the relaxation exposes kernel user-namespace surface (`seccomp/README.md`).
+36. **The seccomp relaxation is not left uncompensated.** The jail's profile re-permits five namespace syscalls for the **whole container** (a `docker run` flag cannot be scoped to one process), so the agent's shell gets them too. `nsguard` denylists the common routes to them at the shell seam: denied binaries in command position (basename-matched, wrapper- and segment-aware, so `/usr/bin/unshare`, `sudo mount`, `timeout 5 unshare`, and `ls && unshare` all trip) plus high-signal tokens for the interpreter one-liner route (`CLONE_NEW*`, `unshare(`, `setns(`, raw `syscall(272|155|308)`). A hit is refused, printed to stderr **ungated by HITL**, and recorded to `<state-dir>/denials.jsonl` — **match and reason only, never the command string**, which can carry workspace content. Default tracks `DEEPAGENTS_JAIL`, so with the jail off the shell is byte-for-byte M3 and the removable contract (invariant 26) is untouched. **Explicitly a tripwire, not containment** — a string denylist is phrasing-blind (M3's `review_triggers` caveat: a denied `rm -rf` returned as `rmdir`), so anything compiled, encoded, or indirected passes. It must never be described as sandboxing; its value is that a casual escape attempt leaves *evidence* rather than silence. *(`test_nsguard.py` for the matcher incl. the false-positive set; `test_agent.py` for the backend seam, jail-off inertness, and warn mode; `test_hitl.py` for the out-of-workspace record and no-command-string rule.)*
+LSM parity + the third gate (slice J / Milestone 4.1 — **built and measured**, `milestone4.md` §11.6, `milestone4.1.md`)
+
+37. **A jail that cannot start is diagnosed correctly, never silently mis-blamed.** bwrap failing after `unshare` succeeded (`Failed to make / slave: Permission denied`) is an **LSM** denial and must be reported as one, naming AppArmor and the two remedies (load slice J's profile, or `DEEPAGENTS_JAIL_APPARMOR=unconfined`). A failure at `unshare` itself (`No permissions to create new namespace`) is a **seccomp/userns** denial and keeps the existing message. Misreporting the first as the second sends an operator to re-check a seccomp profile that is already correct — the exact dead end this milestone's own CI hit. Applies to `jail.preflight`, `doctor`, and the `scripts/jail-check.py` gate alike. *(`test_jail.py::classify_bwrap_failure`, `test_doctor.py` AppArmor cases.)*
+38. **Built.** **The AppArmor relaxation stays narrow — invariant 31's LSM twin.** The vendored profile is moby's `docker-default` template with **exactly** the `mount` rules bwrap needs — **as measured on a live host, not as derived**: `rslave` on `/` (with `silent`), `tmpfs`, `bind`/`rbind`, the ro-remount as a subset (`in`) match, `pivot_root`, and `rprivate` on `/oldroot/` — replacing its single `deny mount,`. `RELAXED_MOUNT_RULES` is authoritative; a `mount fstype=proc -> /proc/,` rule that looked obviously required was deleted by fork J6 after re-measurement showed it authorized nothing, so a rule's plausibility is not evidence for it. every other rule carries through byte-for-byte. A permissive `mount,` catch-all, a widened rule set, or a swap to `apparmor=unconfined` as the *default* fails `apparmor.verify_profile` → `apparmor-sync --check` → CI. `apparmor=unconfined` remains reachable only as an explicitly-named operator opt-in that the launcher announces (`DEEPAGENTS_JAIL_APPARMOR`), because it drops the whole profile rather than one rule — a categorically wider trade than §16 fork 7 pinned, and one the operator must make knowingly. *(`test_apparmor.py` — 23 cases, incl. `test_committed_profile_is_narrow` against the shipped artifact and `test_committed_baseline_is_reproducible_from_the_pinned_template`, which stops a weakened diff base from laundering a widened profile; `test_doctor.py::test_doctor_errors_when_the_vendored_apparmor_profile_is_widened` for the pre-flight path.)*
+
+39. **The launcher never starts the jail with the wrong LSM stance.** With `DEEPAGENTS_JAIL=1`, `run-docker` asks the **daemon** what confines a container, and only then whether it will accept `deepagent-userns`. No LSM in force → pass nothing. LSM in force + profile loaded → select it. LSM in force + profile absent → **abort before `docker run`**, naming the install command. It never falls back to `apparmor=unconfined` on its own: that is a categorically wider trade (§16 fork 7/10) only an operator may make. **The probe order is load-bearing, not cosmetic** — a daemon with no AppArmor support *accepts* `--security-opt apparmor=<anything>` and ignores it (measured on Docker Desktop/WSL2), so probing the profile first would "succeed" against a profile loaded nowhere and make the launcher announce a boundary that does not exist. *(Both paths exercised against the local daemon; `check-parity` markers keep `.ps1`/`.sh` in step.)*
+
+40. **Complain mode is not a pass.** A `deepagent-userns` profile loaded in complain mode logs violations and **allows** them, so bwrap runs and the LSM enforces nothing — the failure that looks most like success. `doctor` reports it as an **error**, and `jail.apparmor_confinement_detail` exposes the mode (and `parent//child` sub-profiles) so the check can tell it apart from a real load. *(`test_doctor.py::test_doctor_errors_when_the_narrowed_profile_is_in_complain_mode`, `test_jail.py` detail cases.)*
+
+41. **The vendored profile is reproducible from upstream, and hand-edits are detected.** `apparmor-sync` regenerates both artifacts from moby `MOBY_TAG`'s template plus exactly `RELAXED_MOUNT_RULES`; the profile carries a `holder-profile-sha256` over its body, and `verify_profile` recomputes it. "Do not hand-edit" is enforced rather than requested. Corollary the build surfaced: the **shell** must not reimplement that hash — the first attempt disagreed with the generator over whether AppArmor's `#include` line is a comment, and a stale-load diagnostic that contradicts the tool that wrote the file is worse than none. *(`test_apparmor.py::test_hand_edit_breaks_the_recorded_hash`, `::test_committed_baseline_is_reproducible_from_the_pinned_template`.)*
+
+42. **A failure names the gate that actually fired, and there are three of them.** `jail.classify_bwrap_failure` separates `userns` (seccomp refused the `unshare`), `lsm` (AppArmor denied the first mount) and **`procfs`** (both profiles allowed and the kernel refused bwrap's *fresh* `--proc`: `mount_too_revealing()` bars a new procfs from a non-initial user namespace while the visible one is covered by submounts, which is exactly what Docker's `maskedPaths`/`readonlyPaths` are). The last two are told apart by **errno, not phase** — EACCES "Permission denied" vs. EPERM "Operation not permitted", with no AppArmor denial logged — because that is the only signal there is. Reporting a `procfs` failure as `lsm` or as `unknown` sends the operator to re-check two profiles that are both already correct, which is invariant 37's dead end one layer deeper (`milestone4.1.md` §13.7). Applies to `jail.preflight`, `doctor`, and `scripts/jail-check.py` alike. *(`test_jail.py` procfs cases; `test_doctor.py` procfs cases.)*
+
+43. **The launcher opens the third gate, and says what it gave up.** With `DEEPAGENTS_JAIL=1`, `run-docker` and `smoke` pass `--security-opt systempaths=unconfined` from the same block that passes the seccomp and AppArmor flags, and announce it; `DEEPAGENTS_JAIL_SYSTEMPATHS=default` keeps Docker's `/proc` masks, which is the **LSM-only control** and needs no script edit. This is *not* a repeat of the trades §16 fork 7 and `apparmor/README.md` rejected: those would have dropped mechanisms protecting the jailed process, whereas inside the jail `/proc` is bwrap's own fresh procfs which never carried these masks, and the dangerous targets (`/proc/kcore`, `/proc/sysrq-trigger`) are checked against capabilities in the **initial** user namespace that no container process holds. The residual — the window between container start and the startup re-exec, plus anything running outside the jail — is **narrow but not zero** and must be stated that way, never rounded down. *(`check-parity` markers in both directions; launcher review.)*
+
+44. **An untested host class says so; it never gets a confident wrong answer.** SELinux (RHEL/Fedora/CentOS) is out of scope for slice J (`milestone4.1.md` §3, fork J4) and the run-time surface reflects exactly that. An SELinux context is **never** reported as an AppArmor profile — the two LSMs share `/proc/self/attr/current`, and parsing `system_u:system_r:container_t:s0:c52,c87` as a profile *name* made `doctor` hard-error telling an operator with no AppArmor to load an AppArmor profile, which is worse than the silence the fork set out to fix. A mount denial there routes through `jail.lsm_hint()` to `jail.selinux_hint()`: known gap, `--security-opt label=disable` named and marked **UNVERIFIED** (it drops SELinux labelling for the whole container, wider than the one rule the AppArmor path narrows). `doctor` reports a **warning**, not an error, because doctor may not claim the boundary is broken any more than it may claim it holds. This is invariant 42 generalized from *which gate* to *which LSM*. *(`test_jail.py` SELinux cases; `test_doctor.py::test_doctor_reports_selinux_as_an_untested_gap_not_an_apparmor_problem`.)*
+
+45. **CI gates on the jail, on a host class that can see all three gates.** The `smoke` job loads `deepagent-userns` into the runner kernel and runs with `JAIL_CHECK=1`, so a regression that silently disables the jail fails the build instead of downgrading to an rc-77 skip — measured green first (`milestone4.1.md` §10.1, run `31836729538`), never assumed, which is the whole reason M4.1 exists. The masks-on control runs beside it **non-gating**, so the pass is pinned to `systempaths=unconfined` rather than being a green run with two variables in it; a moving rc there is a kernel/host-class observation to read, not a harness regression. An environmental red is re-measured and re-recorded in §10.1 — never unpinned back to a skip, which is exactly how slice H shipped believing it was universally verified. *(`ci.yml`.)*
 
 ---
 

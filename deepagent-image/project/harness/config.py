@@ -472,6 +472,23 @@ FIELD_SPECS: tuple[FieldSpec, ...] = (
         profile_key="jail_apparmor", default=None, label="AppArmor profile",
     ),
     FieldSpec(
+        # The third gate's knob (milestone4.1.md §13.7, fork J5). Docker's
+        # maskedPaths/readonlyPaths cover the container's procfs, and the kernel
+        # refuses bwrap's fresh `--proc` while they do -- so with the jail on the
+        # launchers pass `--security-opt systempaths=unconfined` by default.
+        # `default` here means Docker's default (masks kept), which is the LSM-only
+        # control the measurement needed and the right choice on a host where the
+        # jail starts without the relaxation (Docker Desktop/WSL2, measured).
+        #
+        # default=None, not "unconfined": unset means "let the launcher decide from
+        # `jail`", and only the launchers know whether the jail is on. A literal
+        # default would report `systempaths: unconfined` on a jail-off run, where
+        # nothing is passed at all.
+        name="jail_systempaths", tier="prespinup", env_var="DEEPAGENTS_JAIL_SYSTEMPATHS",
+        profile_key="jail_systempaths", default=None,
+        choices=("unconfined", "default"), label="Jail /proc masks (systempaths)",
+    ),
+    FieldSpec(
         name="cpus", tier="prespinup", env_var="CPUS", profile_key="cpus",
         default="2", label="CPU limit",
     ),
@@ -533,6 +550,7 @@ class Settings:
     mask_mode: str = "deny"
     jail: bool = False
     jail_apparmor: str | None = None
+    jail_systempaths: str | None = None
     cpus: str = "2"
     memory: str = "4g"
     pids_limit: str = "512"
@@ -557,6 +575,7 @@ class SettingsSources:
     mask_mode: str = "default"
     jail: str = "default"
     jail_apparmor: str = "default"
+    jail_systempaths: str = "default"
     cpus: str = "default"
     memory: str = "default"
     pids_limit: str = "default"

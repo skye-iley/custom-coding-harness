@@ -18,15 +18,18 @@ mask applied**, so the jail is the only enforcer in play:
 
 Exit codes:
   0  all checks passed
-  77 SKIPPED -- this host cannot build the jail at all, for either of the two
+  77 SKIPPED -- this host cannot build the jail at all, for any of the three
      independent reasons (jail.classify_bwrap_failure tells them apart):
        * userns: the seccomp profile was not passed, or the kernel/runtime
          disallows nesting -- `unshare` itself is refused.
        * lsm:    `unshare` succeeded and the host LSM denied the first mount.
          Docker's `docker-default` AppArmor profile carries `deny mount,`, which
          seccomp has no bearing on (milestone4.md §11.6).
-     Both are environmental, not regressions. smoke turns either into a hard
-     failure under JAIL_CHECK=1.
+       * procfs: both profiles allowed and the kernel refused the fresh `--proc`,
+         because Docker's maskedPaths still cover the container's procfs. Needs
+         `--security-opt systempaths=unconfined` (milestone4.1.md §13.7).
+     All three are environmental, not regressions. smoke turns any of them into
+     a hard failure under JAIL_CHECK=1.
   1  a check FAILED -- a real boundary regression
 """
 import os
@@ -93,13 +96,28 @@ def main():
             # a reason unrelated to the boundary -- see milestone4.md §11.6. JAIL_CHECK=1
             # still turns it into a failure for callers that pinned the jail.
             confined = jail.apparmor_confinement()
+            selinux = jail.selinux_confinement()
             print("SKIPPED: the host LSM denies the mounts bwrap needs.")
             print(f"  bwrap said: {err[:200]}")
             if confined:
                 print(f"  This container is confined by AppArmor profile '{confined}'.")
             print("  seccomp is NOT the problem here -- the user namespace was created and the")
-            print("  first mount was denied. Fix: slice J's narrowed profile, or relaunch with")
-            print("  DEEPAGENTS_JAIL_APPARMOR=unconfined (drops the whole profile, not one rule).")
+            print("  first mount was denied.")
+            if selinux:
+                # M4.1 fork J4: an SELinux host must not be handed AppArmor instructions
+                # for an LSM it does not run. Untested is said out loud, not papered over.
+                print(f"  {jail.selinux_hint()}")
+            else:
+                print("  Fix: slice J's narrowed profile, or relaunch with")
+                print("  DEEPAGENTS_JAIL_APPARMOR=unconfined (drops the whole profile, not one rule).")
+            return EXIT_SKIP
+        if kind == "procfs":
+            # The third gate (milestone4.1.md §13.7). Environmental like the other
+            # two: both profiles allowed and the kernel refused the fresh procfs
+            # because Docker's maskedPaths still cover the container's own.
+            print("SKIPPED: the kernel refuses bwrap's fresh /proc in this container.")
+            print(f"  bwrap said: {err[:200]}")
+            print(f"  {jail.procfs_hint()}")
             return EXIT_SKIP
         check("1 bwrap runs under the vendored seccomp profile", False, err[:200])
         return 1

@@ -143,10 +143,11 @@ See [Launcher Environment](./CLAUDE.md#launcher-environment-host-side-not-env) i
 | `DEEPAGENTS_MASK_MODE` | `-MaskMode` | Mask visibility mode (`deny`\|`allow`) | from profile/`.env` |
 | `DEEPAGENTS_JAIL` | `-Jail` | bwrap fs jail on/off. Whichever tier turns it on, `run-docker` applies the narrow seccomp profile **and** forwards `-e DEEPAGENTS_JAIL=1` into the container — `jail.jail_enabled()` reads the environment, not `Settings`, so the relaxation and the jail must be switched by one decision | from profile/`.env` |
 | `DEEPAGENTS_JAIL_APPARMOR` | `-JailApparmor` | AppArmor stance for the bwrap jail. **Unset = auto (slice J):** `run-docker` asks the daemon what confines a container; no LSM → passes nothing; LSM in force + `deepagent-userns` loaded → selects it; LSM in force + not loaded → **aborts pre-flight** with the install command, never falling back to `unconfined`. `unconfined` = works everywhere at the cost of dropping the **whole** `docker-default` profile, not just its `deny mount,`. Any other value = a host-loaded profile name. Load the profile on the **daemon's** host: `sudo scripts/install-apparmor-profile.sh` | unset (auto) |
+| `DEEPAGENTS_JAIL_SYSTEMPATHS` | `-JailSystempaths` | Docker's `/proc` masks under the jail, i.e. the **third** gate (M4.1 §13.7). `unconfined` (default under the jail) passes `--security-opt systempaths=unconfined`, without which the kernel refuses bwrap's fresh `--proc` while `maskedPaths`/`readonlyPaths` cover the container's procfs — EPERM, no LSM denial, independent of both profiles. `default` keeps the masks and the jail then won't start on most Linux hosts; that is the LSM-only control. Only consulted when `DEEPAGENTS_JAIL` is on | `unconfined` |
 | `NET_JAIL` | `-NetJail` | Deny-all-egress network jail (see netjail/README.md) | off |
 | `AUTONOMY` | `-Autonomy` | Write/update `autonomy_level` in `.harness-config.yaml` before launch (`strict`\|`guided`\|`autonomous`); creates the file if absent | unset (no-op) |
 
-(Milestone 5, C3: `-Model`/`-MaskMode`/`-Jail`/`-JailApparmor` resolve `-Flag > host env >
+(Milestone 5, C3: `-Model`/`-MaskMode`/`-Jail`/`-JailApparmor`/`-JailSystempaths` resolve `-Flag > host env >
 project/.env > .harness-profile.yaml > default` via `scripts/lib/config.{ps1,sh}`, the same
 precedence `harness/config.py` uses container-side. `-Autonomy` is different — it's an imperative
 write to `.harness-config.yaml`, not a resolved value, and setting it turns HITL on for the run

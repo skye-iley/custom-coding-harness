@@ -39,29 +39,6 @@ A milestone moves through three folders. What each stage carries is deliberate:
 
 ## In-progress milestones — `milestones/in-progress/`
 
-- **`milestone4.md`** — **Real Trust Boundary**: workspace visibility (`.agentignore` +
-  designated-secret floor + docker mount-mask) + path-guard middleware + `permission_denied`
-  interrupt wiring, backed by the §10 security suite and the §12.1 CI / §12.2 `harness doctor`
-  support tier. Slices A–G need no host-userns support; **the bwrap fs-tool jail (slice H) is core v1
-  scope, not a stretch layer** — it's the piece that makes the boundary an allow-list rather than a
-  curated deny-list. **H is built and opt-in** (`DEEPAGENTS_JAIL=1`), shipped as a re-exec of the
-  harness into a bwrap namespace; it is off by default because enabling it requires a narrow seccomp
-  relaxation on the outer container, a deliberate operator trade (`milestone4.md` §16 fork 7).
-  Pulls together `docs/features/workspace_visibility.md` + `design_doc.md` §2/§10/§12. Code is on
-  `feat/milestone_4` (slices A–H landed; not yet merged).
-- **`milestone4.1.md`** — **LSM parity (M4 slice J)**: vendors moby's `docker-default` AppArmor
-  profile with **only** its `deny mount,` rule narrowed, so the bwrap jail runs on an
-  AppArmor-confined host without dropping the whole LSM. seccomp and AppArmor are independent gates
-  and both must allow — M4's narrow seccomp profile fixed one of them, which is why
-  `DEEPAGENTS_JAIL=1` failed on stock Ubuntu/Debian Docker (the majority of Linux container hosts)
-  unless the operator opted into the blunt `DEEPAGENTS_JAIL_APPARMOR=unconfined`. **Built on
-  `feat/milestone_4` except its live-host measurement**: the dev machine is Docker Desktop/WSL2,
-  which loads no LSM policy and structurally cannot verify this slice — the same blind spot that let
-  slice H ship believing the jail was universally verified. Ships as M4 PR7. Its invariants (39–41)
-  live in `milestone4_invariants.md` with the rest.
-- **`milestone4_invariants.md`** — the checkable invariants the M4 boundary must satisfy
-  (floor / mask / path-guard / interrupt / git-pr / state-isolation / regression / structural),
-  the test-facing companion to `milestone4.md`. Folds into `milestone4.md` on completion.
 - **`milestone5.1.md`** — **Config Field Registry**: follow-on refactor of `milestone5.md`. M5 put
   every run knob behind one precedence chain but not behind one *declaration* — adding a knob was a
   ten-site edit where nine sites failed silently, and no field knew its own valid values, which is
@@ -125,6 +102,29 @@ A milestone moves through three folders. What each stage carries is deliberate:
   (deterministic pause middleware, agent `ask_human` tool, system events) + the two `design_doc.md`
   §12 prereqs it rides on (P1 resilience, P2 headless). **Built** — §0 records what shipped vs.
   deferred (`missing_price`/`permission_denied` events, `shadow` policy, clock-pause, S6 PR-b).
+- **`milestone4.md`** — **Real Trust Boundary**: workspace visibility (`.agentignore` +
+  designated-secret floor + docker mount-mask) + path-guard middleware + `permission_denied`
+  interrupt wiring, backed by the §10 security suite and the §12.1 CI / §12.2 `harness doctor`
+  support tier. **Slices A–J all landed.** The bwrap fs-tool jail (slice H) was core v1 scope, not
+  a stretch layer — it is what makes the boundary an allow-list rather than a curated deny-list —
+  and ships as a **re-exec of the harness into a bwrap namespace**, so "every fs tool routes through
+  the jail" is structural rather than an assertion. It stays **opt-in** (`DEEPAGENTS_JAIL=1`)
+  because enabling it needs a narrow seccomp relaxation on the outer container, an operator's trade
+  (§16 fork 7). Deferred v2 (overlayfs view, slice I) and invariant 16 stay out of scope. The 45
+  checkable invariants are folded in as **§19**. Pulls together
+  `docs/features/workspace_visibility.md` + `design_doc.md` §2/§10/§12.
+- **`milestone4.1.md`** — **LSM parity + the third gate (M4 slice J)**: vendors moby's
+  `docker-default` AppArmor profile with **only** its `deny mount,` rule narrowed, so the bwrap jail
+  runs on an AppArmor-confined host without dropping the whole LSM. **Complete and measured on a
+  live host** (2026-08-14, Ubuntu VM) — and the measurement is the point: the derived rule set had
+  four rules wrong and one missing, and a second round deleted a seventh as inert, so the shipped
+  set is *measured, narrowed by subtraction*, never read off bwrap's source. It also surfaced a
+  **third gate nobody had accounted for** — the kernel's `mount_too_revealing()` refusing bwrap's
+  fresh `--proc` while Docker's `maskedPaths` cover the container's procfs, independent of both
+  profiles — closed by `--security-opt systempaths=unconfined` from the launchers. CI now pins
+  `JAIL_CHECK=1` on an AppArmor-confined runner. Its invariants (37–45) live in `milestone4.md` §19.
+- **`milestone4_manual_verification.md`** — the manual/live verification record behind M4's
+  boundary claims: what was run, on which host, and what it printed. Kept as evidence, not guidance.
 - **`milestone5.md`** (+ **`milestone5_spec.md`**, full implementation spec) — **Unified Config
   Surface**: CLI flags + an in-session `/config` command for live knobs (model, budgets, HITL
   preset) and a pre-spinup wizard (`harness config` / `harness config security`) for knobs fixed
@@ -141,6 +141,14 @@ A milestone moves through three folders. What each stage carries is deliberate:
 - **`workspace_visibility.md`** — restrict which workspace paths an agent can see
   (`.agentignore` policy, designated-secret floor, docker-mask → bwrap fs-tool jail →
   optional overlayfs). **Planned**; summarized in `design_doc.md` §2.
+- **`selinux_compatibility.md`** — **Planned**, and deliberately **separate from Milestone 4.1**
+  rather than an open thread inside it: M4.1 is complete without it. A pre-release compatibility
+  check — run `DEEPAGENTS_JAIL=1` on a RHEL/Fedora host and record what happens. SELinux is **not
+  confirmed to work and not confirmed to fail**; M4.1 fork J4 closed only the *reporting* gap (the
+  harness names the unknown instead of misreading an SELinux context as an AppArmor profile).
+  Carries the measurement protocol (`ausearch -m AVC`, not `dmesg`), what each of four outcomes
+  obliges, and the standing rule: no claim of SELinux support until a measurement exists. Rootless
+  Docker/Podman is the same shape of gap.
 
 ## Specs — `specs/`
 

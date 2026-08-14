@@ -54,6 +54,11 @@ markers=(
   "deepagent-userns"
   "install-apparmor-profile"
   "DEEPAGENTS_JAIL_APPARMOR"
+  # M4.1 fork J5: the third gate. Dropped from one launcher only, that platform's
+  # jail dies at `--proc` with an EPERM that names neither profile — the exact
+  # dead end §13.7 cost a measurement round to diagnose.
+  "systempaths=unconfined"
+  "DEEPAGENTS_JAIL_SYSTEMPATHS"
   # M5: the profile file must be MOUNTED (it is gitignored, so it is not in the
   # image's COPY list -- without the mount the container's resolve_settings()
   # never sees a profile tier and `/config save` writes to a throwaway layer).

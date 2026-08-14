@@ -294,6 +294,21 @@ def doctor_main(argv: list[str]) -> int:
                 "— the /proc and /sys write denials and the ptrace peer restriction — "
                 "not only its deny-mount rule.",
             ))
+        elif jail_mod.selinux_confinement():
+            # M4.1 fork J4. Not an error: nothing has been measured here, and doctor
+            # must not claim a boundary is broken any more than it may claim one
+            # holds. A warning is the honest reading — the jail may well start (the
+            # AppArmor deny-mount rule has no SELinux equivalent) or may not, and
+            # this milestone's premise is that an unmeasured answer is not an answer.
+            records.append((
+                "warning",
+                f"fs jail: this container runs under SELinux "
+                f"(context '{jail_mod.selinux_confinement()}'), not AppArmor. Slice J's "
+                "narrowed profile is AppArmor-only and SELinux is UNTESTED for the jail "
+                "(milestone4.1.md §3, fork J4) — treat a working jail here as unverified. "
+                "If bwrap is denied, '--security-opt label=disable' is the usual escape "
+                "hatch, itself unverified and wider than the one narrowed rule.",
+            ))
         else:
             records.append(("info", "fs jail: no AppArmor confinement in force"))
 
@@ -330,6 +345,39 @@ def doctor_main(argv: list[str]) -> int:
                         f"{len(apparmor_mod.RELAXED_MOUNT_RULES)} mount rules replacing "
                         "`deny mount,`",
                     ))
+
+        # The THIRD gate (milestone4.1.md §13.7, fork J5). seccomp and AppArmor can
+        # both be correct and bwrap still dies at `--proc`: the kernel refuses a
+        # fresh procfs from a non-initial user namespace while the visible one is
+        # covered by submounts, which is exactly what Docker's maskedPaths /
+        # readonlyPaths are. Reported from the *measured* mount table rather than a
+        # forwarded launcher flag — the question is what this container actually
+        # got, and a flag only says what the launcher believed it passed.
+        if os.environ.get("DEEPAGENTS_IN_CONTAINER") == "1":
+            covered = jail_mod.procfs_covering_mounts()
+            if covered:
+                # A warning, not an error, and the distinction is measured rather
+                # than cautious: slice H passed 5/5 on Docker Desktop/WSL2 with these
+                # masks in place, and failed on an Ubuntu VM with them. So covering
+                # mounts are the *configuration* that trips the kernel check, not
+                # proof that it trips here. The bwrap probe below is the authority;
+                # this line is what makes its EPERM legible when it does fail.
+                records.append((
+                    "warning",
+                    f"fs jail: this container's procfs carries {len(covered)} covering "
+                    f"mount(s) (e.g. {', '.join(sorted(covered)[:3])}) — Docker's "
+                    "maskedPaths/readonlyPaths. On a stock Linux host that makes the kernel "
+                    "refuse bwrap's fresh /proc with EPERM, with neither seccomp nor AppArmor "
+                    "involved. Fix: --security-opt systempaths=unconfined (run-docker and "
+                    "smoke pass it when DEEPAGENTS_JAIL=1; DEEPAGENTS_JAIL_SYSTEMPATHS="
+                    "default suppresses it).",
+                ))
+            else:
+                records.append((
+                    "info",
+                    "fs jail: procfs is uncovered — Docker's /proc masks are off "
+                    "(systempaths=unconfined), which is what lets bwrap mount its own",
+                ))
 
         # The real gate: bwrap being installed says nothing about whether seccomp
         # will actually let it unshare. Only meaningful in-container.
