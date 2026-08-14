@@ -96,11 +96,13 @@ its seccomp form (`seccomp=unconfined`). The honest accounting:
   jail, which does **not** inherit Docker's masks. Inside the jail those
   init-userns capability checks are the only thing left. That is a thinner
   backstop than the layered one, and it is the argument for this profile.
-  *(Fork J5 leans on this same fact in the opposite direction: if the jail's procfs
-  never had Docker's masks, then `systempaths=unconfined` takes away something the
-  jailed process was not getting anyway. Both readings are correct; note that the
-  fact is doing double duty, and that J5's residual — the pre-re-exec window and
-  anything outside the jail — is not covered by it.)*
+  *(Fork J5 — now built — leans on this same fact in the opposite direction: if the
+  jail's procfs never had Docker's masks, then `systempaths=unconfined` takes away
+  something the jailed process was not getting anyway. Both readings are correct;
+  note that the fact is doing double duty, and that J5's residual — the pre-re-exec
+  window and anything outside the jail — is not covered by it. Since the launchers
+  now pass `systempaths=unconfined` under the jail by default, that residual is
+  live on every jailed run, not hypothetical.)*
 - **Categorically wider than what the operator signed up for.** Fork 7 framed the
   trade as *five relaxed syscalls*. `unconfined` makes it *five syscalls and an
   entire LSM off*.
@@ -174,10 +176,19 @@ refused while the procfs already visible in the mount namespace is covered by
 submounts, and Docker's `maskedPaths` / `readonlyPaths` are exactly that (13
 mounts over `/proc` on the measured host).
 
-Today's workaround is `--security-opt systempaths=unconfined` on the `docker run`.
-Wiring that into the launchers is `milestone4.1.md` fork **J5** — decided, not yet
-built. Until it lands, an operator on an AppArmor host must add the flag by hand,
-and `harness doctor` will not tell them so.
+The fix is `--security-opt systempaths=unconfined` on the `docker run`, and fork
+**J5** now wires it: `run-docker.{sh,ps1}` and `smoke.{sh,ps1}` pass it from the
+same `DEEPAGENTS_JAIL=1` block that passes seccomp and this profile, and say what
+they gave up. `DEEPAGENTS_JAIL_SYSTEMPATHS=default` keeps Docker's masks — which
+is how the **LSM-only control** is reproduced (bwrap must then die at `--proc`
+with zero `deepagent-userns` denials), no script edit required. `harness doctor`
+reports the container's covering `/proc` mounts, and `jail.classify_bwrap_failure`
+names this failure `procfs` rather than blaming either profile.
+
+⚠️ **Wired, not re-measured.** The 2026-08-14 VM run reached 5/5 only with the
+flag added *by hand*; nobody has yet run `JAIL_CHECK=1 ./scripts/smoke.sh` on an
+AppArmor host with the launcher supplying it. Treat "the jail starts on Ubuntu"
+as unproven until that happens.
 
 Do **not** "fix" this by binding the container's `/proc` and dropping
 `--unshare-pid`. The harness and the agent's shell run as the same uid, so

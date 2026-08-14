@@ -474,6 +474,35 @@ jail_setup() {
       echo "Jail: AppArmor profile '$apparmor' (loaded on the Docker daemon's host)." >&2
     fi
   fi
+
+  # M4.1 fork J5 (§13.7): the THIRD gate. With seccomp and the LSM both satisfied,
+  # the kernel still refuses bwrap's fresh `--proc` while the container's own procfs
+  # is covered by Docker's maskedPaths/readonlyPaths -- mount_too_revealing(), EPERM,
+  # no LSM denial. Docker offers no partial unmask, so the only lever is dropping all
+  # 13 masks for this container.
+  #
+  # The honest trade (§14 J5): unlike seccomp=unconfined or apparmor=unconfined --
+  # both rejected -- this drops a mechanism that is NOT protecting the jailed process.
+  # The re-exec happens before anything heavy loads, and inside the jail /proc is
+  # bwrap's own fresh procfs, which never carried these masks. The kernel checks the
+  # dangerous targets (/proc/kcore, /proc/sysrq-trigger) against capabilities in the
+  # INITIAL user namespace, which no container process holds. Residual exposure is
+  # the window before the re-exec and anything running outside the jail -- narrow,
+  # not zero, which is why the launcher says what it gave up.
+  local systempaths
+  systempaths="$(_resolve_host_setting "${DEEPAGENTS_JAIL_SYSTEMPATHS:-}" DEEPAGENTS_JAIL_SYSTEMPATHS jail_systempaths "unconfined")"
+  if [[ "$systempaths" == "unconfined" ]]; then
+    JAIL_ARGS+=(--security-opt "systempaths=unconfined")
+    echo "Jail: Docker's /proc masks DROPPED for this container (systempaths=unconfined)." >&2
+    echo "      Required on a stock Linux host: the kernel refuses bwrap's fresh /proc while" >&2
+    echo "      they cover the container's procfs. Inside the jail /proc is bwrap's own, which" >&2
+    echo "      never carried them. Set DEEPAGENTS_JAIL_SYSTEMPATHS=default to keep them (the" >&2
+    echo "      jail then fails to start on most Linux hosts). See milestone4.1.md §13.7." >&2
+  else
+    echo "Jail: keeping Docker's /proc masks (DEEPAGENTS_JAIL_SYSTEMPATHS=$systempaths)." >&2
+    echo "      Expect bwrap to fail at 'Can't mount proc ... Operation not permitted' unless" >&2
+    echo "      this host is Docker Desktop/WSL2." >&2
+  fi
 }
 
 # Does the daemon accept this AppArmor profile? Asks the DAEMON rather than reading

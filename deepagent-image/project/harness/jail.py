@@ -145,12 +145,26 @@ def apparmor_confinement_detail() -> tuple[str | None, str | None]:
     return None, None
 
 
-def classify_bwrap_failure(stderr: str) -> str:
-    """Why bwrap could not build the namespace: 'userns' | 'lsm' | 'unknown'.
+# bwrap's mount-phase failure fingerprints. "Failed to make / slave" is the first
+# one it can hit, and the one docker-default produces; the others cover the same
+# denial surfacing at a later bind/pivot.
+_MOUNT_PHASE_MARKERS = (
+    "failed to make / slave",
+    "failed to make / rslave",
+    "can't mount",
+    "unable to mount",
+    "failed to mount",
+    "pivot_root",
+)
 
-    The distinction is not cosmetic (milestone4.md §11.6, invariant 37). seccomp
-    and AppArmor are independent gates and both must allow, so the two failures
-    need opposite remedies -- and they are distinguishable by *how far bwrap got*:
+
+def classify_bwrap_failure(stderr: str) -> str:
+    """Why bwrap could not build the namespace:
+    'userns' | 'lsm' | 'procfs' | 'unknown'.
+
+    The distinction is not cosmetic (milestone4.md §11.6, invariant 37). There are
+    **three independent gates**, all of which must allow, and each needs a
+    different remedy:
 
       userns  the `unshare` itself was refused. Docker's default seccomp profile
               blocks unprivileged userns creation. Fix: pass seccomp/userns.json.
@@ -159,29 +173,90 @@ def classify_bwrap_failure(stderr: str) -> str:
               `deny mount,`, which no seccomp change affects and which entering a
               user namespace does not shed. Fix: slice J's profile, or
               DEEPAGENTS_JAIL_APPARMOR=unconfined.
+      procfs  seccomp AND the LSM both allowed, and the kernel still refused the
+              *fresh* procfs mount: `mount_too_revealing()` (fs/namespace.c) bars
+              it from a non-initial user namespace while the visible procfs is
+              covered by submounts -- which is exactly what Docker's OCI
+              maskedPaths/readonlyPaths are. Fix: `--security-opt
+              systempaths=unconfined` (milestone4.1.md §13.7, fork J5).
 
-    Reporting an `lsm` failure as a seccomp problem sends the operator to re-check
-    a profile that is already correct -- the dead end this milestone's own CI hit.
+    `procfs` and `lsm` are told apart by **errno, not phase**: both fail at a
+    mount, but the LSM denial is EACCES ("Permission denied") and the procfs gate
+    is EPERM ("Operation not permitted"), with no AppArmor denial logged. That is
+    the only signal there is -- an operator who reads "Operation not permitted" as
+    an LSM problem goes and re-checks a profile that is already correct, which is
+    the dead end the §13.1 measurement spent a round on.
     """
     text = (stderr or "").lower()
     if "no permissions to create new namespace" in text or "unshare" in text:
         return "userns"
-    # bwrap's mount-phase failures. "Failed to make / slave" is the first one it
-    # can hit, and the one docker-default produces; the others cover the same
-    # denial surfacing at a later bind/pivot.
-    mount_phase = (
-        "failed to make / slave",
-        "failed to make / rslave",
-        "can't mount",
-        "unable to mount",
-        "failed to mount",
-        "pivot_root",
-    )
-    if any(marker in text for marker in mount_phase) and "permission denied" in text:
-        return "lsm"
+    if any(marker in text for marker in _MOUNT_PHASE_MARKERS):
+        if "permission denied" in text:
+            return "lsm"
+        if "operation not permitted" in text and "proc" in text:
+            return "procfs"
     if "namespace" in text:
         return "userns"
     return "unknown"
+
+
+# Where the kernel reports this mount namespace's mounts. Read rather than
+# assumed: whether the container's procfs is covered is a property of how *this*
+# container was started (`--security-opt systempaths=unconfined` or not), and a
+# forwarded flag would only report what the launcher believes.
+_MOUNTINFO_PATH = "/proc/self/mountinfo"
+
+
+def procfs_covering_mounts(mountinfo: str | None = None) -> list[str]:
+    """Mount points *underneath* /proc, i.e. what makes procfs "too revealing".
+
+    Docker's default `maskedPaths`/`readonlyPaths` install 13 of these
+    (/proc/kcore, /proc/sys, ...). While any exist, the kernel refuses a fresh
+    `--proc` mount from a non-initial user namespace, independently of seccomp
+    and AppArmor (milestone4.1.md §13.7).
+
+    `mountinfo` is injectable so the parse is host-testable; the default reads
+    /proc/self/mountinfo. An unreadable file yields [] -- "no evidence of
+    covering mounts" -- because the caller uses this to *explain* a failure, and
+    a missing file must not manufacture a diagnosis.
+    """
+    if mountinfo is None:
+        try:
+            with open(_MOUNTINFO_PATH) as fh:
+                mountinfo = fh.read()
+        except OSError:
+            return []
+    covered: list[str] = []
+    for line in mountinfo.splitlines():
+        fields = line.split()
+        # mountinfo: id parent major:minor root MOUNT-POINT options...
+        if len(fields) < 5:
+            continue
+        target = fields[4]
+        if target.startswith("/proc/"):
+            covered.append(target)
+    return covered
+
+
+def procfs_hint() -> str:
+    """Operator-facing remedy for the third gate, naming what is covering procfs."""
+    covered = procfs_covering_mounts()
+    detail = (
+        f" This container's procfs carries {len(covered)} covering mount(s) "
+        f"(e.g. {', '.join(covered[:3])})."
+        if covered
+        else ""
+    )
+    return (
+        "the user namespace was created and the mounts were allowed, then the kernel "
+        "refused bwrap's fresh /proc: mount_too_revealing() bars a new procfs from a "
+        "non-initial user namespace while the visible one is covered by submounts, "
+        "which is what Docker's maskedPaths/readonlyPaths are." + detail + " Neither "
+        "seccomp nor AppArmor is the problem here (no LSM denial is logged). Relaunch "
+        "with --security-opt systempaths=unconfined -- run-docker/smoke pass it "
+        "automatically when DEEPAGENTS_JAIL=1 unless "
+        "DEEPAGENTS_JAIL_SYSTEMPATHS=default overrides it (milestone4.1.md §13.7)."
+    )
 
 
 def apparmor_hint() -> str:
@@ -397,13 +472,19 @@ def preflight() -> list[str]:
                 "--security-opt seccomp=deepagent-image/seccomp/userns.json "
                 "(see seccomp/README.md)."
             )
+        elif kind == "procfs":
+            # The third gate. Blaming either of the other two here is the same
+            # class of dead end invariant 37 exists to prevent, one layer further
+            # in: both profiles are correct and the kernel still says no.
+            problems.append(f"bwrap cannot build the jail here ({hint}). {procfs_hint()}")
         else:
             confined = apparmor_confinement()
             extra = f" This process is confined by AppArmor profile '{confined}'." if confined else ""
             problems.append(
-                f"bwrap cannot build the jail here ({hint}).{extra} Check both gates: the "
-                "narrow seccomp profile (--security-opt seccomp=deepagent-image/seccomp/"
-                "userns.json) and the host LSM (milestone4.md §11.6)."
+                f"bwrap cannot build the jail here ({hint}).{extra} Check all three gates: "
+                "the narrow seccomp profile (--security-opt seccomp=deepagent-image/seccomp/"
+                "userns.json), the host LSM (milestone4.md §11.6), and the kernel's procfs "
+                "restriction (--security-opt systempaths=unconfined, milestone4.1.md §13.7)."
             )
 
     return problems

@@ -312,6 +312,7 @@ def test_wizard_security_step_custom_collects_all_fields(monkeypatch):
         "2",       # mask mode: allow
         "2",       # jail: on
         "",        # apparmor: blank => auto (not written)
+        "",        # systempaths: blank => the starred default (unconfined)
         "4",       # cpus
         "8g",      # memory
         "1024",    # pids_limit
@@ -321,6 +322,10 @@ def test_wizard_security_step_custom_collects_all_fields(monkeypatch):
     assert values == {
         "mask_mode": "allow",
         "jail": True,
+        # An enum menu always answers (unlike the free-text apparmor prompt), so the
+        # blank picks the starred default and it IS written -- which matches what the
+        # launchers do under the jail anyway (M4.1 fork J5).
+        "jail_systempaths": "unconfined",
         "cpus": "4",
         "memory": "8g",
         "pids_limit": "1024",

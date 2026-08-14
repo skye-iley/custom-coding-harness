@@ -32,6 +32,10 @@ param(
     [string]$MaskMode = "",
     [string]$Jail = "",
     [string]$JailApparmor = "",
+    # M4.1 fork J5: `unconfined` (the default under -Jail) drops Docker's /proc
+    # masks so bwrap can mount its own procfs; `default` keeps them, which is the
+    # LSM-only control and the right choice where the jail starts without it.
+    [string]$JailSystempaths = "",
     # Write/update .harness-config.yaml's autonomy_level before launch (strict|
     # guided|autonomous). An imperative action, not a resolved Settings field --
     # HITL's presence-of-file-turns-it-on design (M3) means this necessarily
@@ -467,6 +471,35 @@ if ($JailMode -and $JailMode -notin @("0", "false", "no", "off")) {
         } else {
             Write-Host "Jail: AppArmor profile '$Apparmor' (loaded on the Docker daemon's host)."
         }
+    }
+
+    # M4.1 fork J5 (13.7): the THIRD gate. With seccomp and the LSM both satisfied,
+    # the kernel still refuses bwrap's fresh `--proc` while the container's own procfs
+    # is covered by Docker's maskedPaths/readonlyPaths - mount_too_revealing(), EPERM,
+    # no LSM denial. Docker offers no partial unmask, so the only lever is dropping all
+    # 13 masks for this container.
+    #
+    # The honest trade (14 J5): unlike seccomp=unconfined or apparmor=unconfined -
+    # both rejected - this drops a mechanism that is NOT protecting the jailed process.
+    # The re-exec happens before anything heavy loads, and inside the jail /proc is
+    # bwrap's own fresh procfs, which never carried these masks. The kernel checks the
+    # dangerous targets (/proc/kcore, /proc/sysrq-trigger) against capabilities in the
+    # INITIAL user namespace, which no container process holds. Residual exposure is
+    # the window before the re-exec and anything running outside the jail - narrow,
+    # not zero, which is why the launcher says what it gave up. Mirror of run-docker.sh.
+    $Systempaths = Resolve-HostSetting -Value $JailSystempaths -EnvVarName "DEEPAGENTS_JAIL_SYSTEMPATHS" `
+        -ProfileKey "jail_systempaths" -Default "unconfined" -EnvFile $EnvFile -ProfileFile $ProfileFile
+    if ($Systempaths -eq "unconfined") {
+        $JailArgs += @("--security-opt", "systempaths=unconfined")
+        Write-Host "Jail: Docker's /proc masks DROPPED for this container (systempaths=unconfined)."
+        Write-Host "      Required on a stock Linux host: the kernel refuses bwrap's fresh /proc while"
+        Write-Host "      they cover the container's procfs. Inside the jail /proc is bwrap's own, which"
+        Write-Host "      never carried them. Set DEEPAGENTS_JAIL_SYSTEMPATHS=default to keep them (the"
+        Write-Host "      jail then fails to start on most Linux hosts). See milestone4.1.md 13.7."
+    } else {
+        Write-Host "Jail: keeping Docker's /proc masks (DEEPAGENTS_JAIL_SYSTEMPATHS=$Systempaths)."
+        Write-Host "      Expect bwrap to fail at 'Can't mount proc ... Operation not permitted' unless"
+        Write-Host "      this host is Docker Desktop/WSL2."
     }
 }
 

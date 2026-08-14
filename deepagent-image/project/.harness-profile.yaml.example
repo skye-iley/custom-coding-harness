@@ -26,6 +26,9 @@ max_tokens:
 mask_mode: deny        # deny | allow
 jail: false
 jail_apparmor:          # unset = auto; "unconfined"; or a host-loaded profile name
+jail_systempaths:       # unset = unconfined under the jail (drops Docker's /proc masks,
+                        # which the kernel requires for bwrap's own --proc); "default"
+                        # keeps them and the jail then won't start on most Linux hosts
 cpus: "2"
 memory: 4g
 pids_limit: "512"

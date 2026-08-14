@@ -584,5 +584,6 @@ def test_wizard_prespinup_specs_are_the_persisted_prespinup_half():
         s for s in cfg.FIELD_SPECS if s.tier == "prespinup" and s.profile_key
     )
     assert [s.name for s in cfg.WIZARD_PRESPINUP_SPECS] == [
-        "mask_mode", "jail", "jail_apparmor", "cpus", "memory", "pids_limit", "net_jail",
+        "mask_mode", "jail", "jail_apparmor", "jail_systempaths",
+        "cpus", "memory", "pids_limit", "net_jail",
     ]

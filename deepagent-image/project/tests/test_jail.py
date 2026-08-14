@@ -270,6 +270,81 @@ def test_unrecognized_failure_is_unknown_not_silently_skipped():
     assert jail.classify_bwrap_failure("") == "unknown"
 
 
+# --- the third gate: the kernel's procfs restriction (M4.1 §13.7, fork J5) ----
+#
+# Same failure phase as an LSM denial (a mount), so the ONLY signal separating them
+# is errno: EACCES "Permission denied" vs. EPERM "Operation not permitted", with no
+# AppArmor denial logged for the latter. Reporting it as `lsm` or `unknown` sends the
+# operator to re-check two profiles that are both already correct.
+
+
+def test_procfs_gate_is_not_classified_as_an_lsm_denial():
+    # Verbatim stderr from the 2026-08-14 Ubuntu VM measurement, with BOTH the
+    # narrow seccomp profile and the vendored AppArmor profile in force.
+    err = "bwrap: Can't mount proc on /newroot/proc: Operation not permitted"
+    assert jail.classify_bwrap_failure(err) == "procfs"
+
+
+def test_procfs_gate_is_not_reported_as_unknown():
+    # It used to be: `unknown` sends the operator to check "both gates", neither of
+    # which is the problem. This is the regression guard for that diagnosis.
+    err = "bwrap: Can't mount proc on /newroot/proc: Operation not permitted"
+    assert jail.classify_bwrap_failure(err) != "unknown"
+
+
+def test_eperm_on_a_non_proc_mount_is_not_the_procfs_gate():
+    # EPERM on a bind is some other refusal; claiming the procfs gate would send the
+    # operator to drop Docker's /proc masks for nothing.
+    err = "bwrap: Unable to mount source on /newroot/usr: Operation not permitted"
+    assert jail.classify_bwrap_failure(err) == "unknown"
+
+
+def test_procfs_covering_mounts_finds_dockers_masks():
+    # Abridged /proc/self/mountinfo from a stock container: a proc mount plus the
+    # maskedPaths/readonlyPaths submounts that make it "too revealing".
+    mountinfo = "\n".join(
+        [
+            "23 28 0:21 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw",
+            "30 23 0:35 / /proc/asound ro,relatime - tmpfs tmpfs ro",
+            "31 23 0:36 / /proc/kcore rw,nosuid - tmpfs tmpfs rw",
+            "32 23 0:21 /sys /proc/sys ro,relatime - proc proc rw",
+            "24 28 0:22 / /sys ro,nosuid,nodev,noexec,relatime - sysfs sysfs ro",
+        ]
+    )
+    assert jail.procfs_covering_mounts(mountinfo) == [
+        "/proc/asound",
+        "/proc/kcore",
+        "/proc/sys",
+    ]
+
+
+def test_procfs_covering_mounts_ignores_proc_itself_and_lookalikes():
+    # /proc is the covered mount, not a covering one; /procfoo is a different tree.
+    mountinfo = "\n".join(
+        [
+            "23 28 0:21 / /proc rw,relatime - proc proc rw",
+            "40 28 0:41 / /procfoo rw,relatime - tmpfs tmpfs rw",
+            "",
+            "short line",
+        ]
+    )
+    assert jail.procfs_covering_mounts(mountinfo) == []
+
+
+def test_procfs_covering_mounts_is_empty_when_mountinfo_is_unreadable(monkeypatch):
+    # "No evidence", not "a diagnosis": the caller uses this to EXPLAIN a failure,
+    # so a missing file must not manufacture one.
+    monkeypatch.setattr(jail, "_MOUNTINFO_PATH", "/nonexistent/mountinfo")
+    assert jail.procfs_covering_mounts() == []
+
+
+def test_procfs_hint_names_the_fix_and_clears_the_other_two_gates(monkeypatch):
+    monkeypatch.setattr(jail, "_MOUNTINFO_PATH", "/nonexistent/mountinfo")
+    hint = jail.procfs_hint()
+    assert "systempaths=unconfined" in hint
+    assert "seccomp" in hint and "AppArmor" in hint
+
+
 def test_apparmor_confinement_reads_the_profile_name(tmp_path, monkeypatch):
     attr = tmp_path / "apparmor_current"
     attr.write_text("docker-default (enforce)")

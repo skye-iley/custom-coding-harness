@@ -55,14 +55,21 @@ secret-safe containers.
     `7.0.0-29-generic`, Docker 29.7.2). The rule set is **measured, not derived** — it went 7 → 8
     rules with four corrections, and `jail-check.py` passes 5/5 under the vendored profile with zero
     `deepagent-userns` denials (`milestone4.1.md` §13.1a has the round-by-round denial log).
-    **But the jail still does not start on a stock Ubuntu/Debian host**, because the measurement
+    **The jail did not start on a stock Ubuntu/Debian host**, because the measurement
     surfaced a **third** gate nobody had accounted for: the kernel's `mount_too_revealing()` check
     refuses bwrap's fresh `--proc` while Docker's `maskedPaths`/`readonlyPaths` cover the container's
-    procfs — `EPERM`, no denial logged, independent of both seccomp and AppArmor. Interim workaround
-    is `--security-opt systempaths=unconfined` by hand; wiring it into the launchers behind
-    `DEEPAGENTS_JAIL=1` is fork **J5** (decided, not built — `milestone4.1.md` §13.7/§14). So: the
-    LSM half is finished and verified; end-to-end usability on Linux is not. Don't round the first
-    up to the second. CI's `apparmor-load-probe` job is still non-gating — the measurement was taken
+    procfs — `EPERM`, no denial logged, independent of both seccomp and AppArmor. Fork **J5** wires
+    the fix and is **built but not re-measured**: both launchers and both smoke scripts now pass
+    `--security-opt systempaths=unconfined` under `DEEPAGENTS_JAIL=1`
+    (`DEEPAGENTS_JAIL_SYSTEMPATHS=default` keeps the masks — the LSM-only control),
+    `classify_bwrap_failure` gained a third `procfs` class (told apart from `lsm` by **errno**,
+    EPERM vs. EACCES, since both fail at a mount), and `doctor` reports the container's *measured*
+    covering mounts — as a **warning**, since slice H passed with those masks on Docker
+    Desktop/WSL2. The host tier is green; **no live AppArmor host has run it end-to-end**, and fork
+    **J6** (is rule 6 dead weight?) needs that same VM session. So: the LSM half is finished and
+    verified, the procfs half is written and unverified, end-to-end usability on Linux is still
+    unproven — don't round any of those up to the next.
+    CI's `apparmor-load-probe` job is still non-gating — the measurement was taken
     on a local VM, not a GitHub runner (fork J2). The knob `DEEPAGENTS_JAIL_APPARMOR=unconfined`
     still works everywhere but drops the whole LSM profile rather than one rule — prefer the
     vendored profile. (`milestone4.md` §11.6, §16 fork 10, invariants 37–38; `milestone4.1.md`
@@ -206,8 +213,11 @@ cd deepagent-image
 .\scripts\smoke.ps1 -JailCheck            # require the M4 slice H bwrap gate to pass (JAIL_CHECK=1 ./scripts/smoke.sh)
                                           #   the gate runs either way; the flag turns a
                                           #   "host can't build the jail" skip into a failure.
-                                          #   It skips for two distinct reasons — no nested userns,
-                                          #   or the host LSM denying bwrap's mounts (AppArmor).
+                                          #   It skips for three distinct reasons — no nested userns,
+                                          #   the host LSM denying bwrap's mounts (AppArmor), or the
+                                          #   kernel refusing its fresh procfs (M4.1 §13.7; the
+                                          #   script now passes systempaths=unconfined by default,
+                                          #   DEEPAGENTS_JAIL_SYSTEMPATHS=default reproduces it).
                                           #   On an AppArmor host, set DEEPAGENTS_JAIL_APPARMOR=unconfined
                                           #   to make it run (drops the whole profile — see §11.6).
 .\scripts\smoke.ps1 -LiveModel            # + the live-model tier (LIVE_MODEL=1 ./scripts/smoke.sh):

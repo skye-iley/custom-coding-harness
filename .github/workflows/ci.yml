@@ -82,12 +82,30 @@ jobs:
       - name: Does the daemon accept it?
         run: docker run --rm --security-opt apparmor=deepagent-userns deepagent-harness true
       - name: Does the jail start under it?
+        # systempaths=unconfined is the third gate (milestone4.1.md §13.7, fork J5):
+        # with Docker's /proc masks in place the kernel refuses bwrap's fresh --proc
+        # regardless of either profile. Mirrors what run-docker/smoke now pass under
+        # DEEPAGENTS_JAIL=1 — without it this step measures the wrong thing.
         run: |
+          docker run --rm -i \
+            --security-opt seccomp=deepagent-image/seccomp/userns.json \
+            --security-opt apparmor=deepagent-userns \
+            --security-opt systempaths=unconfined \
+            -e DEEPAGENTS_JAIL=1 \
+            deepagent-harness python3 - < deepagent-image/scripts/jail-check.py
+      - name: Control — with Docker's /proc masks left on, it must NOT start
+        # Records the third gate on the runner too, and proves the step above is not
+        # passing for some unrelated reason. Expected to report a `procfs` SKIP (rc 77);
+        # never fails the job, since this is a measurement.
+        continue-on-error: true
+        run: |
+          set +e
           docker run --rm -i \
             --security-opt seccomp=deepagent-image/seccomp/userns.json \
             --security-opt apparmor=deepagent-userns \
             -e DEEPAGENTS_JAIL=1 \
             deepagent-harness python3 - < deepagent-image/scripts/jail-check.py
+          echo "control rc=$? (77 = skipped; expect the procfs reason)"
   image-tests:
     runs-on: ubuntu-latest
     steps:

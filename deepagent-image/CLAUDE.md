@@ -106,6 +106,7 @@ See [ENV_VARS.md](./ENV_VARS.md#not-in-env--launcher-environment-host-side) for 
 | `EPHEMERAL` | `-Ephemeral` | off | Mount a throwaway copy of the workspace; revert on close. |
 | `SAVE_WORKSPACE` | `-SaveWorkspace` | off | Snapshot the ephemeral copy before discard; implies ephemeral. |
 | `NET_JAIL` | `-NetJail` | off | Deny-all-egress network jail (see `netjail/`). |
+| `DEEPAGENTS_JAIL_SYSTEMPATHS` | `-JailSystempaths` | unset → `unconfined` | Docker's `/proc` masks under the jail — the **third** gate (M4.1 §13.7). Default passes `--security-opt systempaths=unconfined`, without which the kernel refuses bwrap's fresh `--proc`. `default` keeps the masks; the jail then won't start on most Linux hosts, which is how the LSM-only control is reproduced. Only consulted when `DEEPAGENTS_JAIL` is on; read from the host env, `.env`, or the profile like its AppArmor twin. |
 | `DEEPAGENTS_JAIL_APPARMOR` | — | unset → auto | AppArmor stance for the bwrap jail. Read from the host env **or `.env`**, same as `DEEPAGENTS_JAIL`, but it only affects `docker run` flags — nothing reads it inside the container. Unset → **auto**: pass nothing where no LSM is in force, select slice J's `deepagent-userns` where it is loaded, and **abort pre-flight** where an LSM is in force but the profile is not loaded. `unconfined` → `--security-opt apparmor=unconfined` (works everywhere; drops the whole profile). Any other value is passed through as a host-loaded profile name. See "AppArmor: the second gate" below. |
 
 (`MAP_HOST_USER`/`HOST_UID`/`HOST_GID` are Linux-only mount-ownership knobs and have no `.ps1`
@@ -962,11 +963,26 @@ bwrap: Can't mount proc on /newroot/proc: Operation not permitted
 `EPERM`, no denial logged. That is the kernel's `mount_too_revealing()` check — a fresh procfs
 cannot be mounted from a non-initial user namespace while the visible procfs is covered by
 submounts, and Docker's `maskedPaths`/`readonlyPaths` are 13 such mounts. Independent of seccomp
-*and* AppArmor; `classify_bwrap_failure` does not yet distinguish it and reports `unknown`.
+*and* AppArmor.
 
-Workaround today: add `--security-opt systempaths=unconfined` to the `docker run` by hand. Making
-that a launcher default when `DEEPAGENTS_JAIL=1` is `milestone4.1.md` fork **J5** — decided, not
-built. **Do not** instead bind the container's `/proc` and drop `--unshare-pid`: the harness and the
+**Fork J5 is now wired** (and **not yet re-measured on an AppArmor host** — say it that way):
+`run-docker.{sh,ps1}` and `smoke.{sh,ps1}` pass `--security-opt systempaths=unconfined` from the
+same `DEEPAGENTS_JAIL=1` block that passes seccomp and AppArmor, announcing it;
+`DEEPAGENTS_JAIL_SYSTEMPATHS=default` keeps Docker's `/proc` masks (the **LSM-only control**, no
+script edit needed). `classify_bwrap_failure` has a third `procfs` class — separated from `lsm` by
+**errno**, EPERM vs. EACCES, since both fail at a mount — and `preflight` / `jail-check.py` /
+`doctor` each diagnose it by name instead of `unknown`. `doctor` reads the container's own
+`/proc/self/mountinfo` rather than a forwarded flag, and reports covering mounts as a **warning**,
+not an error: slice H passed 5/5 on Docker Desktop/WSL2 *with* those masks, so they are the
+configuration that trips the kernel check, not proof it trips here.
+
+Why this is not the trade `apparmor=unconfined` was: what it drops is not protecting the jailed
+process. The re-exec happens before anything heavy loads, and inside the jail `/proc` is bwrap's
+own fresh procfs, which never carried Docker's masks; the dangerous targets are checked against
+capabilities in the **initial** user namespace, which no container process holds. The residual —
+the window before the re-exec, and anything outside the jail — is narrow, **not zero**.
+
+**Do not** instead bind the container's `/proc` and drop `--unshare-pid`: the harness and the
 agent's shell run as the same uid, so `/proc/<harness-pid>/environ` would hand the shell every
 provider key, and `_agent_shell_env`'s allowlist does not cover reading another process's environ
 (§13.7). Related, and true of the **shipped default** today: with `DEEPAGENTS_JAIL=0` the shell is a
