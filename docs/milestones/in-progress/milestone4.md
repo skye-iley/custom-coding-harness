@@ -41,7 +41,7 @@ later layers slot in without reworking policy (feature plan §7).
 | **G** §10 security verification suite | tests that *prove* the boundary holds (floor never leaks, no traversal escape) | §10 | v1 (support) | ships in PR1–3 |
 | **H** bwrap fs-tool jail | allow-list boundary; route **all** fs tools through the jail; narrow seccomp profile; **carries slice D's deferred approve branch** | feature plan §4.2 · detail §11.4 | **v1 — core, built** (opt-in, `DEEPAGENTS_JAIL=1`) | PR6 |
 | **I** overlayfs view | tool-agnostic true allow-list + upper-diff write-back | feature plan §4.3 | deferred v2 | — |
-| **J** AppArmor profile | vendored `docker-default` + narrowed `mount` rules, so the jail runs on AppArmor-confined hosts without dropping the whole LSM | detail §11.6 · §16 fork 10 · **full spec `milestone4.1.md`** | **built, pending live-host measurement** (see `milestone4.1.md` §13.1) | PR7 |
+| **J** AppArmor profile | vendored `docker-default` + narrowed `mount` rules, so the jail runs on AppArmor-confined hosts without dropping the whole LSM | detail §11.6 · §16 fork 10 · **full spec `milestone4.1.md`** | **built + measured** 2026-08-14 (rule set 7→8, four corrections). LSM gate closed; jail still blocked on a **third**, non-LSM gate — `milestone4.1.md` §13.7 / fork J5 | PR7 |
 
 ---
 
@@ -624,6 +624,21 @@ The seam:
 > (§11.6) is the fix; `DEEPAGENTS_JAIL_APPARMOR=unconfined` is the interim escape hatch. **Any future
 > boundary measurement must name the LSM it ran under** — that omission is what let this ship as
 > "verified" when it was verified on one host class.
+>
+> **Update 2026-08-14 — reproduced on an AppArmor host.** Ubuntu VM, kernel `7.0.0-29-generic`,
+> Docker 29.7.2, `docker-default` in force. Row 1 failed exactly as predicted above; with slice J's
+> `deepagent-userns` loaded, **all six rows reproduce** (`milestone4.1.md` §13.1a). Two things the
+> measurement changed, both of which belong here and not only in M4.1:
+>
+> 1. **Slice J's mount rule set was wrong** — four of seven rules, plus one missing. Derived rule
+>    sets are hypotheses. The corrected set is 8 rules, each backed by a denial.
+> 2. **There is a THIRD gate, and this doc's "two independent gates" framing is incomplete.** After
+>    seccomp and AppArmor both allow, the kernel's `mount_too_revealing()` check still refuses
+>    bwrap's fresh `--proc` — `EPERM`, no LSM denial — because Docker's `maskedPaths`/`readonlyPaths`
+>    cover the container's procfs. Reproducing rows 2–6 above required
+>    `--security-opt systempaths=unconfined`. Fork J5 in `milestone4.1.md` decides the fix; until it
+>    lands, `DEEPAGENTS_JAIL=1` on a stock Linux host still does not start. The lesson generalizes
+>    the one already written above: a gate you have not run against is a gate you have not counted.
 >
 > Now automated: `scripts/smoke.{sh,ps1}` `JAIL_CHECK=1` / `-JailCheck`. **Caveat for anyone
 > re-running this by hand:** stage the fixture workspace/state **outside `/tmp`** — `bwrap_args`

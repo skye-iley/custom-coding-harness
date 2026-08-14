@@ -943,14 +943,35 @@ sudo deepagent-image/scripts/install-apparmor-profile.sh          # load (enforc
 if an LSM is in force asks whether `deepagent-userns` is loaded. Not loaded ⇒ it **aborts before
 `docker run`** with the install command. It never falls back to `unconfined` on its own.
 
-**⚠️ Built, but not yet measured on an AppArmor host.** Every machine this was developed on is
-Docker Desktop/WSL2, which loads no AppArmor policy — the same blind spot that let slice H ship
-claiming more reach than it had. So the mount rule set is *derived from bwrap's syscall sequence,
-not confirmed against a live denial log*. Treat `DEEPAGENTS_JAIL=1` on Ubuntu/Debian as untested
-until a run on such a host is recorded (CI's non-gating `apparmor-load-probe` job exists to produce
-exactly that record). If it denies something, read `dmesg | grep 'apparmor="DENIED"'` and add **only**
-the rule the denial demands, with a justification in `apparmor/README.md` — a broad `mount,` catch-all
-is `unconfined` in disguise and `verify_profile` rejects it.
+**✅ Measured 2026-08-14** on an Ubuntu VM (kernel `7.0.0-29-generic`, Docker 29.7.2). The rule set
+is no longer derived: it went **7 → 8 rules with four corrections**, and `jail-check.py` passes 5/5
+under the vendored profile with zero `deepagent-userns` denials. Round-by-round log:
+`milestone4.1.md` §13.1a. If you ever change `RELAXED_MOUNT_RULES`, the process is unchanged — read
+`dmesg | grep 'apparmor="DENIED"'` and add **only** the rule the denial demands, with a justification
+in `apparmor/README.md`; a broad `mount,` catch-all is `unconfined` in disguise and `verify_profile`
+rejects it. Reinstall after every `apparmor-sync`: the kernel holds the old rules until replaced, and
+nothing in-container can detect a stale load.
+
+**⚠️ But the jail still does not start on a stock Ubuntu/Debian host — there is a THIRD gate.**
+The AppArmor measurement surfaced it: with the LSM satisfied, bwrap dies at
+
+```
+bwrap: Can't mount proc on /newroot/proc: Operation not permitted
+```
+
+`EPERM`, no denial logged. That is the kernel's `mount_too_revealing()` check — a fresh procfs
+cannot be mounted from a non-initial user namespace while the visible procfs is covered by
+submounts, and Docker's `maskedPaths`/`readonlyPaths` are 13 such mounts. Independent of seccomp
+*and* AppArmor; `classify_bwrap_failure` does not yet distinguish it and reports `unknown`.
+
+Workaround today: add `--security-opt systempaths=unconfined` to the `docker run` by hand. Making
+that a launcher default when `DEEPAGENTS_JAIL=1` is `milestone4.1.md` fork **J5** — decided, not
+built. **Do not** instead bind the container's `/proc` and drop `--unshare-pid`: the harness and the
+agent's shell run as the same uid, so `/proc/<harness-pid>/environ` would hand the shell every
+provider key, and `_agent_shell_env`'s allowlist does not cover reading another process's environ
+(§13.7). Related, and true of the **shipped default** today: with `DEEPAGENTS_JAIL=0` the shell is a
+plain passthrough in the container's PID namespace, so `cat /proc/1/environ` returns the harness's
+keys — measured. The nested `sandbox-exec` jail is what closes it, and only under the jail.
 
 Other options:
 - **`DEEPAGENTS_JAIL_APPARMOR=unconfined`** — works on any host, but drops the **whole**

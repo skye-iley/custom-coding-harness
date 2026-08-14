@@ -103,19 +103,38 @@ DENY_MOUNT_RULE = "deny mount,"
 # What replaces it: the mount operations bwrap actually performs, and nothing
 # else. Each is justified per-rule in apparmor/README.md.
 #
-# NOTE (milestone4.1.md §13.1): derived from bwrap's syscall sequence, then
-# confirmed against a live AppArmor host's denial log. Adding a rule here widens
-# the profile -- it must arrive with a justification in the README and a denial
-# that demanded it. A bare `mount,` catch-all is `unconfined` wearing a costume
-# and verify_profile rejects it.
+# NOTE (milestone4.1.md §13.1): MEASURED, not derived. The original seven rules
+# were read off bwrap's syscall sequence; four of them were wrong, and this set is
+# what a live Ubuntu 25.10 / kernel 7.0.0-29-generic / Docker 29.7.2 host's
+# `apparmor="DENIED"` log actually demanded (see §13.1a for the round-by-round
+# record). Adding a rule here widens the profile -- it must arrive with a
+# justification in the README and a denial that demanded it. A bare `mount,`
+# catch-all is `unconfined` wearing a costume and verify_profile rejects it.
 RELAXED_MOUNT_RULES = (
-    "mount options=(rw, rslave) -> /,",
+    # bwrap's first act after unshare. MS_SILENT is set on every mount bwrap
+    # makes; AppArmor's `options=` is an EXACT flag-set match, so omitting it
+    # denied with info="failed flags match".
+    "mount options=(rw, silent, rslave) -> /,",
     "mount fstype=tmpfs,",
     "mount options=(rw, bind),",
     "mount options=(rw, rbind),",
-    "mount options=(ro, remount, bind),",
+    # The second half of every --ro-bind. `in` (subset), not `=` (exact), because
+    # Linux cannot create a read-only bind in one call: bwrap binds, then remounts
+    # re-supplying the SOURCE mount's existing flags (nosuid/nodev/relatime/... on
+    # the observed host). That set is host- and mount-dependent, so exact matching
+    # would need one rule per combination. `rw` is deliberately absent so this
+    # stays the read-only remount rule and cannot serve as a general bind grant.
+    "mount options in (ro, silent, remount, bind, nosuid, nodev, noexec, noatime, relatime, nodiratime, strictatime),",
+    # UNVERIFIED TARGET: bwrap mounts procfs at `newroot/proc` pre-pivot, which
+    # AppArmor should see as /newroot/proc/, yet the measured run passed with this
+    # rule unchanged and logged no proc denial. A passing run cannot say WHICH rule
+    # authorized the mount, so this may be dead weight. milestone4.1.md fork J4.
     "mount fstype=proc -> /proc/,",
     "pivot_root,",
+    # bwrap makes the old root rprivate before detaching it, AFTER all setup ops --
+    # which is why this denial only surfaced once rules 1-5 were correct and the
+    # kernel's procfs gate was held open. Missing entirely from the derived set.
+    "mount options=(rw, silent, rprivate) -> /oldroot/,",
 )
 
 # Upstream rules whose removal would gut the profile while leaving our mount

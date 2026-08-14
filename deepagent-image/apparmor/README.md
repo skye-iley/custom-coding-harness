@@ -46,17 +46,20 @@ is not failing).
 
 ## What is relaxed, and why each rule
 
-Upstream's single `deny mount,` is replaced by exactly these:
+Upstream's single `deny mount,` is replaced by exactly these. **Every rule here is backed by a
+kernel denial that demanded it** — measured 2026-08-14 on Ubuntu (kernel `7.0.0-29-generic`, Docker
+29.7.2). See `docs/milestones/in-progress/milestone4.1.md` §13.1a for the round-by-round log.
 
 | Rule | What needs it |
 |---|---|
-| `mount options=(rw, rslave) -> /,` | bwrap's first act after `unshare`: `mount(NULL, "/", NULL, MS_SLAVE\|MS_REC, NULL)`, so mount events in the jail do not propagate back to the host namespace. This is the operation that fails today. |
+| `mount options=(rw, silent, rslave) -> /,` | bwrap's first act after `unshare`: `mount(NULL, "/", NULL, MS_SILENT\|MS_SLAVE\|MS_REC, NULL)`, so mount events in the jail do not propagate back to the host namespace. `silent` is **not optional**: AppArmor's `options=` is an exact flag-set match, and omitting `MS_SILENT` denies with `info="failed flags match"`. |
 | `mount fstype=tmpfs,` | `--tmpfs /tmp`, `--dev` (which builds a tmpfs `/dev`), and the empty-directory overmounts that hide masked directories inside the jail. |
-| `mount options=(rw, bind),` | every `--bind` — principally the workspace, mounted read-write so the agent's edits still land live. |
+| `mount options=(rw, bind),` | every `--bind` — principally the workspace, mounted read-write so the agent's edits still land live. Measured to need **no** `silent`, unlike the propagation mounts. |
 | `mount options=(rw, rbind),` | the recursive form, used for the read-only system binds (`/usr`, `/bin`, `/lib`, `/opt`, …). |
-| `mount options=(ro, remount, bind),` | the second half of `--ro-bind`: Linux cannot create a read-only bind in one call, so bwrap binds then remounts read-only. |
-| `mount fstype=proc -> /proc/,` | `--proc /proc`. bwrap mounts a **fresh** procfs inside the jail rather than inheriting the container's. |
+| `mount options in (ro, silent, remount, bind, nosuid, nodev, noexec, noatime, relatime, nodiratime, strictatime),` | the second half of `--ro-bind`: Linux cannot create a read-only bind in one call, so bwrap binds then remounts read-only — re-supplying the **source mount's** existing flags. Those depend on the host's storage driver and on each bind source (`nosuid, nodev, relatime` on the measured host), so `=` would need one rule per combination and cannot converge. `in` (subset match) is the correct operator. **`rw` is deliberately absent** so this stays the read-only remount rule rather than becoming a general bind grant. |
+| `mount fstype=proc -> /proc/,` | `--proc /proc`. bwrap mounts a **fresh** procfs inside the jail rather than inheriting the container's. ⚠️ **Target unverified** — bwrap mounts at `newroot/proc` pre-pivot, and every measured denial named a pre-pivot path, yet the passing run logged no proc denial. A passing run cannot say which rule authorized a mount, so this may be inert. Tracked as `milestone4.1.md` fork J6; resolve by deleting it and re-measuring. |
 | `pivot_root,` | how bwrap swaps the assembled tree in as `/`. Denied by the stock profile because it is a mount-family operation. |
+| `mount options=(rw, silent, rprivate) -> /oldroot/,` | bwrap makes the old root rprivate before detaching it, so unmount events do not reach the parent namespace. This runs **after** all setup ops, which is why it was the last denial to surface — and why it was missing from the rule set originally derived by reading bwrap's syscall sequence. |
 
 **Everything else in `docker-default` survives byte-for-byte** — all nine `deny`
 rules (`/proc/sysrq-trigger`, `/proc/kcore`, the `/proc/sys` write denials,
@@ -93,6 +96,11 @@ its seccomp form (`seccomp=unconfined`). The honest accounting:
   jail, which does **not** inherit Docker's masks. Inside the jail those
   init-userns capability checks are the only thing left. That is a thinner
   backstop than the layered one, and it is the argument for this profile.
+  *(Fork J5 leans on this same fact in the opposite direction: if the jail's procfs
+  never had Docker's masks, then `systempaths=unconfined` takes away something the
+  jailed process was not getting anyway. Both readings are correct; note that the
+  fact is doing double duty, and that J5's residual — the pre-re-exec window and
+  anything outside the jail — is not covered by it.)*
 - **Categorically wider than what the operator signed up for.** Fork 7 framed the
   trade as *five relaxed syscalls*. `unconfined` makes it *five syscalls and an
   entire LSM off*.
@@ -149,6 +157,35 @@ error, because it is the failure that looks most like success.
 - Docker Desktop / WSL2 / macOS need nothing: their container VM loads no
   AppArmor policy at all. That is also why this gap survived to CI — every
   slice-H measurement was taken there.
+
+## This profile is necessary but not sufficient
+
+Loading `deepagent-userns` closes the AppArmor gate. It does **not** make
+`DEEPAGENTS_JAIL=1` start on a stock Ubuntu/Debian host, because there is a
+**third** gate, independent of both seccomp and AppArmor:
+
+```
+bwrap: Can't mount proc on /newroot/proc: Operation not permitted
+```
+
+`EPERM`, and `dmesg` shows no denial — this is the kernel's `mount_too_revealing()`
+check, not an LSM. Mounting a fresh procfs from a non-initial user namespace is
+refused while the procfs already visible in the mount namespace is covered by
+submounts, and Docker's `maskedPaths` / `readonlyPaths` are exactly that (13
+mounts over `/proc` on the measured host).
+
+Today's workaround is `--security-opt systempaths=unconfined` on the `docker run`.
+Wiring that into the launchers is `milestone4.1.md` fork **J5** — decided, not yet
+built. Until it lands, an operator on an AppArmor host must add the flag by hand,
+and `harness doctor` will not tell them so.
+
+Do **not** "fix" this by binding the container's `/proc` and dropping
+`--unshare-pid`. The harness and the agent's shell run as the same uid, so
+`/proc/<harness-pid>/environ` hands the shell every provider API key —
+`_agent_shell_env`'s allowlist governs what the shell *inherits*, not what it can
+read out of another process. The nested shell jail's `--unshare-pid` + fresh
+`--proc` is what closes that, and it can only mount a fresh procfs if the outer
+jail's procfs is itself uncovered. See `milestone4.1.md` §13.7.
 
 ## Regenerating
 

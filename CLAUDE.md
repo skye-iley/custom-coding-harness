@@ -51,15 +51,22 @@ secret-safe containers.
     **Slice J — vendored `docker-default` with only its `mount` rule narrowed** (same shape as
     `seccomp-sync`) — is **built** (`docs/milestones/in-progress/milestone4.1.md`): the profile,
     `apparmor-sync --check`, install script, and `run-docker`/`harness doctor` wiring have all
-    landed. **UNCONFIRMED:** the one thing not done is the live-host measurement on a real
-    AppArmor-confined machine (Ubuntu/Debian Docker, GitHub runners) — no such host has been
-    available to verify it on. CI's `apparmor-load-probe` job carries this measurement and is
-    deliberately non-gating until it reports; until it does, treat the mount rule set as *derived,
-    not confirmed*, same caveat `milestone4.1.md` and `apparmor/README.md` carry. The interim knob
-    `DEEPAGENTS_JAIL_APPARMOR=unconfined` still works everywhere but drops the whole LSM profile
-    rather than one rule — prefer the vendored profile once confirmed.
-    (`milestone4.md` §11.6, §16 fork 10, invariants 37–38; `milestone4.1.md` §1/§13.1). SELinux
-    hosts are untested.
+    landed, and the live-host measurement is **done** (2026-08-14, Ubuntu VM, kernel
+    `7.0.0-29-generic`, Docker 29.7.2). The rule set is **measured, not derived** — it went 7 → 8
+    rules with four corrections, and `jail-check.py` passes 5/5 under the vendored profile with zero
+    `deepagent-userns` denials (`milestone4.1.md` §13.1a has the round-by-round denial log).
+    **But the jail still does not start on a stock Ubuntu/Debian host**, because the measurement
+    surfaced a **third** gate nobody had accounted for: the kernel's `mount_too_revealing()` check
+    refuses bwrap's fresh `--proc` while Docker's `maskedPaths`/`readonlyPaths` cover the container's
+    procfs — `EPERM`, no denial logged, independent of both seccomp and AppArmor. Interim workaround
+    is `--security-opt systempaths=unconfined` by hand; wiring it into the launchers behind
+    `DEEPAGENTS_JAIL=1` is fork **J5** (decided, not built — `milestone4.1.md` §13.7/§14). So: the
+    LSM half is finished and verified; end-to-end usability on Linux is not. Don't round the first
+    up to the second. CI's `apparmor-load-probe` job is still non-gating — the measurement was taken
+    on a local VM, not a GitHub runner (fork J2). The knob `DEEPAGENTS_JAIL_APPARMOR=unconfined`
+    still works everywhere but drops the whole LSM profile rather than one rule — prefer the
+    vendored profile. (`milestone4.md` §11.6, §16 fork 10, invariants 37–38; `milestone4.1.md`
+    §1/§13.1/§13.7). SELinux hosts are untested.
     Slice D (`permission_denied` interrupt) is
     **built, audit-only** — a path-guard denial (always a true workspace escape in v1; pathguard has
     no floor/mask awareness) never offers an interactive approve — a real escape must never be a thing
