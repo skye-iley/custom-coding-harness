@@ -153,8 +153,45 @@ def netjail_dir() -> Path:
     return Path(__file__).resolve().parent.parent.parent / "netjail"
 
 
+def netjail_template_path(path: Path) -> Path:
+    """The tracked `.example` template beside a live allowlist file."""
+    return path.with_name(path.name + ".example")
+
+
+def netjail_read_path(path: Path) -> Path:
+    """The file a *reader* should consult: the live allowlist if it exists, else
+    the tracked `.example` template.
+
+    The live files are gitignored so an operator's edits (or a test's) can never
+    pollute a clone, but the shipped defaults still have to work on a fresh
+    checkout with nothing copied — so a read falls through to the template.
+    Reading must not create anything: `smoke` reads these lists and may not
+    write into the repo tree. Materializing the live file is `netjail_seed`'s
+    job, and only a write path calls it. The launchers do the same resolution in
+    shell (`run-docker`/`smoke` NetJail blocks) — keep the three in step."""
+    return path if path.is_file() else netjail_template_path(path)
+
+
+def netjail_seed(path: Path) -> Path:
+    """Materialize the gitignored live allowlist from its tracked template.
+
+    Called before a write so an edit lands on the local file rather than the
+    committed one, and so the operator inherits the template's comments and
+    commented-out examples instead of a bare line in an empty file. A no-op once
+    the live file exists; silently leaves `path` absent if no template is there
+    either (the caller's append then creates it, same as before)."""
+    if not path.is_file():
+        template = netjail_template_path(path)
+        if template.is_file():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
+    return path
+
+
 def netjail_list_entries(path: Path) -> list[str]:
-    """Non-comment, non-blank lines, in file order. `[]` if the file is absent."""
+    """Non-comment, non-blank lines, in file order. `[]` if neither the live file
+    nor its `.example` template is present."""
+    path = netjail_read_path(path)
     if not path.is_file():
         return []
     return [
@@ -165,6 +202,7 @@ def netjail_list_entries(path: Path) -> list[str]:
 
 
 def netjail_add_entry(path: Path, entry: str) -> None:
+    netjail_seed(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
     sep = "\n" if existing and not existing.endswith("\n") else ""
@@ -175,7 +213,13 @@ def netjail_add_entry(path: Path, entry: str) -> None:
 def netjail_remove_entry(path: Path, index: int) -> str | None:
     """Remove the `index`-th (0-based) non-comment, non-blank entry, leaving
     comments/blank lines elsewhere untouched. Returns the removed entry's
-    text, or `None` if `index` is out of range or the file doesn't exist."""
+    text, or `None` if `index` is out of range or the file doesn't exist.
+
+    Seeds the live file from its template first, so deleting one of the shipped
+    defaults edits the local copy rather than the committed template — the index
+    the caller passes came from `netjail_list_entries`, which may have listed the
+    template's entries."""
+    netjail_seed(path)
     if not path.is_file():
         return None
     lines = path.read_text(encoding="utf-8").splitlines()

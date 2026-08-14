@@ -150,3 +150,55 @@ def test_detect_is_wsl_echoes_zero_or_one():
         capture_output=True, text=True, check=True,
     )
     assert out.stdout.strip() in ("0", "1")
+
+
+# --- the decision has to reach EVERY container that touches a host-owned mount -
+
+_RUN_DOCKER_SH = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "run-docker.sh"
+_needs_launcher = pytest.mark.skipif(
+    not _RUN_DOCKER_SH.is_file(),
+    reason="run-docker.sh not available (scripts/ is not COPYed into the image)",
+)
+
+
+def _joined_commands(text):
+    r"""Collapse backslash-continued shell lines into one logical line each, so a
+    multi-line `docker run ... \` reads as a single string. Normalizes CRLF
+    first: the repo is edited on Windows, where the continuation is `\` + CRLF."""
+    text = text.replace("\r\n", "\n")
+    return [c.strip() for c in text.replace("\\\n", " ").splitlines()]
+
+
+@_needs_launcher
+def test_mask_scan_container_is_host_uid_mapped():
+    """Regression: the mask-scan container mounted $STATE_HOST_DIR read-write but
+    ran unmapped, so on a native-Linux engine it hit
+    `[Errno 13] Permission denied: '/project/state/mask-snapshot.txt'` — the host
+    user had just created that dir via mkdir -p, and the image's uid 10001 cannot
+    write it. The launcher then fails CLOSED ("refusing to launch unmasked"), so
+    masking being on by default made run-docker unusable on bare Linux. Invisible
+    on Docker Desktop/WSL2, which squash mount ownership.
+
+    The property: any container that mounts the host-owned state dir must carry
+    the same uid mapping the agent container does."""
+    commands = _joined_commands(_RUN_DOCKER_SH.read_text(encoding="utf-8"))
+    scans = [c for c in commands if "docker run" in c and "mask-scan" in c]
+    assert scans, "no mask-scan `docker run` found in run-docker.sh"
+    for cmd in scans:
+        assert "STATE_HOST_DIR" in cmd, "mask-scan no longer mounts the state dir — retarget this test"
+        assert "USER_FLAGS" in cmd, (
+            "mask-scan container is not host-uid mapped; it will EACCES on "
+            "$STATE_HOST_DIR on a native-Linux engine"
+        )
+
+
+@_needs_launcher
+def test_user_flags_is_applied_not_merely_computed():
+    """USER_FLAGS is built once near the top; a container that never expands it
+    silently ignores the whole hostmap decision."""
+    text = _RUN_DOCKER_SH.read_text(encoding="utf-8")
+    expansions = text.count('${USER_FLAGS[@]+"${USER_FLAGS[@]}"}')
+    assert expansions >= 2, (
+        f"USER_FLAGS expanded {expansions} time(s); expected the agent container "
+        "AND the mask-scan container"
+    )

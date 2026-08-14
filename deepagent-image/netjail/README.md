@@ -125,6 +125,25 @@ simpler to just use HTTPS + token.
 | `allowed-domains.txt`| egress domain allowlist (one domain per line) |
 | `tinyproxy.conf`     | proxy settings; the allowlist Filter is generated from `allowed-domains.txt` at run time |
 
+**The two allowlists are local files, not tracked ones.** Only
+`host-services.txt.example` / `allowed-domains.txt.example` are committed; the
+live pair is gitignored. This is because `harness config security` edits them in
+place, which made every allowlist experiment a dirty tracked file — one
+`git add -A` away from shipping someone's local grant to everyone.
+
+You do **not** have to copy anything. A reader (`run-docker`, `smoke`) uses the
+live file when it exists and falls through to the `.example` otherwise, so a
+fresh clone runs on the shipped defaults with no setup step. The live file is
+materialized only by a **write**: `harness config security`, or your own
+`cp host-services.txt.example host-services.txt` before hand-editing. Seeding
+copies the template whole, so your local copy keeps its comments and
+commented-out examples.
+
+Consequence worth knowing: once a live file exists it **fully replaces** the
+template — later additions to the shipped defaults (a new provider domain, say)
+won't reach you. Diff them after a pull if a jailed run starts failing on
+something new: `diff allowed-domains.txt allowed-domains.txt.example`.
+
 Env overrides (both scripts): `NETJAIL_JAIL_NET`, `NETJAIL_EGRESS_NET`,
 `NETJAIL_SOCAT_IMAGE`, `NETJAIL_PROXY_IMAGE`.
 

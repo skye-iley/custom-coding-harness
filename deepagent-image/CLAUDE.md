@@ -176,6 +176,24 @@ knowing:
   (`validate_credentials` passes unknown specs through to `init_chat_model`) but carries no rates or
   metadata.
 
+**KNOWN GAP — a nonexistent model is caught at first use, not at the point of entry.**
+`validate_credentials` validates *credentials*, and the unknown-spec pass-through above is
+deliberate, so nothing checks that the tag exists on the daemon. `/config set model
+ollama:<typo>` therefore reports a clean `model X -> Y` switch and returns to the prompt as if
+it worked; the provider's own "model does not exist" error only arrives when the next prompt is
+sent. The error itself is clear — the defect is purely that it is **deferred**, so the operator
+gets a false success, edits state that can't work, and burns a turn to find out. This is the same
+point-of-entry principle M5.1 applied to enum knobs (invalid `mask_mode` now fails at profile
+load / env resolve / `config set` rather than silently resolving to the opposite mode); model is
+the free-text field that principle doesn't yet cover, since `choices` can't enumerate it.
+Closing it needs three decisions, which is why it is not a one-liner: (1) **warn, don't refuse** —
+a refusal would break the unregistered-local-tag case above; (2) it is **per-provider capability**,
+not one check — ollama has `GET /api/tags` and lmstudio `/v1/models`, cloud providers have no cheap
+equivalent, so the probe belongs behind a provider capability flag and must return "can't tell"
+rather than "missing"; (3) it must **never fail closed offline**, and the host/image tiers are
+hermetic, so the probe needs a guard that keeps the suite off the network. Both entry points
+(startup resolution and the `cli._LIVE_APPLIERS` model applier) need it, or the gap just moves.
+
 **`[options]` — client kwargs from the registry.** `provider.toml` and
 `models/<model>.toml` can each carry an `[options]` table whose keys are passed verbatim to the
 chat-model constructor; `DEEPAGENTS_MODEL_OPTIONS="num_ctx=131072,temperature=0.2"` overrides both
@@ -843,6 +861,13 @@ is image-only (smoke).
   `-NetJail`: add a `<name> <port>` line to `netjail/host-services.txt` for a host service, or
   the bare domain to `netjail/allowed-domains.txt` for an egress destination. Anything not
   listed is blocked. Don't widen the allowlist beyond what the feature needs.
+  **Edit the `.example` template when the grant is a shipped default.** The live pair is
+  gitignored (the wizard rewrites it in place, so tracking it made every experiment a dirty
+  tracked file); only `host-services.txt.example` / `allowed-domains.txt.example` are committed.
+  Readers fall through to the template when the live file is absent — four hand-written mirrors
+  of that resolution (`run-docker.{sh,ps1}`, `smoke.{sh,ps1}`), pinned by
+  `test_both_launchers_and_both_smoke_scripts_resolve_the_template_fallback`. A default added
+  only to your live file reaches nobody else.
 
 ## Workspace visibility / secret masking (Milestone 4)
 
@@ -1139,7 +1164,10 @@ the baseline record of defaults when nothing else overrides it.
     owns that file's format) and NetJail allowlists (add/delete entries in
     `netjail/host-services.txt` / `netjail/allowed-domains.txt` in place, preserving comments --
     resolved relative to `config_cli.py`'s own path since `netjail/` isn't copied into the image,
-    so this only works run on the host, same pre-spinup context every other knob here assumes).
+    so this only works run on the host, same pre-spinup context every other knob here assumes.
+    Those two files are **gitignored**, materialized from their tracked `.example` on first
+    write (`netjail_seed`); reads fall through to the template (`netjail_read_path`) and never
+    create anything, because `smoke` reads the same lists and must not write into the repo).
     It adds **no langchain/deepagents dependency of its own** (stdlib + `harness.config` +
     `harness.providers` only) -- that is why it is a separate module from `cli.py`. Since
     §0.1 F6 that also means what it sounds like: **the wizard runs on a host with no runtime

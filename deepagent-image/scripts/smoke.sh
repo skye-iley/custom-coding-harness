@@ -77,7 +77,11 @@ netjail_up() {
 
   # Host-service forwarders. Each is attached to the egress net (has the host
   # route) plus the jail net (agent-visible), and relays exactly one TCP port.
+  # Live allowlist if the operator has one, else the tracked .example template
+  # (the live pair is gitignored). A READ never materializes the live file —
+  # smoke must not write into the repo tree. Mirror of run-docker.sh.
   local services="$NETJAIL_DIR/host-services.txt"
+  [[ -f "$services" ]] || services="$NETJAIL_DIR/host-services.txt.example"
   if [[ -f "$services" ]]; then
     local name port
     while read -r name port _; do
@@ -101,6 +105,7 @@ netjail_up() {
   # Egress proxy: domain-allowlisted HTTP(S) forward proxy for git/pip/npm. Only
   # started when the allowlist has at least one real entry.
   local domains="$NETJAIL_DIR/allowed-domains.txt"
+  [[ -f "$domains" ]] || domains="$NETJAIL_DIR/allowed-domains.txt.example"   # see the services note above
   if [[ -f "$domains" ]] && grep -qvE '^[[:space:]]*(#|$)' "$domains"; then
     # Generate the tinyproxy Filter file: anchor each plain domain so it matches
     # the domain and its subdomains (and only those), not arbitrary substrings.
