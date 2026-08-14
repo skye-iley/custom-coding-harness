@@ -1251,8 +1251,8 @@ but with a success message.
 non-TTY falls back to the unchanged `usage: /config set <field> <value>` error. Free-text fields
 (`model`, `topic`, …) have no picker — a picker over arbitrary prior strings is a different feature.
 
-Full write-up: `docs/milestones/in-progress/milestone5.1.md`; the checkable properties (and which
-test pins each) are in `milestone5.1_invariants.md` beside it.
+Full write-up: `docs/milestones/complete/milestone5.1.md`; the checkable properties (and which
+test pins each) are its §9.
 
 ## Interactive REPL Commands (in-container)
 

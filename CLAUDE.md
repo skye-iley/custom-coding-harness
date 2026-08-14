@@ -9,8 +9,8 @@ secret-safe containers.
   **milestone lifecycle** (`planned/` docs-only → `in-progress/` doc + separate `_invariants.md` +
   code → `complete/` doc-only with invariants folded in). In short:
   - `docs/milestones/complete/` — **built + merged** milestones (`mvp.md`, `milestone1.md`,
-    `milestone2.md`, `milestone3.md`, `milestone4.md`, `milestone4.1.md`, `milestone5.md`). These
-    record shipped scope; the code is
+    `milestone2.md`, `milestone3.md`, `milestone4.md`, `milestone4.1.md`, `milestone5.md`,
+    `milestone5.1.md`, `milestone6.md`). These record shipped scope; the code is
     authoritative where they drift.
     - `mvp.md` — the shipped baseline: one-command containerized Deep Agents coding agent.
     - `milestone1.md` — cost/token visibility + resource caps.
@@ -86,9 +86,7 @@ secret-safe containers.
       passes, including the launcher forwarding `-e DEEPAGENTS_JAIL` so the seccomp relaxation and
       the in-container jail can't come apart). See the "Unified
       config" section in `deepagent-image/CLAUDE.md`.
-  - `docs/milestones/in-progress/` — **being built** milestones (doc + separate invariants doc + code
-    on a feature branch).
-    - `milestone5.1.md` (+ `milestone5.1_invariants.md`) — **Config Field Registry**: follow-on
+    - `milestone5.1.md` — **Config Field Registry**: follow-on
       refactor of Milestone 5. M5 unified *resolution* but not *declaration* — a knob was spelled
       out in ten places, nine of which failed silently if missed, and no field carried its own
       valid values, which is what blocked the arrow-key `/config` menu M5 scoped out. One
@@ -102,11 +100,12 @@ secret-safe containers.
       `_handle_config` keeps its 3-tuple return as an adapter over the new `LiveContext`). The one
       sanctioned behavior change: **every enum knob now rejects an invalid value at the point of
       entry**, closing M5's known `mask_mode: alow` → silently-`deny` gap for profile, env, and CLI
-      at once. See the "Unified config" section in `deepagent-image/CLAUDE.md`.
-    - `milestone6.md` (+ `milestone6_invariants.md` + `milestone6_spec.md`) — **Telemetry**
-      (`design_doc.md` §8 + §12.7). **Build from `milestone6_spec.md`** — it is the
-      implementation-level doc (exact schemas, capture seams, module layout, test plan, build
-      order); the other two are the plan and the checkable properties. Scope: a per-turn
+      at once. §9 holds the folded invariants. See the "Unified config" section in
+      `deepagent-image/CLAUDE.md`.
+    - `milestone6.md` (+ `milestone6_spec.md`) — **Telemetry**
+      (`design_doc.md` §8 + §12.7). `milestone6_spec.md` is the implementation-level doc (exact
+      schemas, capture seams, module layout, test plan, build order); `milestone6.md` is the plan,
+      and its §8 is the folded invariants. Scope: a per-turn
       `<state-dir>/usage.jsonl` sink, a derived session summary, that summary appended
       to the PR body `git-pr` opens, and keyless read access. **Built — T1–T6 all landed** on
       `feat/milestone6-telemetry-impl`; §0.1 records the three things the build changed about the
@@ -138,8 +137,12 @@ secret-safe containers.
       correctness comes from the benchmark's own evaluation of the produced diff. Note
       `TelemetryMiddleware` must not ride on `CostTrackerMiddleware`: M1 omits the tracker entirely
       on a `pricing = "free"` model, which is the default local-Ollama benchmark case.
+  - `docs/milestones/in-progress/` — **being built** milestones (doc + separate invariants doc + code
+    on a feature branch). *(Currently empty — M5.1 and M6 moved to `complete/` on merge; the
+    directory is not tracked while empty, recreate it when the next build starts.)*
   - `docs/milestones/planned/` — **not-yet-built** milestones (docs only). Wins over `design_doc.md`
-    for "what we build next." *(Currently empty — `milestone5.1.md` moved to `in-progress/`.)*
+    for "what we build next." *(Currently empty — the forward candidates live in `design_doc.md`
+    §11/§12.6/§13 and its "Core identity — dependency chain" list.)*
   - `docs/features/workspace_visibility.md` — **named feature plan** (not a numbered milestone): restrict
     which workspace paths an agent can see (`.agentignore` policy, designated-secret floor, docker-mask
     → bwrap fs-tool jail → optional overlayfs). **Planned** — summarized in `design_doc.md` §2.

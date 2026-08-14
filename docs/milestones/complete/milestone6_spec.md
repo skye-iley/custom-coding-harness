@@ -1,7 +1,8 @@
 # Milestone 6 — Implementation Spec
 
-> Implementation-level companion to `milestone6.md` (the plan) and `milestone6_invariants.md` (the
-> checkable properties). Same relationship `milestone5_spec.md` has to `milestone5.md`.
+> Implementation-level companion to `milestone6.md` (the plan) and its §8 invariants (the checkable
+> properties, folded in from `milestone6_invariants.md` on completion). Same relationship
+> `milestone5_spec.md` has to `milestone5.md`.
 >
 > **Purpose: be sufficient to build from cold.** The plan says *what and why*; this says *exactly
 > where, exactly what shape*. Where a detail could reasonably go two ways, it is decided here rather

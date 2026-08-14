@@ -1,6 +1,6 @@
 """Telemetry — the per-turn sink, the derived session summary, and the readers.
 
-Milestone 6 (``docs/milestones/in-progress/milestone6_spec.md``). The harness
+Milestone 6 (``docs/milestones/complete/milestone6_spec.md``). The harness
 already computes almost everything ``design_doc.md`` §8 asks for and throws most
 of it away; this module is the missing **sink** and the missing **surface**.
 
