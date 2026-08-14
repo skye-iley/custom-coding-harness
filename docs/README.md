@@ -35,15 +35,32 @@ A milestone moves through three folders. What each stage carries is deliberate:
 
 ## Planned milestones — `milestones/planned/`
 
-*(Empty — nothing is queued. The forward candidates live in `design_doc.md` §11 (raw-trace debug
-mode, the benchmark ladder), §13 (file-read middleware), §12.6 (deepagents-native skills/memories),
-and the "Core identity — dependency chain" list; `features/` holds the two named non-milestone
-plans.)*
+*(Empty — nothing is queued. The forward candidates live in `design_doc.md` §11 (the benchmark
+ladder), §13 (file-read middleware), §12.6 (deepagents-native skills/memories), and the "Core
+identity — dependency chain" list; `features/` holds the two named non-milestone plans.)*
 
 ## In-progress milestones — `milestones/in-progress/`
 
-*(Empty — `milestone5.1.md` and `milestone6.md` moved to `complete/` when they merged. The
-directory is not tracked while empty; recreate it when the next build starts.)*
+- **`milestone7.md`** — **Raw Trace Debug Mode** (`design_doc.md` §11): `DEEPAGENTS_RAW_TRACE=1`
+  writes, per model call, the literal payload the harness hands the model — final system prompt,
+  full message history, tool schemas, tool-call/tool-result blocks — so a weak-model failure
+  (hallucinated tool JSON, ignored instructions, a tool the model never saw) is diagnosable from the
+  harness's own output instead of by switching on the model server's debug logging
+  (`OLLAMA_DEBUG=1`, the workaround this removes). **Spec only — no code yet**, on
+  `feat/raw-trace-debug`. Complements M6 rather than overlapping it: telemetry says the tool-error
+  rate spiked at turn 7 and deliberately carries no text; this says what the model was looking at.
+  Two decisions worth knowing before reading: the capture point is the **innermost**
+  `wrap_model_call`, *after* `_ExcludeToolsMiddleware`, because a trace taken one layer out logs
+  tools the model never received — the exact bug class it exists to diagnose (§5); and the
+  design-doc's "raw tags included, e.g. Ollama's chat-template markers" is **not deliverable** —
+  Ollama renders the template server-side, so §3 defines three fidelity levels, ships the
+  message-level one, and requires `design_doc.md` §11 to be corrected rather than left aspirational.
+- **`milestone7_invariants.md`** — the checkable properties, written before the code: fidelity
+  (bodies verbatim, additions structural only, one record per model call, labels correct across
+  retries and HITL resumes), position (the middleware is last in the stack, asserted not
+  commented), containment (state-dir sink, scrub on every section, tamper-resistance stated at its
+  real strength), and non-interference/removability (a sink failure never breaks a turn; off means a
+  byte-identical middleware stack). Folds into `milestone7.md` on completion.
 
 ## Complete milestones — `milestones/complete/`
 

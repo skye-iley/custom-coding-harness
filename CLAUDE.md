@@ -138,11 +138,29 @@ secret-safe containers.
       `TelemetryMiddleware` must not ride on `CostTrackerMiddleware`: M1 omits the tracker entirely
       on a `pricing = "free"` model, which is the default local-Ollama benchmark case.
   - `docs/milestones/in-progress/` — **being built** milestones (doc + separate invariants doc + code
-    on a feature branch). *(Currently empty — M5.1 and M6 moved to `complete/` on merge; the
-    directory is not tracked while empty, recreate it when the next build starts.)*
+    on a feature branch).
+    - `milestone7.md` (+ `milestone7_invariants.md`) — **Raw Trace Debug Mode**
+      (`design_doc.md` §11). `DEEPAGENTS_RAW_TRACE=1` writes, per model call, the literal payload
+      the harness hands the model — final system prompt, full message history, tool schemas,
+      tool-call/tool-result blocks — for diagnosing weak/local-model failures (hallucinated tool
+      JSON, ignored instructions, a tool the model never saw) without falling back to the model
+      server's own debug logging (`OLLAMA_DEBUG=1`). **Spec only — no code yet**, on
+      `feat/raw-trace-debug`. Complements M6, does not overlap it: telemetry carries **no** text by
+      construction (M6 invariant 10) and says the tool-error rate spiked; this says what the model
+      was looking at when it did. Two things to know before touching the code. **The seam is the
+      innermost `wrap_model_call`, appended after `_ExcludeToolsMiddleware`** — langchain composes
+      first-is-outermost, so a trace installed one layer out logs tools the model never received,
+      which is the exact bug class the milestone exists to diagnose; an invariant pins the list
+      position rather than the intent (§5). And **`design_doc.md` §11's "raw tags included, e.g.
+      Ollama's chat-template markers" is not deliverable** — Ollama renders the chat template
+      server-side, so §3 splits fidelity into three levels, ships the message level, and makes
+      correcting that design-doc sentence part of done-when. Sink is `<state-dir>/raw-trace/
+      <run_id>.log` (never stderr, never the workspace), scrubbed through `harness/scrub.py`; the
+      file is a **secret-bearing artifact** and the docs say so rather than implying the scrub is a
+      boundary. Off by default; pre-spinup, not `/config`-settable (§9.1).
   - `docs/milestones/planned/` — **not-yet-built** milestones (docs only). Wins over `design_doc.md`
     for "what we build next." *(Currently empty — the forward candidates live in `design_doc.md`
-    §11/§12.6/§13 and its "Core identity — dependency chain" list.)*
+    §11 (the benchmark ladder), §12.6, §13, and its "Core identity — dependency chain" list.)*
   - `docs/features/workspace_visibility.md` — **named feature plan** (not a numbered milestone): restrict
     which workspace paths an agent can see (`.agentignore` policy, designated-secret floor, docker-mask
     → bwrap fs-tool jail → optional overlayfs). **Planned** — summarized in `design_doc.md` §2.

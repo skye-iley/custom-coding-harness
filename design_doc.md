@@ -1082,7 +1082,12 @@ system_interrupts:                # which harness events raise (vs. log/crash)
 *   **Long-Term Project Memory**: Integrate a vector database (e.g., Qdrant or ChromaDB) to store a persistent, compressed index of the entire project history and decision logs.
 
 ### Framework Enhancements
-*   **Raw prompt/response debug mode**: a `DEEPAGENTS_RAW_TRACE=1` (or `--raw-trace`) startup flag
+*   **Raw prompt/response debug mode** — **now specced as Milestone 7**
+    (`docs/milestones/in-progress/milestone7.md`), which supersedes this entry where the two
+    disagree. Note in particular that the "raw tags included" clause below is **not deliverable**
+    client-side (Ollama renders the chat template server-side); M7 §3 defines the three fidelity
+    levels and ships the message level. This wording is corrected when M7's slice S5 lands. A
+    `DEEPAGENTS_RAW_TRACE=1` (or `--raw-trace`) startup flag
     that prints, per turn, the literal text the model receives and returns — full system prompt,
     message/turn history, tool schemas, and tool-call/tool-result blocks, as close as possible to
     what the model itself sees (raw tags included, e.g. Ollama's chat-template markers), with only
