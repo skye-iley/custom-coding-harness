@@ -780,11 +780,15 @@ without it.
      the one rule the AppArmor path narrows, and nobody here has run it. Naming it while refusing to
      call it supported is the honest position — the same one `apparmor=unconfined` gets.
 
-  What would close it properly: a measured run on a Fedora/RHEL host, the same way §13.1a/§13.1b were
-  taken (`ausearch -m AVC` in place of `dmesg | grep apparmor="DENIED"`), and — if a policy change
-  turns out to be needed — a vendored type-enforcement rule with the same
-  reproducible-from-upstream + `verify_profile` contract the AppArmor artifact carries. Until then
-  the run-time surface says "untested" and means it.
+  **What is NOT claimed:** that the jail works on SELinux. It is unmeasured in both directions — the
+  AppArmor result predicts nothing here, since type enforcement over `container_t` is a different
+  mechanism from a literal `deny mount,`. Closing it properly means a measured run on a Fedora/RHEL
+  host, the same way §13.1a/§13.1b were taken (`ausearch -m AVC` in place of
+  `dmesg | grep apparmor="DENIED"`), and — if a policy change turns out to be needed — a vendored
+  type-enforcement module under the same reproducible-from-upstream + `verify_profile` contract the
+  AppArmor artifact carries. That work is **out of scope for 4.1 and tracked as a pre-release
+  compatibility item**: `docs/features/selinux_compatibility.md` (protocol, what each outcome
+  obliges, acceptance criteria). Until then the run-time surface says "untested" and means it.
 - **J5 — the procfs gate (§13.7).** ⚠️ **Blocks `DEEPAGENTS_JAIL=1` on every stock Linux Docker
   host.** **Decided: option 1.** Pass `--security-opt systempaths=unconfined` from
   `run-docker.{sh,ps1}` and `smoke.{sh,ps1}`, in the same block that already passes

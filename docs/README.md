@@ -141,6 +141,12 @@ A milestone moves through three folders. What each stage carries is deliberate:
 - **`workspace_visibility.md`** — restrict which workspace paths an agent can see
   (`.agentignore` policy, designated-secret floor, docker-mask → bwrap fs-tool jail →
   optional overlayfs). **Planned**; summarized in `design_doc.md` §2.
+- **`selinux_compatibility.md`** — **pre-release compatibility check**, not a milestone: run
+  `DEEPAGENTS_JAIL=1` on a RHEL/Fedora host and record what happens. SELinux is **not confirmed to
+  work and not confirmed to fail** — M4.1 fork J4 closed only the *reporting* gap (the harness names
+  the unknown instead of misreading an SELinux context as an AppArmor profile). Carries the
+  measurement protocol (`ausearch -m AVC`, not `dmesg`), what each outcome obliges, and the
+  standing rule: no claim of SELinux support until a measurement exists.
 
 ## Specs — `specs/`
 

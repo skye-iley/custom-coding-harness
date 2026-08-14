@@ -81,7 +81,10 @@ secret-safe containers.
     reading one as the other made `doctor` demand an AppArmor profile on a host with no AppArmor), a
     mount denial there routes to a known-gap message naming `--security-opt label=disable` as
     **unverified**, and `doctor` warns rather than errors: unmeasured is neither "broken" nor "holds"
-    (invariant 44).
+    (invariant 44). Whether the jail actually runs under `container_t` is **unknown in both
+    directions** and tracked as a pre-release compatibility item —
+    `docs/features/selinux_compatibility.md` (measurement protocol, what each outcome obliges);
+    Podman/rootless is the same operator's second gap.
     Slice D (`permission_denied` interrupt) is
     **built, audit-only** — a path-guard denial (always a true workspace escape in v1; pathguard has
     no floor/mask awareness) never offers an interactive approve — a real escape must never be a thing

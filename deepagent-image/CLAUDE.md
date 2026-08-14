@@ -1026,6 +1026,14 @@ label=disable` is the usual escape hatch, named and marked **unverified**; it dr
 for the whole container, wider than the one rule the AppArmor path narrows. Closing the gap means a
 measured run (`ausearch -m AVC` in place of `dmesg | grep apparmor="DENIED"`), not an inference.
 
+**Do not read the J4 work as SELinux support.** Whether bwrap builds the namespace under
+`container_t` is unmeasured in both directions — AppArmor's result predicts nothing, since type
+enforcement is a different mechanism from a literal `deny mount,`. Tracked as a **pre-release
+compatibility check** in `docs/features/selinux_compatibility.md`: the measurement protocol, what each
+outcome obliges (nothing to vendor / a narrow policy module under the same generated+verified contract
+/ an announced `label=disable` knob / a documented "does not run here"), and the rule that no claim of
+support exists until a measurement does.
+
 ### Quick-Start: In-Workspace `.agentignore` File
 
 The `.agentignore` file (gitignore syntax) in your workspace root controls which paths 
