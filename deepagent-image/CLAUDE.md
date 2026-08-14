@@ -756,7 +756,13 @@ Conventions for new tests:
   `/artifacts` (**outside `/project`**, so the artifact-guard leaves it alone) —
   it becomes a per-test subdir there, so files are shipped out to
   `test-artifacts/<timestamp>/` on the host and survive the disposable container.
-  `tests/test_artifacts.py` exercises both modes.
+  `tests/test_artifacts.py` exercises both modes. `smoke.sh` `chmod 0777`s that
+  host dir before mounting it: the test image runs as `USER agent` (uid 10001)
+  and a native-Linux engine keeps mount ownership, so an unwidened host-owned dir
+  EACCESes the fixture. Same mount-ownership trap `run-docker`'s mask-scan hit,
+  but the uid remap it uses is not usable here — the test container also writes
+  agent-owned paths inside the image (`__pycache__`, `.pytest_cache`), so
+  remapping would just move the EACCES.
 - A session-scoped autouse guard in `conftest.py` (`_clean_repo_artifacts`)
   diffs the `project/` tree and removes anything a test leaves behind, unless
   `DEEPAGENTS_KEEP_TEST_ARTIFACTS=1` is set (debug escape hatch). It's a backstop

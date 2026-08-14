@@ -6,6 +6,7 @@ harness.config + harness.providers only, no deepagents/langgraph/langchain
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -773,17 +774,29 @@ def test_add_entry_seeds_the_live_file_and_leaves_the_template_untouched(tmp_pat
     assert template.read_text(encoding="utf-8") == "# header\nexample.com\n"
 
 
-def test_remove_entry_edits_the_seeded_copy_not_the_template(tmp_path):
+def test_remove_entry_edits_the_local_copy_not_the_template(tmp_path):
     """The index came from netjail_list_entries, which may have listed the
-    TEMPLATE's entries — so a delete must seed first or it edits a tracked file
-    (or, before seeding existed, silently did nothing)."""
+    TEMPLATE's entries — so a delete must read through the template and write the
+    live file, or it edits a tracked file (or silently does nothing)."""
     live = tmp_path / "host-services.txt"
     template = tmp_path / "host-services.txt.example"
     template.write_text("# header\nollama 11434\nredis 6379\n", encoding="utf-8")
     removed = cc.netjail_remove_entry(live, 0)
     assert removed == "ollama 11434"
     assert cc.netjail_list_entries(live) == ["redis 6379"]
+    assert "# header" in live.read_text(encoding="utf-8")   # comments survive the copy
     assert cc.netjail_list_entries(template) == ["ollama 11434", "redis 6379"]
+
+
+def test_remove_entry_out_of_range_does_not_materialize_the_live_file(tmp_path):
+    """A miss must stay a pure no-op. Materializing on a cancelled delete is a
+    silent one-way door: once the live file exists it FULLY replaces the
+    template, so the operator stops inheriting later shipped defaults — a
+    permanent consequence for an action that did nothing."""
+    live = tmp_path / "allowed-domains.txt"
+    (tmp_path / "allowed-domains.txt.example").write_text("example.com\n", encoding="utf-8")
+    assert cc.netjail_remove_entry(live, 7) is None
+    assert not live.exists()
 
 
 def test_seed_is_idempotent_and_does_not_clobber_local_edits(tmp_path):
@@ -813,14 +826,37 @@ def test_both_launchers_and_both_smoke_scripts_resolve_the_template_fallback():
     """Four hand-written mirrors of the same resolution (fork 3: the launchers
     need no host Python). A script that misses it silently runs with an EMPTY
     allowlist on a fresh clone — NetJail's fail-closed design then blocks
-    everything, which reads as a jail bug rather than a missing file."""
+    everything, which reads as a jail bug rather than a missing file.
+
+    Asserts the *shape*, not just the presence of the string: the template has to
+    be the FALLBACK, reached only when the live file is absent. A script that
+    read the template unconditionally would satisfy a substring check while
+    ignoring every local grant the operator made."""
     scripts = Path(__file__).resolve().parent.parent.parent / "scripts"
     if not scripts.is_dir():
         pytest.skip("launchers are host-side only (scripts/ is not COPYed into the image)")
+    # The one-line fallback idiom each shell uses. Both are negative-existence
+    # tests on the already-assigned live path, which is the property that matters.
+    fallback = {
+        ".sh": re.compile(r'\[\[\s+-f\s+"\$\w+"\s+\]\]\s+\|\|\s+\w+="[^"]*\.example"'),
+        ".ps1": re.compile(r'if\s+\(-not\s+\(Test-Path\s+\$\w+\)\)\s+\{[^}]*\.example"[^}]*\}'),
+    }
+    seen = 0
     for name in ("run-docker.sh", "smoke.sh", "run-docker.ps1", "smoke.ps1"):
         path = scripts / name
         if not path.is_file():
-            pytest.skip(f"{name} not present")
+            continue   # per-file, NOT a whole-test skip: one absent script must
+                       # not silently drop coverage of the other three.
+        seen += 1
         text = path.read_text(encoding="utf-8")
+        pattern = fallback[".ps1" if name.endswith(".ps1") else ".sh"]
         for stem in ("host-services.txt", "allowed-domains.txt"):
             assert f"{stem}.example" in text, f"{name} never falls back to {stem}.example"
+            # The live name must be assigned first; the template only rescues it.
+            assert text.index(f"{stem}.example") > text.index(f'{stem}"'), (
+                f"{name} reaches {stem}.example before assigning the live {stem}"
+            )
+            hits = [ln for ln in text.splitlines() if f"{stem}.example" in ln and pattern.search(ln)]
+            assert hits, f"{name}'s {stem}.example is not guarded by an absent-live-file test"
+    if not seen:
+        pytest.skip("no launcher scripts present")

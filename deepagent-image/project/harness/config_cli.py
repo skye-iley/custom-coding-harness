@@ -215,14 +215,20 @@ def netjail_remove_entry(path: Path, index: int) -> str | None:
     comments/blank lines elsewhere untouched. Returns the removed entry's
     text, or `None` if `index` is out of range or the file doesn't exist.
 
-    Seeds the live file from its template first, so deleting one of the shipped
-    defaults edits the local copy rather than the committed template — the index
-    the caller passes came from `netjail_list_entries`, which may have listed the
-    template's entries."""
-    netjail_seed(path)
-    if not path.is_file():
+    Reads through `netjail_read_path` and writes to the live file, so deleting
+    one of the shipped defaults lands on the local copy and leaves the committed
+    template alone — the index the caller passes came from
+    `netjail_list_entries`, which may have listed the TEMPLATE's entries, so
+    reading the live file only would silently delete nothing.
+
+    A miss stays a pure no-op: nothing is materialized unless a line actually
+    came out. Creating the live file on an out-of-range index would be a silent
+    one-way door — once it exists it fully replaces the template, so the operator
+    would stop inheriting later additions to the shipped defaults."""
+    source = netjail_read_path(path)
+    if not source.is_file():
         return None
-    lines = path.read_text(encoding="utf-8").splitlines()
+    lines = source.read_text(encoding="utf-8").splitlines()
     out: list[str] = []
     count = -1
     removed = None
@@ -235,6 +241,7 @@ def netjail_remove_entry(path: Path, index: int) -> str | None:
                 continue  # drop this line, keep everything else
         out.append(line)
     if removed is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("\n".join(out) + "\n", encoding="utf-8")
     return removed
 

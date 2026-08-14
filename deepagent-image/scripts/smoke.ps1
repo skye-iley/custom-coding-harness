@@ -172,6 +172,10 @@ if ($NetJail) {
 # alone) and point DEEPAGENTS_TEST_ARTIFACTS_DIR at it, so files tests write via
 # the `artifact_dir` fixture survive the disposable container. Off = the fixture
 # falls back to the container's tmp_path and everything is deleted with the container.
+# No `chmod 0777` twin of smoke.sh's line here, deliberately: that guards the
+# native-Linux case where the mount keeps host ownership and the uid-10001 test
+# container cannot write the dir. A Windows engine squashes mount ownership, and
+# POSIX modes don't apply — same reason run-docker.ps1 carries no uid remap.
 $ArtifactArgs = @()
 $ArtifactHostDir = $null
 if ($KeepArtifacts) {

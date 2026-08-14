@@ -119,11 +119,13 @@ simpler to just use HTTPS + token.
 
 ## Config files
 
-| File | Purpose |
-|------|---------|
-| `host-services.txt`  | host-port forwarders (one `name port` per line) |
-| `allowed-domains.txt`| egress domain allowlist (one domain per line) |
-| `tinyproxy.conf`     | proxy settings; the allowlist Filter is generated from `allowed-domains.txt` at run time |
+| File | Tracked? | Purpose |
+|------|----------|---------|
+| `host-services.txt`          | no (gitignored) | host-port forwarders (one `name port` per line) |
+| `host-services.txt.example`  | **yes** | shipped defaults for the above; used verbatim while the live file is absent |
+| `allowed-domains.txt`        | no (gitignored) | egress domain allowlist (one domain per line) |
+| `allowed-domains.txt.example`| **yes** | shipped defaults for the above; used verbatim while the live file is absent |
+| `tinyproxy.conf`             | **yes** | proxy settings; the allowlist Filter is generated from `allowed-domains.txt` at run time |
 
 **The two allowlists are local files, not tracked ones.** Only
 `host-services.txt.example` / `allowed-domains.txt.example` are committed; the
