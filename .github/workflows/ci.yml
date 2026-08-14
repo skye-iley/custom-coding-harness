@@ -57,55 +57,6 @@ jobs:
       # ::test_committed_baseline_is_reproducible_from_the_pinned_template asserts the
       # diff base was not quietly weakened to match a widened profile. Both are offline
       # and need no AppArmor kernel, which is why they belong in the host tier.
-  apparmor-load-probe:
-    # MEASUREMENT, NOT A GATE (milestone4.1.md §10 step 2 / fork J2). Slice J's spec
-    # explicitly refuses to pin a CI jail gate on an assumption — the whole milestone
-    # exists because slice H shipped "verified" on a host class that could not see the
-    # AppArmor gate at all. So this job asks the question on the record: can a
-    # GitHub-hosted runner load an AppArmor profile, and does the jail then start?
-    #
-    # continue-on-error until a run answers it. Then: if it loads, fold the install
-    # into the `smoke` job and pin JAIL_CHECK=1 there (turning today's rc-77 skip into
-    # a real red/green gate); if it does not, delete this job and record why beside the
-    # smoke comment below. Either way the next edit here is driven by an observation.
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - run: docker build --target runtime -t deepagent-harness deepagent-image
-      - name: What confines a container here by default?
-        run: |
-          docker run --rm deepagent-harness sh -c \
-            'cat /proc/self/attr/apparmor/current 2>/dev/null || cat /proc/self/attr/current 2>/dev/null || echo "(no LSM attr)"'
-      - name: Load the narrowed profile into the runner kernel
-        run: sudo deepagent-image/scripts/install-apparmor-profile.sh
-      - name: Does the daemon accept it?
-        run: docker run --rm --security-opt apparmor=deepagent-userns deepagent-harness true
-      - name: Does the jail start under it?
-        # systempaths=unconfined is the third gate (milestone4.1.md §13.7, fork J5):
-        # with Docker's /proc masks in place the kernel refuses bwrap's fresh --proc
-        # regardless of either profile. Mirrors what run-docker/smoke now pass under
-        # DEEPAGENTS_JAIL=1 — without it this step measures the wrong thing.
-        run: |
-          docker run --rm -i \
-            --security-opt seccomp=deepagent-image/seccomp/userns.json \
-            --security-opt apparmor=deepagent-userns \
-            --security-opt systempaths=unconfined \
-            -e DEEPAGENTS_JAIL=1 \
-            deepagent-harness python3 - < deepagent-image/scripts/jail-check.py
-      - name: Control — with Docker's /proc masks left on, it must NOT start
-        # Records the third gate on the runner too, and proves the step above is not
-        # passing for some unrelated reason. Expected to report a `procfs` SKIP (rc 77);
-        # never fails the job, since this is a measurement.
-        continue-on-error: true
-        run: |
-          set +e
-          docker run --rm -i \
-            --security-opt seccomp=deepagent-image/seccomp/userns.json \
-            --security-opt apparmor=deepagent-userns \
-            -e DEEPAGENTS_JAIL=1 \
-            deepagent-harness python3 - < deepagent-image/scripts/jail-check.py
-          echo "control rc=$? (77 = skipped; expect the procfs reason)"
   image-tests:
     runs-on: ubuntu-latest
     steps:
@@ -119,23 +70,46 @@ jobs:
       - run: docker build --target runtime -t deepagent-harness deepagent-image
       # smoke.sh also runs the M4 slice H jail gate (bwrap must really unshare under
       # seccomp/userns.json, and a masked path must read empty inside the jail with no
-      # docker mask in play). It SELF-SKIPS (rc 77) when the host cannot build the jail
-      # for either environmental reason — nested userns refused, or the host LSM denying
-      # bwrap's mounts.
+      # docker mask in play). It can SELF-SKIP (rc 77) for three environmental reasons —
+      # nested userns refused, the host LSM denying bwrap's mounts, or the kernel
+      # refusing its fresh procfs (milestone4.1.md §13.7).
       #
-      # MEASURED on this runner: it skips, with reason `lsm`. ubuntu-latest applies
-      # Docker's `docker-default` AppArmor profile, whose literal `deny mount,` blocks
-      # bwrap at its first mount — *after* `unshare` succeeded, so seccomp is not the
-      # constraint and no seccomp change fixes it. That is slice J (milestone4.md
-      # §11.6). An earlier revision of this comment claimed the gate "cannot redden CI
-      # environmentally"; it could and did, because the rc-77 path only recognized
-      # userns refusals. It now recognizes both.
+      # MEASURED on this runner (run 31836729538, 2026-08-14, fork J2 — the answer §10
+      # step 2 was waiting on): ubuntu-latest reports `docker-default (enforce)`, the
+      # narrowed profile LOADS with the install script below, the daemon accepts it, and
+      # jail-check passes 5/5 under it. So the gate is now PINNED with JAIL_CHECK=1: a
+      # regression that silently disables the jail fails the build instead of quietly
+      # downgrading to a skip. That is the strongest regression guard this milestone
+      # has, because it exercises the jail on the host class that broke it — an
+      # AppArmor-confined Linux engine, not the Docker Desktop/WSL2 dev host where
+      # slice H shipped "verified" while unable to see the LSM gate at all.
       #
-      # Deliberately NOT pinned with JAIL_CHECK=1: on this runner that would pin a
-      # failure, not the boundary. Pin it once slice J lands and a run shows
-      # "M4 jail: ... ok" rather than "SKIPPED", so a regression that silently disables
-      # the jail fails the build instead of quietly downgrading to a skip.
-      - run: deepagent-image/scripts/smoke.sh
+      # If a future runner image drops AppArmor, bwrap, or the ability to load a
+      # profile, this reddens. That is intended: the fix is to re-measure and re-record
+      # here, never to unpin JAIL_CHECK and go back to a green run that proves nothing.
+      - name: Load the narrowed AppArmor profile into the runner kernel
+        # An AppArmor profile is not a file handed to `docker run` — it is compiled into
+        # the kernel of whichever host runs dockerd, so the runner needs this one-time
+        # step before smoke's auto-selection can find it (apparmor/README.md).
+        run: sudo deepagent-image/scripts/install-apparmor-profile.sh
+      - run: JAIL_CHECK=1 deepagent-image/scripts/smoke.sh
+      - name: Control — with Docker's /proc masks left on, the jail must NOT start
+        # The pass above rests on this (milestone4.1.md §13.8): keep Docker's
+        # maskedPaths/readonlyPaths and the kernel refuses bwrap's fresh --proc, EPERM,
+        # with no LSM denial logged. Without the control, a green jail-check has two
+        # variables in it and pins neither.
+        #
+        # NOT a gate: an rc other than 77 here means the *kernel's* third gate moved,
+        # which is a host-class observation to go read, not a harness regression to
+        # redden a build over. Runs jail-check directly rather than a second full smoke.
+        run: |
+          set +e
+          docker run --rm -i \
+            --security-opt seccomp=deepagent-image/seccomp/userns.json \
+            --security-opt apparmor=deepagent-userns \
+            -e DEEPAGENTS_JAIL=1 \
+            deepagent-harness python3 - < deepagent-image/scripts/jail-check.py
+          echo "control rc=$? (77 = skipped; expect the procfs reason)"
   parity:
     runs-on: ubuntu-latest
     steps:

@@ -165,6 +165,18 @@ error, because it is the failure that looks most like success.
   environment and are untested** — different mechanism (type enforcement,
   `--security-opt label=`), not addressed here. Do not read this profile's
   existence as coverage for them.
+
+  Untested, but **not silent** (M4.1 fork J4). The harness detects an SELinux
+  context (`jail.selinux_confinement`), refuses to report it as an AppArmor
+  profile — the two share `/proc/self/attr/current`, and reading a context as a
+  profile *name* used to make `doctor` demand an AppArmor profile on a host with
+  no AppArmor — routes a mount denial there to a known-gap message instead of
+  AppArmor instructions, and has `doctor` emit a **warning**: the jail may work
+  here or may not, and nobody has measured it. `--security-opt label=disable` is
+  the usual escape hatch, named and marked **unverified**; it drops SELinux
+  labelling for the whole container, which is wider than the one rule this
+  profile narrows. Measuring it (`ausearch -m AVC` where this doc says
+  `dmesg | grep apparmor="DENIED"`) is what would close the gap.
 - **Rootless Docker and Podman are untested** — profile application and naming
   differ.
 - Docker Desktop / WSL2 / macOS need nothing: their container VM loads no

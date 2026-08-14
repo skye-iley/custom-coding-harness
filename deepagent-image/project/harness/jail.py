@@ -65,6 +65,15 @@ _LEGACY_ATTR_PATH = "/proc/self/attr/current"
 # make doctor hard-error on exactly the host class slice H was verified on.
 _UNCONFINED_VALUES = frozenset({"unconfined", "kernel"})
 
+# Where the kernel exposes an SELinux context, same two-tier shape as AppArmor's.
+# SELinux is OUT OF SCOPE for slice J (milestone4.1.md §3, fork J4) -- these exist
+# so the harness can say "untested here" instead of misdiagnosing. Without them the
+# legacy shared attr, which on a RHEL/Fedora host holds a context like
+# `system_u:system_r:container_t:s0:c52,c87`, parses as an AppArmor *profile name*
+# and doctor sends the operator to install an AppArmor profile on a host that has
+# no AppArmor at all.
+_SELINUX_ATTR_PATH = "/proc/self/attr/selinux/current"
+
 
 def _read_attr(path: str) -> str | None:
     """Contents of an LSM attr file, or None when it does not exist / is unreadable.
@@ -96,12 +105,52 @@ def _profile_and_mode_from(raw: str) -> tuple[str | None, str | None]:
     """
     if not raw:
         return None, None
+    if _selinux_context_from(raw):
+        # The legacy attr is shared between LSMs. An SELinux context here is not an
+        # AppArmor profile and must not be reported as one (fork J4).
+        return None, None
     head, _, tail = raw.partition(" (")
     profile = head.strip()
     mode = tail.rstrip(")").strip().lower() or None
     if not profile or profile in _UNCONFINED_VALUES:
         return None, None
     return profile, mode
+
+
+def _selinux_context_from(raw: str) -> str | None:
+    """`raw` as an SELinux context, or None when it is not one.
+
+    Shape-matched rather than probed for two reasons: the same parse has to work on
+    the shared legacy attr file (where the only signal is the value itself), and it
+    keeps this host-testable without a /sys/fs/selinux mount. A context is
+    `user_u:role_r:type_t:level[:categories]` -- four or more colon-separated
+    fields, with the conventional `_r`/`_t` suffixes on role and type. Docker's is
+    `system_u:system_r:container_t:s0:c52,c87`.
+    """
+    if not raw or " (" in raw:
+        return None
+    parts = raw.split(":")
+    if len(parts) < 4 or not all(parts[:4]):
+        return None
+    if not parts[1].endswith("_r") or not parts[2].endswith("_t"):
+        return None
+    return raw
+
+
+def selinux_confinement() -> str | None:
+    """This process's SELinux context, or None when SELinux is not in force.
+
+    SELinux is untested for the jail (milestone4.1.md §3 / fork J4). This exists so
+    the failure is *named* -- an operator on RHEL/Fedora gets "SELinux, known gap"
+    instead of AppArmor instructions for an LSM their host does not run.
+    """
+    specific = _read_attr(_SELINUX_ATTR_PATH)
+    if specific:
+        return _selinux_context_from(specific)
+    legacy = _read_attr(_LEGACY_ATTR_PATH)
+    if legacy:
+        return _selinux_context_from(legacy)
+    return None
 
 
 class JailUnavailable(RuntimeError):
@@ -270,6 +319,35 @@ def apparmor_hint() -> str:
         "slice J) or relaunch with DEEPAGENTS_JAIL_APPARMOR=unconfined, which works "
         "everywhere but drops the whole profile rather than one rule."
     )
+
+
+def selinux_hint() -> str:
+    """Operator-facing message for a mount denial on an SELinux host.
+
+    Deliberately NOT a remedy the way `apparmor_hint` is. Slice J vendored a
+    *measured* AppArmor profile; nothing equivalent has been measured for SELinux,
+    and this milestone's whole premise is that an inferred boundary is worth less
+    than no claim at all (milestone4.1.md §3, fork J4). So this names the gap, names
+    the only known escape hatch, and marks it unverified rather than recommending it.
+    """
+    context = selinux_confinement()
+    named = f"SELinux (context '{context}')" if context else "SELinux"
+    return (
+        f"the user namespace was created, then a mount was denied while {named} is in "
+        "force. SELinux is a KNOWN GAP: slice J's narrowed profile is AppArmor-only and "
+        "nothing has been measured on an SELinux host, so no supported fix exists "
+        "(milestone4.1.md §3, fork J4). `--security-opt label=disable` on `docker run` "
+        "is the usual escape hatch and is UNVERIFIED here -- it drops SELinux labelling "
+        "for the container, a wider trade than the one rule the AppArmor path narrows. "
+        "Report what you measure so this stops being a gap."
+    )
+
+
+def lsm_hint() -> str:
+    """The right remedy for whichever LSM is actually in force here."""
+    if selinux_confinement():
+        return selinux_hint()
+    return apparmor_hint()
 
 
 def jail_enabled(env: dict[str, str] | None = None) -> bool:
@@ -464,7 +542,9 @@ def preflight() -> list[str]:
         if kind == "lsm":
             # Do NOT blame seccomp here: the profile is almost certainly correct
             # and the operator would go re-check it for nothing (invariant 37).
-            problems.append(f"bwrap cannot build the jail here ({hint}). {apparmor_hint()}")
+            # Which LSM: an SELinux host gets the known-gap message, not AppArmor
+            # instructions for an LSM it does not run (fork J4).
+            problems.append(f"bwrap cannot build the jail here ({hint}). {lsm_hint()}")
         elif kind == "userns":
             problems.append(
                 f"bwrap cannot create a user namespace here ({hint}). The container most "
@@ -479,7 +559,16 @@ def preflight() -> list[str]:
             problems.append(f"bwrap cannot build the jail here ({hint}). {procfs_hint()}")
         else:
             confined = apparmor_confinement()
-            extra = f" This process is confined by AppArmor profile '{confined}'." if confined else ""
+            selinux = selinux_confinement()
+            if confined:
+                extra = f" This process is confined by AppArmor profile '{confined}'."
+            elif selinux:
+                extra = (
+                    f" This process runs under SELinux context '{selinux}', which is an "
+                    "untested host class for the jail (milestone4.1.md §3, fork J4)."
+                )
+            else:
+                extra = ""
             problems.append(
                 f"bwrap cannot build the jail here ({hint}).{extra} Check all three gates: "
                 "the narrow seccomp profile (--security-opt seccomp=deepagent-image/seccomp/"

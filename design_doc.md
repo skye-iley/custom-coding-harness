@@ -1128,7 +1128,10 @@ system_interrupts:                # which harness events raise (vs. log/crash)
 
 ### 12.1 CI pipeline for the harness repo
 > **Status:** ✅ Built (Milestone 4 slice F) — `.github/workflows/ci.yml` runs `host-tests`,
-> `image-tests`, `smoke` and `parity` on push/PR, plus a non-gating `apparmor-load-probe`. The
+> `image-tests`, `smoke` and `parity` on push/PR. `smoke` now loads the M4.1 AppArmor profile into
+> the runner kernel and pins `JAIL_CHECK=1`, so the bwrap jail is a red/green gate rather than an
+> environmental skip (`milestone4.1.md` §10.1); the `apparmor-load-probe` measurement job that
+> established this is possible has been deleted, its answer recorded there. The
 > rationale below is kept as the record of why; the job list there is the plan, the workflow file
 > is the truth.
 

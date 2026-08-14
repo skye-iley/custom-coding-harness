@@ -294,6 +294,21 @@ def doctor_main(argv: list[str]) -> int:
                 "— the /proc and /sys write denials and the ptrace peer restriction — "
                 "not only its deny-mount rule.",
             ))
+        elif jail_mod.selinux_confinement():
+            # M4.1 fork J4. Not an error: nothing has been measured here, and doctor
+            # must not claim a boundary is broken any more than it may claim one
+            # holds. A warning is the honest reading — the jail may well start (the
+            # AppArmor deny-mount rule has no SELinux equivalent) or may not, and
+            # this milestone's premise is that an unmeasured answer is not an answer.
+            records.append((
+                "warning",
+                f"fs jail: this container runs under SELinux "
+                f"(context '{jail_mod.selinux_confinement()}'), not AppArmor. Slice J's "
+                "narrowed profile is AppArmor-only and SELinux is UNTESTED for the jail "
+                "(milestone4.1.md §3, fork J4) — treat a working jail here as unverified. "
+                "If bwrap is denied, '--security-opt label=disable' is the usual escape "
+                "hatch, itself unverified and wider than the one narrowed rule.",
+            ))
         else:
             records.append(("info", "fs jail: no AppArmor confinement in force"))
 

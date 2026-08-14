@@ -67,11 +67,21 @@ secret-safe containers.
     The pass is paired with its control — with the masks kept, the run fails at `--proc` with **zero**
     `deepagent-userns` denials, which is what pins the cause rather than leaving a green run with two
     variables in it.
-    CI's `apparmor-load-probe` job is still non-gating — the measurement was taken
-    on a local VM, not a GitHub runner (fork J2). The knob `DEEPAGENTS_JAIL_APPARMOR=unconfined`
+    **Fork J2 is closed and CI now gates on the jail**: the `apparmor-load-probe` job answered green
+    on `ubuntu-latest` (run `31836729538` — `docker-default (enforce)` by default, the profile loads,
+    the daemon accepts it, `jail-check` 5/5, masks-on control skips with the `procfs` reason), so the
+    install step folded into the `smoke` job, `JAIL_CHECK=1` is pinned there, the control rides along
+    non-gating, and the probe job is deleted (`milestone4.1.md` §10.1, invariant 45). An
+    environmental red there is re-measured and re-recorded — never unpinned back to a skip.
+    The knob `DEEPAGENTS_JAIL_APPARMOR=unconfined`
     still works everywhere but drops the whole LSM profile rather than one rule — prefer the
     vendored profile. (`milestone4.md` §11.6, §16 fork 10, invariants 37–38; `milestone4.1.md`
-    §1/§13.1/§13.7). SELinux hosts are untested.
+    §1/§13.1/§13.7). **SELinux hosts stay untested (fork J4) but are no longer silent** — an SELinux
+    context is never reported as an AppArmor profile (the two share `/proc/self/attr/current`, and
+    reading one as the other made `doctor` demand an AppArmor profile on a host with no AppArmor), a
+    mount denial there routes to a known-gap message naming `--security-opt label=disable` as
+    **unverified**, and `doctor` warns rather than errors: unmeasured is neither "broken" nor "holds"
+    (invariant 44).
     Slice D (`permission_denied` interrupt) is
     **built, audit-only** — a path-guard denial (always a true workspace escape in v1; pathguard has
     no floor/mask awareness) never offers an interactive approve — a real escape must never be a thing

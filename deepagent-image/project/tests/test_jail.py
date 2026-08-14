@@ -408,6 +408,79 @@ def test_apparmor_confinement_falls_back_to_the_legacy_attr_path(tmp_path, monke
     assert jail.apparmor_confinement() == "docker-default"
 
 
+# --- SELinux: a third host class, named rather than misdiagnosed (M4.1 fork J4) --
+
+
+def _selinux_attrs(tmp_path, monkeypatch, context="system_u:system_r:container_t:s0:c52,c87"):
+    """A RHEL/Fedora-shaped host: no AppArmor attr, an SELinux context on the legacy one."""
+    legacy = tmp_path / "current"
+    legacy.write_bytes(context.encode() + bytes(1))
+    monkeypatch.setattr(jail, "_APPARMOR_ATTR_PATH", str(tmp_path / "nope"))
+    monkeypatch.setattr(jail, "_SELINUX_ATTR_PATH", str(tmp_path / "also-nope"))
+    monkeypatch.setattr(jail, "_LEGACY_ATTR_PATH", str(legacy))
+    return context
+
+
+def test_an_selinux_context_is_not_reported_as_an_apparmor_profile(tmp_path, monkeypatch):
+    """Regression: the legacy attr is shared between LSMs.
+
+    `system_u:system_r:container_t:s0:c52,c87` parsed as a profile *name*, so doctor
+    hard-errored "confined by AppArmor profile '<context>'" and sent an operator with
+    no AppArmor at all to go install an AppArmor profile.
+    """
+    _selinux_attrs(tmp_path, monkeypatch)
+    assert jail.apparmor_confinement() is None
+    assert jail.apparmor_confinement_detail() == (None, None)
+
+
+def test_selinux_confinement_reads_the_context(tmp_path, monkeypatch):
+    context = _selinux_attrs(tmp_path, monkeypatch)
+    assert jail.selinux_confinement() == context
+
+
+def test_selinux_confinement_prefers_the_per_lsm_attr(tmp_path, monkeypatch):
+    specific = tmp_path / "selinux_current"
+    specific.write_text("system_u:system_r:svirt_lxc_net_t:s0:c1,c2")
+    monkeypatch.setattr(jail, "_APPARMOR_ATTR_PATH", str(tmp_path / "nope"))
+    monkeypatch.setattr(jail, "_SELINUX_ATTR_PATH", str(specific))
+    monkeypatch.setattr(jail, "_LEGACY_ATTR_PATH", str(tmp_path / "also-nope"))
+    assert jail.selinux_confinement() == "system_u:system_r:svirt_lxc_net_t:s0:c1,c2"
+
+
+def test_an_apparmor_profile_is_not_mistaken_for_an_selinux_context(tmp_path, monkeypatch):
+    """The guard runs both ways: shape-matching must not swallow the AppArmor host."""
+    attr = tmp_path / "apparmor_current"
+    attr.write_text("docker-default (enforce)")
+    monkeypatch.setattr(jail, "_APPARMOR_ATTR_PATH", str(attr))
+    monkeypatch.setattr(jail, "_SELINUX_ATTR_PATH", str(tmp_path / "nope"))
+    monkeypatch.setattr(jail, "_LEGACY_ATTR_PATH", str(tmp_path / "also-nope"))
+    assert jail.selinux_confinement() is None
+    assert jail.apparmor_confinement() == "docker-default"
+
+
+def test_selinux_hint_names_the_gap_and_marks_the_escape_hatch_unverified(tmp_path, monkeypatch):
+    _selinux_attrs(tmp_path, monkeypatch)
+    hint = jail.selinux_hint()
+    assert "SELinux" in hint and "container_t" in hint
+    assert "KNOWN GAP" in hint and "J4" in hint
+    # The escape hatch is named but must never read as a supported fix: slice J
+    # vendored a MEASURED AppArmor profile and nothing equivalent exists here.
+    assert "label=disable" in hint and "UNVERIFIED" in hint
+    # Never AppArmor instructions on a host with no AppArmor.
+    assert "install-apparmor-profile" not in hint
+
+
+def test_lsm_hint_picks_the_lsm_actually_in_force(tmp_path, monkeypatch):
+    _selinux_attrs(tmp_path, monkeypatch)
+    assert jail.lsm_hint() == jail.selinux_hint()
+
+    attr = tmp_path / "apparmor_current"
+    attr.write_text("docker-default (enforce)")
+    monkeypatch.setattr(jail, "_APPARMOR_ATTR_PATH", str(attr))
+    monkeypatch.setattr(jail, "_LEGACY_ATTR_PATH", str(tmp_path / "also-nope"))
+    assert jail.lsm_hint() == jail.apparmor_hint()
+
+
 def test_apparmor_hint_names_both_remedies():
     hint = jail.apparmor_hint()
     assert "DEEPAGENTS_JAIL_APPARMOR=unconfined" in hint

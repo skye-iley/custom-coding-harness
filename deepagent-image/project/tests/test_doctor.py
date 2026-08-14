@@ -380,11 +380,49 @@ def test_doctor_quiet_when_no_lsm_in_force(tmp_path, monkeypatch, capsys):
     _jail_on(monkeypatch)
     monkeypatch.delenv("DEEPAGENTS_JAIL_APPARMOR", raising=False)
     monkeypatch.setattr(doctor_jail, "apparmor_confinement_detail", lambda: (None, None))
+    # Pinned like the AppArmor half above: on an SELinux dev host the real reader
+    # would return a context and this would (correctly) take the J4 branch instead.
+    monkeypatch.setattr(doctor_jail, "selinux_confinement", lambda: None)
 
     rc = doctor.doctor_main([str(ws), str(state)])
     err = _records(capsys)
     assert rc == 0
     assert "no AppArmor confinement in force" in err
+
+
+def test_doctor_reports_selinux_as_an_untested_gap_not_an_apparmor_problem(
+    tmp_path, monkeypatch, capsys
+):
+    """M4.1 fork J4. RHEL/Fedora is a third host class and nothing was measured there.
+
+    Two failures this pins, both of which the code had before J4: the SELinux context
+    read off the shared legacy attr was reported as an AppArmor *profile name*, so
+    doctor hard-errored telling the operator to load an AppArmor profile on a host
+    with no AppArmor; and there was no other mention of SELinux anywhere in the
+    run-time surface, so the alternative was silence. It is a warning, not an error —
+    doctor may not claim the boundary is broken any more than it may claim it holds.
+    """
+    from harness import jail as doctor_jail
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    _jail_on(monkeypatch)
+    monkeypatch.delenv("DEEPAGENTS_JAIL_APPARMOR", raising=False)
+    monkeypatch.setattr(doctor_jail, "apparmor_confinement_detail", lambda: (None, None))
+    monkeypatch.setattr(
+        doctor_jail, "selinux_confinement", lambda: "system_u:system_r:container_t:s0:c52,c87"
+    )
+
+    rc = doctor.doctor_main([str(ws), str(state)])
+    err = _records(capsys)
+    assert rc == 0
+    assert "SELinux" in err and "container_t" in err
+    assert "UNTESTED" in err
+    # Must not route an SELinux host into the AppArmor install instructions.
+    assert "install-apparmor-profile.sh" not in err
+    assert "no AppArmor confinement in force" not in err
 
 
 def test_doctor_passes_when_the_narrowed_profile_is_in_force(tmp_path, monkeypatch, capsys):

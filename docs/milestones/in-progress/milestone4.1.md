@@ -19,11 +19,17 @@
 >
 > The pass is **paired with its control**: with `DEEPAGENTS_JAIL_SYSTEMPATHS=default` the run fails
 > at `--proc` with **zero** `deepagent-userns` denials, which is what establishes that the flag is
-> the thing that moved rather than something else having changed. Forks J5 and J6 are closed; **J2
-> (CI gate) and J4 (SELinux) remain open**.
+> the thing that moved rather than something else having changed. **All forks are now closed** —
+> J5 and J6 by measurement, J2 by the CI answer below, J4 as a deliberate named gap.
 >
-> CI's `apparmor-load-probe` job (§10) remains non-gating; the measurement above was taken on a
-> local VM rather than a GitHub runner, so fork J2 is still open. Follow-up to
+> **J2 is closed and CI now gates on the jail.** The `apparmor-load-probe` job asked its question
+> on a GitHub runner and got a green answer (run `31836729538`, 2026-08-14: `docker-default
+> (enforce)` by default, the narrowed profile loads, the daemon accepts it, `jail-check` 5/5, and
+> the masks-on control skips with the `procfs` reason). Per §10 step 2 that is the "it loads"
+> branch: the install step folded into the `smoke` job, `JAIL_CHECK=1` is pinned there, and the
+> probe job is deleted. CI's jail gate is now red/green on an AppArmor-confined host instead of a
+> skip. **J4 (SELinux) is closed as an out-of-scope gap that now says so at run time** rather than
+> silently — see §14. Follow-up to
 > `docs/milestones/in-progress/milestone4.md` — it builds **slice J** (§0 table, §4, §11.6, §16
 > fork 10, invariant 38), the one M4 slice left unbuilt after A–H landed on `feat/milestone_4`.
 >
@@ -126,7 +132,9 @@ host-tier check, tests, and the doc corrections.
 
 - **SELinux (RHEL/Fedora/CentOS).** A third LSM with a different mechanism (`container_t` type
   enforcement, `--security-opt label=`). Untested, unaddressed. J's merge must not imply it works;
-  `apparmor/README.md` and `CLAUDE.md` say so explicitly.
+  `apparmor/README.md` and `CLAUDE.md` say so explicitly — and since fork J4 so does the **run-time
+  surface**: `doctor` warns, `lsm_hint()` names the gap, and an SELinux context is never reported as
+  an AppArmor profile. Out of scope means "not measured, and it says so", not "not mentioned".
 - **Rootless Docker / Podman.** Different profile application and naming. Untested.
 - **Making the jail on by default.** `DEEPAGENTS_JAIL` stays `0` — fork 7's userns-attack-surface
   trade is unchanged by this milestone. J changes *where the jail can run*, not *whether it is opted
@@ -468,17 +476,42 @@ as **unverified**, and this milestone exists because someone previously inferred
 measuring it.
 
 **Shipped as an explicit measurement job, `apparmor-load-probe`, with `continue-on-error: true`.** It
-prints what confines a container by default, loads the profile with the install script, checks the
-daemon accepts it, and runs `jail-check.py` under it. It is deliberately **not a gate** — it exists to
-put the answer in a CI log rather than in someone's assumption. The next edit to `ci.yml` is driven by
-what it reports:
+printed what confines a container by default, loaded the profile with the install script, checked the
+daemon accepted it, and ran `jail-check.py` under it — deliberately **not** a gate, because it existed
+to put the answer in a CI log rather than in someone's assumption.
 
-- **If it loads and the jail starts:** fold the install step into the `smoke` job and pin
-  `JAIL_CHECK=1` there, converting today's rc-77 skip into a real red/green gate — the strongest
-  regression guard available for this milestone, because it exercises the jail on the host class that
-  broke it. Then delete `apparmor-load-probe`.
-- **If it does not:** delete the job and record *why* beside the existing skip comment. An honest
-  documented skip beats a gate that passes for the wrong reason.
+### 10.1 The answer (fork J2, closed 2026-08-14)
+
+Run `31836729538`, `ubuntu-latest`, on the branch head:
+
+```
+docker-default (enforce)                                   # what confines a container by default
+[apparmor] loaded 'deepagent-userns' (enforce)             # sudo install-apparmor-profile.sh
+[apparmor] sha: 52a144605e9d9a465239a0e27c0dc1799db6e6ebb6c321021f7653d00881f9a6
+(daemon accepts --security-opt apparmor=deepagent-userns)
+  ok 1..5   JAIL CHECK PASSED                              # under both profiles + systempaths=unconfined
+control rc=77 (procfs reason)                              # masks on ⇒ kernel refuses the fresh --proc
+```
+
+That is the **"if it loads" branch**, so `ci.yml` took it:
+
+- `sudo deepagent-image/scripts/install-apparmor-profile.sh` moved into the `smoke` job (an AppArmor
+  profile lives in the *kernel*, so the runner needs the one-time load before smoke's auto-selection
+  can find it).
+- The smoke run is pinned `JAIL_CHECK=1` — the rc-77 skip is now a build failure. This is the
+  strongest regression guard the milestone has: it exercises the jail on the host class that broke
+  it, not on the Docker Desktop/WSL2 host where slice H shipped "verified" while structurally unable
+  to see the LSM gate.
+- The masks-on **control** came along, as a non-gating step. Without it a green `jail-check` has two
+  variables in it; with it, the pass is pinned to the flag. It is not a gate because a moving rc
+  there means the *kernel's* third gate changed on this runner class — an observation to go read, not
+  a harness regression to redden a build over.
+- `apparmor-load-probe` is deleted. Its question is answered and the answer is recorded here.
+
+**When this reddens for an environmental reason** (a runner image without AppArmor, without bwrap, or
+refusing the profile load), the fix is to re-measure and re-record in this section — never to unpin
+`JAIL_CHECK` and go back to a green run that proves nothing. That downgrade is precisely how slice H
+shipped believing the jail was universally verified.
 
 ## 11. Config knobs (delta to `milestone4.md` §13)
 
@@ -712,14 +745,46 @@ without it.
   Alternative: version-suffixed (`deepagent-userns-1`) so a stale load is visible by name, at the cost
   of an install/uninstall churn on every profile change and a launcher default that moves. **Recommend
   the stable name + sha256 reporting (§13.2).** Confirm before writing §8.1.
-- **J2 — CI gate (§10 step 2).** Blocked on measurement, not on a decision. Whichever way it goes gets
-  recorded in `ci.yml`.
+- **J2 — CI gate (§10 step 2). RESOLVED 2026-08-14: it loads; the gate is pinned.** The probe job
+  answered on `ubuntu-latest` (run `31836729538`) — `docker-default (enforce)` by default, profile
+  loads, daemon accepts it, `jail-check` 5/5, control skips with the `procfs` reason. So the install
+  step folded into `smoke`, `JAIL_CHECK=1` is pinned there, the control rides along non-gating, and
+  `apparmor-load-probe` is deleted. Full record and the re-measure rule: §10.1.
 - **J3 — does the harness ever install the profile itself?** No, proposed: the launcher aborts with
   the command rather than running `sudo` on the operator's behalf. Silent root actions from a tool
   whose whole point is a trust boundary would be self-undermining. **Recommend keeping install
   strictly manual.**
-- **J4 — SELinux.** Out of scope (§3), but worth a tracked follow-up stub so the next person hitting
-  `RHEL + DEEPAGENTS_JAIL=1` finds a known-gap note instead of silence.
+- **J4 — SELinux. RESOLVED 2026-08-14: still out of scope, but no longer silent — and it was worse
+  than silent.** Out of scope stands (§3): nothing has been measured on RHEL/Fedora, and this
+  milestone exists because an *inferred* boundary shipped once already. What shipped instead is the
+  stub the fork asked for, with the misdiagnosis it uncovered fixed:
+
+  1. **The bug.** `/proc/self/attr/current` is shared between LSMs. On an SELinux host
+     `/proc/self/attr/apparmor/current` does not exist, so `apparmor_confinement()` fell through to
+     the legacy attr and parsed `system_u:system_r:container_t:s0:c52,c87` as an AppArmor **profile
+     name**. `doctor` then hard-errored: "confined by AppArmor profile
+     '`system_u:system_r:container_t:s0:c52,c87`' … run `install-apparmor-profile.sh`" — telling an
+     operator with no AppArmor at all to load an AppArmor profile. Worse than a gap: a confident
+     wrong answer, the exact failure mode invariant 42 exists to prevent, one LSM over.
+  2. **The fix.** `jail._selinux_context_from` shape-matches a context
+     (`user_u:role_r:type_t:level[:cats]`, four+ fields with the conventional `_r`/`_t` suffixes), and
+     `_profile_and_mode_from` returns `(None, None)` for one, so an SELinux context can never be
+     reported as an AppArmor profile. `selinux_confinement()` reads it (per-LSM
+     `/proc/self/attr/selinux/current` first, legacy second); `selinux_hint()` and `lsm_hint()` route
+     an LSM mount denial to the right remedy; `doctor` gains a **warning** branch.
+  3. **Why a warning, not an error.** Doctor may not claim the boundary is broken any more than it
+     may claim it holds. The jail may well work on an SELinux host — AppArmor's blanket `deny mount,`
+     has no direct SELinux analogue — or may not. Unmeasured is unmeasured, and it says so.
+  4. **The escape hatch is named and marked UNVERIFIED.** `--security-opt label=disable` is what an
+     operator will reach for; it drops SELinux labelling for the whole container, a wider trade than
+     the one rule the AppArmor path narrows, and nobody here has run it. Naming it while refusing to
+     call it supported is the honest position — the same one `apparmor=unconfined` gets.
+
+  What would close it properly: a measured run on a Fedora/RHEL host, the same way §13.1a/§13.1b were
+  taken (`ausearch -m AVC` in place of `dmesg | grep apparmor="DENIED"`), and — if a policy change
+  turns out to be needed — a vendored type-enforcement rule with the same
+  reproducible-from-upstream + `verify_profile` contract the AppArmor artifact carries. Until then
+  the run-time surface says "untested" and means it.
 - **J5 — the procfs gate (§13.7).** ⚠️ **Blocks `DEEPAGENTS_JAIL=1` on every stock Linux Docker
   host.** **Decided: option 1.** Pass `--security-opt systempaths=unconfined` from
   `run-docker.{sh,ps1}` and `smoke.{sh,ps1}`, in the same block that already passes
@@ -787,7 +852,8 @@ in this order — each step leaves the tree green:
 5. ✅ Launcher default + probe (`run-docker.{sh,ps1}`, `smoke.{sh,ps1}`) + parity markers.
 6. ✅ `doctor` branch + its tests.
 7. ✅ CI step 1 (host-tier `test_apparmor.py`); CI step 2 shipped as the non-gating
-   `apparmor-load-probe` measurement job.
+   `apparmor-load-probe` measurement job, then **closed by its own answer** (fork J2, §10.1): the
+   profile load folded into `smoke`, `JAIL_CHECK=1` pinned, control kept non-gating, probe deleted.
 8. ✅ Doc corrections + `milestone4_invariants.md` 37–38 marked built + invariants 39–41 appended.
 
 ## 16. Test matrix
@@ -807,6 +873,9 @@ in this order — each step leaves the tree green:
 | J6 deletion | removing `mount fstype=proc -> /proc/,` changes nothing: 5/5, no proc denial, profile 8 → 7 rules | image | ✅ same run |
 | `tests/test_jail.py` (add, 6) | the `procfs` class is not `lsm` and not `unknown`; EPERM on a non-proc mount is *not* the procfs gate; `/proc/self/mountinfo` parsing finds Docker's masks, ignores `/proc` itself and `/procfoo`, and yields `[]` when unreadable ("no evidence", never a manufactured diagnosis); the hint names the fix and clears the other two gates | host | ✅ 45 pass |
 | `tests/test_doctor.py` (add, 2) | covering mounts are reported with the remedy and are a **warning** not an error (they are the configuration that trips the kernel, not proof it trips here); an uncovered procfs reports clean | host | ✅ 29 pass |
+| CI jail gate (fork J2) | `ci.yml` loads the profile in the `smoke` job and pins `JAIL_CHECK=1`, so an rc-77 skip fails the build; the masks-on control rides along non-gating | CI | ✅ measured run `31836729538`, §10.1 |
+| `tests/test_jail.py` (add, 6) | fork J4: an SELinux context on the shared legacy attr is **not** an AppArmor profile (regression), `selinux_confinement` prefers the per-LSM attr, an AppArmor profile is not shape-matched as a context, the hint names the gap + marks `label=disable` UNVERIFIED and never points at `install-apparmor-profile`, `lsm_hint` picks the LSM actually in force | host | ✅ 51 pass |
+| `tests/test_doctor.py` (add, 1) | fork J4: SELinux reports as a **warning** naming the gap, never the AppArmor install path, and never "no AppArmor confinement in force" | host | ✅ 30 pass |
 
 Conventions per `deepagent-image/CLAUDE.md` → "Test suite layout": no keys, no network, all writes to
 `tmp_path`, every guard behaviour ships with a regression test.
@@ -844,6 +913,19 @@ Append to `milestone4_invariants.md` (37–38 already exist; 38 flips to **built
     the jail `/proc` is bwrap's own fresh procfs, which never carried those masks. The residual —
     the window before the startup re-exec, and anything outside the jail — is narrow, not zero, and
     is named rather than rounded down. *(`check-parity` markers; launcher review.)*
+44. **An untested host class says so; it is never given a confident wrong answer.** SELinux is out of
+    scope (§3), and the run-time surface reflects exactly that: an SELinux context is never reported
+    as an AppArmor profile (they share `/proc/self/attr/current`), a mount denial there routes to
+    `selinux_hint()` — known gap, `label=disable` named and marked **UNVERIFIED** — rather than to
+    AppArmor install instructions for an LSM the host does not run, and `doctor` reports a
+    **warning**, not an error, because unmeasured is neither "broken" nor "holds". This is invariant
+    42 generalized from *which gate* to *which LSM*. *(`test_jail.py`, `test_doctor.py`.)*
+45. **CI gates on the jail, on a host class that can see all three gates.** The `smoke` job loads
+    `deepagent-userns` into the runner kernel and runs with `JAIL_CHECK=1`, so a regression that
+    silently disables the jail fails the build instead of downgrading to an rc-77 skip; the masks-on
+    control runs beside it, non-gating, so the pass is never a green run with two variables in it.
+    An environmental failure is re-measured and re-recorded (§10.1) — never unpinned. *(`ci.yml`;
+    measured run `31836729538`.)*
 
 ---
 

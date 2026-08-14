@@ -1005,8 +1005,26 @@ Other options:
 - Docker Desktop/WSL2 loads no AppArmor policy, so nothing is needed there.
 
 Regenerate with `python3 -m harness apparmor-sync` (dev-time, needs network); `--check` verifies the
-committed artifacts offline. **SELinux hosts (RHEL/Fedora) are a third environment and are untested**;
-rootless Docker and Podman likewise.
+committed artifacts offline.
+
+**CI gates on this** (M4.1 fork J2, closed 2026-08-14). The `smoke` job loads `deepagent-userns` into
+the runner kernel and runs `JAIL_CHECK=1 smoke.sh`, so an rc-77 skip is now a build failure — the
+guard runs on an AppArmor-confined Linux engine, the host class that broke the jail, rather than on
+the Docker Desktop/WSL2 host that structurally cannot see the LSM gate. A masks-on control step runs
+beside it, non-gating, so the pass is pinned to `systempaths=unconfined` and not to two variables at
+once. If a runner image change reddens it, re-measure and re-record in `milestone4.1.md` §10.1 —
+never unpin `JAIL_CHECK` back to a green skip.
+
+**SELinux hosts (RHEL/Fedora) are a third environment and are untested** (fork J4) — rootless Docker
+and Podman likewise. Untested here means *named*, not ignored: `jail.selinux_confinement()` reads the
+context, an SELinux context is never reported as an AppArmor profile (they share the legacy
+`/proc/self/attr/current`, and parsing one as a profile name used to make `doctor` demand an AppArmor
+profile on a host with no AppArmor), an LSM mount denial routes through `jail.lsm_hint()` to a
+known-gap message rather than AppArmor install instructions, and `harness doctor` reports a
+**warning** — the jail may work there or may not, and nobody has measured it. `--security-opt
+label=disable` is the usual escape hatch, named and marked **unverified**; it drops SELinux labelling
+for the whole container, wider than the one rule the AppArmor path narrows. Closing the gap means a
+measured run (`ausearch -m AVC` in place of `dmesg | grep apparmor="DENIED"`), not an inference.
 
 ### Quick-Start: In-Workspace `.agentignore` File
 

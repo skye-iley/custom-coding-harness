@@ -777,16 +777,18 @@ denylist entry ever collides with real work), `1`/`block` forces it on with the 
 > the live-host measurement that gates the whole thing, and invariants 39–41. Build from 4.1; this
 > section stays as the rationale.
 
-> **Status: BUILT (`milestone4.1.md`), pending one live-host measurement.** The profile
-> (`apparmor/deepagent-userns`), its generator (`harness/apparmor.py`, `apparmor-sync`), the host
-> install script, the launcher preflight, and the `doctor` branch have all landed on
-> `feat/milestone_4`. What has **not** happened is running it on an actual AppArmor-confined host:
-> the dev machine is Docker Desktop/WSL2, which loads no LSM policy and so structurally cannot
-> verify this slice — the same blind spot that produced the gap in the first place. So the mount
-> rule set below is **derived from bwrap's syscall sequence, not confirmed against a denial log**,
-> and `DEEPAGENTS_JAIL=1` on Ubuntu/Debian should be treated as untested until that run happens
-> (`milestone4.1.md` §13.1, CI's `apparmor-load-probe` job). The `apparmor=unconfined` escape hatch
-> (§13, `DEEPAGENTS_JAIL_APPARMOR`) remains available and remains the wider trade.
+> **Status: BUILT and MEASURED (`milestone4.1.md`).** The profile (`apparmor/deepagent-userns`), its
+> generator (`harness/apparmor.py`, `apparmor-sync`), the host install script, the launcher
+> preflight, and the `doctor` branch all landed on `feat/milestone_4`, and the live-host run this
+> status line used to be waiting on happened on 2026-08-14 (Ubuntu VM, kernel `7.0.0-29-generic`,
+> Docker 29.7.2). The mount rule set below is therefore **measured against a denial log, not derived
+> from bwrap's syscall sequence** — the derived set had four rules wrong and one missing, and a
+> second round then deleted one more as inert (`milestone4.1.md` §13.1a/§13.1b). `DEEPAGENTS_JAIL=1`
+> starts end-to-end on a stock AppArmor host with no extra `docker run` flags, and CI gates on it:
+> the `smoke` job loads the profile and pins `JAIL_CHECK=1` (§10.1 there). Two host classes stay
+> untested and say so at run time: SELinux (fork J4) and rootless Docker/Podman. The
+> `apparmor=unconfined` escape hatch (§13, `DEEPAGENTS_JAIL_APPARMOR`) remains available and remains
+> the wider trade.
 
 **The problem, precisely.** seccomp and AppArmor are **independent gates; an operation must pass
 both.** H's vendored `seccomp/userns.json` fixes the syscall filter. It has no effect on the LSM. On

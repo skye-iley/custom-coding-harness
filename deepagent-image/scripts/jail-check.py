@@ -96,13 +96,20 @@ def main():
             # a reason unrelated to the boundary -- see milestone4.md §11.6. JAIL_CHECK=1
             # still turns it into a failure for callers that pinned the jail.
             confined = jail.apparmor_confinement()
+            selinux = jail.selinux_confinement()
             print("SKIPPED: the host LSM denies the mounts bwrap needs.")
             print(f"  bwrap said: {err[:200]}")
             if confined:
                 print(f"  This container is confined by AppArmor profile '{confined}'.")
             print("  seccomp is NOT the problem here -- the user namespace was created and the")
-            print("  first mount was denied. Fix: slice J's narrowed profile, or relaunch with")
-            print("  DEEPAGENTS_JAIL_APPARMOR=unconfined (drops the whole profile, not one rule).")
+            print("  first mount was denied.")
+            if selinux:
+                # M4.1 fork J4: an SELinux host must not be handed AppArmor instructions
+                # for an LSM it does not run. Untested is said out loud, not papered over.
+                print(f"  {jail.selinux_hint()}")
+            else:
+                print("  Fix: slice J's narrowed profile, or relaunch with")
+                print("  DEEPAGENTS_JAIL_APPARMOR=unconfined (drops the whole profile, not one rule).")
             return EXIT_SKIP
         if kind == "procfs":
             # The third gate (milestone4.1.md §13.7). Environmental like the other
