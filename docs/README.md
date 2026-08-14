@@ -55,12 +55,23 @@ identity — dependency chain" list; `features/` holds the two named non-milesto
   design-doc's "raw tags included, e.g. Ollama's chat-template markers" is **not deliverable** —
   Ollama renders the template server-side, so §3 defines three fidelity levels, ships the
   message-level one, and requires `design_doc.md` §11 to be corrected rather than left aspirational.
+  The knob is a four-valued enum (`off`/`file`/`console`/`both`), **live and `/config`-settable**,
+  which gets the M5.1 picker and enum validation for free; `console` **replaces** the rendered
+  answer, which is the point — `final_message_text` (`agent.py:449–465`) deliberately drops
+  reasoning/thinking blocks and unknown part shapes, and that transform is what this makes
+  skippable (§7). §8 covers reasoning traces, including encrypted ones (recorded in position as a
+  typed placeholder with its byte size, never as ciphertext); §9 covers streaming, which v1 does not
+  implement but must not foreclose — hence a three-phase append-incremental writer and a note on
+  `AgentMiddleware.transformers` as the future seam. §0.1 records what the first draft got wrong.
 - **`milestone7_invariants.md`** — the checkable properties, written before the code: fidelity
   (bodies verbatim, additions structural only, one record per model call, labels correct across
-  retries and HITL resumes), position (the middleware is last in the stack, asserted not
-  commented), containment (state-dir sink, scrub on every section, tamper-resistance stated at its
-  real strength), and non-interference/removability (a sink failure never breaks a turn; off means a
-  byte-identical middleware stack). Folds into `milestone7.md` on completion.
+  retries and HITL resumes, **nothing on the response dropped** — unknown block types dumped rather
+  than skipped), position (the middleware is last in the stack, asserted not commented), destination
+  (mode-exact output; console changes the display and never `run_turn`'s return value or the
+  headless JSON), containment (state-dir sink, scrub on every section including the console path,
+  tamper-resistance stated at its real strength), non-interference/removability (a sink failure
+  never breaks a turn; `off` is a true pass-through), and streaming extendability. Folds into
+  `milestone7.md` on completion.
 
 ## Complete milestones — `milestones/complete/`
 

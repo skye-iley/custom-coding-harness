@@ -154,10 +154,25 @@ secret-safe containers.
       position rather than the intent (§5). And **`design_doc.md` §11's "raw tags included, e.g.
       Ollama's chat-template markers" is not deliverable** — Ollama renders the chat template
       server-side, so §3 splits fidelity into three levels, ships the message level, and makes
-      correcting that design-doc sentence part of done-when. Sink is `<state-dir>/raw-trace/
-      <run_id>.log` (never stderr, never the workspace), scrubbed through `harness/scrub.py`; the
-      file is a **secret-bearing artifact** and the docs say so rather than implying the scrub is a
-      boundary. Off by default; pre-spinup, not `/config`-settable (§9.1).
+      correcting that design-doc sentence part of done-when. The knob is a **four-valued enum**
+      (`off`/`file`/`console`/`both`), **live and `/config`-settable** — M5.1's registry gives the
+      picker and the enum validation for free — and `console` **replaces** the rendered answer
+      rather than adding to it. That substitution is the milestone in one line:
+      `final_message_text` (`agent.py:449–465`) keeps `{"type": "text"}` parts and **deliberately
+      drops** reasoning/thinking blocks and unknown part shapes, so the raw mode is "skip that
+      transform" (§7). Response capture drops nothing — every block in order, unknown types dumped
+      verbatim rather than skipped, plus `tool_calls`/invalid tool calls/`response_metadata`/
+      `usage_metadata`. Encrypted reasoning is recorded **in position** as a typed placeholder with
+      its byte size, never as ciphertext (§8). Streaming is **not implemented in v1 but must not be
+      foreclosed**: the writer is three-phase (`open_record`/append/`close_record`) so a streaming
+      path appends chunks without changing the format, and `AgentMiddleware.transformers` is the
+      named future seam — its `TransformerFactory` comes from the private `langgraph.stream._mux`,
+      so it needs the same construction-time guard `_WorkspaceShellBackend` uses for `_resolve_path`
+      (§9). File sink is `<state-dir>/raw-trace/<run_id>.log` (never the workspace), scrubbed
+      through `harness/scrub.py` on the console path too; the file is a **secret-bearing artifact**
+      and the docs say so rather than implying the scrub is a boundary. §0.1 records what the first
+      draft got wrong — notably that pre-spinup-only was justified by an invariant stricter than the
+      removable contract actually requires.
   - `docs/milestones/planned/` — **not-yet-built** milestones (docs only). Wins over `design_doc.md`
     for "what we build next." *(Currently empty — the forward candidates live in `design_doc.md`
     §11 (the benchmark ladder), §12.6, §13, and its "Core identity — dependency chain" list.)*

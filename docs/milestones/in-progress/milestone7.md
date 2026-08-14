@@ -6,247 +6,387 @@
 same branch. Checkable properties: `milestone7_invariants.md` (same folder), which folds in here as
 a section on completion.
 
-Source: `design_doc.md` §11 "Framework Enhancements → Raw prompt/response debug mode". That entry
-asks for one thing this milestone **cannot deliver as written** — see §3.
+Source: `design_doc.md` §11 "Framework Enhancements → Raw prompt/response debug mode".
 
 No separate `milestone7_spec.md`. M5 and M6 each carried one because the build touched six or more
 modules and the schema decisions needed a home; this milestone is one middleware, one sink module,
-one registry entry, and one launcher line. The implementation-level detail lives in §5–§7 here.
+one registry entry, one REPL branch, and one launcher line. The implementation-level detail lives in
+§5–§9 here.
+
+### 0.1 Revisions to the first draft
+
+The first version of this doc made the knob a pre-spinup bool and argued live toggling was blocked
+by the removable contract. **That was wrong and is reversed** (§10.1). It also scoped the trace to a
+file sink only, and specced the *request* side in detail while treating the response as one blob.
+Both are corrected: the response side is where the interesting loss is happening today (§7), and a
+console mode that *replaces* the rendered answer is now first-class (§6). §8 (reasoning traces) and
+§9 (streaming) are new requirements, not present in the first draft.
 
 ## 1. Goal & Definition of Done
 
-**Goal.** Print, per model call, the literal message payload the harness hands the model — final
-system prompt, full message history, tool schemas, and the tool-call / tool-result blocks — so a
-weak-model failure (hallucinated tool JSON, ignored instructions, a tool the model never saw) can be
-diagnosed from the harness's own output instead of by switching on the model server's debug logging.
+**Goal.** Show, per model call, everything the harness hands the model and everything the model
+hands back — with nothing dropped on the way to the screen or the file. The harness *already*
+receives all of it and then transforms it for human consumption; this milestone makes that transform
+skippable rather than mandatory.
 
 **Done when:**
 
-1. `DEEPAGENTS_RAW_TRACE=1` produces, for every model call in a run, a record containing the exact
-   `system_message`, `messages`, and `tools` that call was made with — after every middleware in the
-   stack has had its turn, including `_ExcludeToolsMiddleware` (§5).
-2. Unset (the default) ⇒ the middleware is never constructed and the agent's middleware stack is
-   identical to today's, list element for list element (§10).
-3. The trace is written to a file under the **state dir**, never to stderr, and stderr gets exactly
-   one line naming the path (§6).
-4. A model call that the harness fails to trace still completes: a sink error degrades to one
-   stderr warning and never propagates into the turn (§11).
-5. Credential values are redacted through the existing `harness/scrub.py` before any byte is
-   written, and the redaction is visible in the output rather than silent (§7).
-6. `harness doctor` reports whether raw trace is on and where it is writing.
-7. The `design_doc.md` §11 entry is corrected to match what shipped (§3 — the chat-template-marker
-   claim).
+1. `raw_trace` is a four-valued knob — `off` / `file` / `console` / `both` — settable at launch
+   **and in-session via `/config set raw_trace`**, which opens the M5.1 picker because the field
+   carries `choices` (§10).
+2. For every model call, the record contains the exact `system_message`, `messages`, and `tools`
+   that call was made with, after every middleware in the stack has had its turn — including
+   `_ExcludeToolsMiddleware` (§5).
+3. The response side records the **whole** message object: every content block in order, reasoning
+   and thinking blocks included, unknown block types dumped verbatim rather than dropped, plus
+   `tool_calls`, `additional_kwargs`, `response_metadata`, `usage_metadata`, and the finish reason
+   (§7).
+4. An encrypted or redacted reasoning block is recorded **in position** as a typed placeholder with
+   its byte size — never silently omitted, never dumped as ciphertext (§8).
+5. In `console` / `both`, the REPL prints the raw record **instead of** the rendered answer. The
+   value `run_turn` returns and the headless JSON are unchanged in every mode (§6).
+6. `off` ⇒ the middleware is a pure pass-through: same handler return object, no file, no directory,
+   no output, no formatting work performed (§10.2).
+7. The record structure is **append-incremental** — open span, body, close — so a future streaming
+   implementation appends chunks to an open record without changing the format or the reader (§9).
+8. Credential values are redacted through `harness/scrub.py` before any byte is written or printed,
+   and the redaction is visible rather than silent (§11).
+9. `harness doctor` reports the mode and, in `file`/`both`, the path.
+10. `design_doc.md` §11 is corrected where it over-promises (§3).
 
 ## 2. What exists today — the honest inventory
 
 | Surface | What it gives | Why it isn't this |
 |---|---|---|
-| `DEEPAGENTS_DEBUG` (`cli.py:405–436`) | Uncapped error detail, a full traceback, and `_dump_partial`'s accumulated-state dump | **Failure-only.** A turn that "succeeds" while the model ignores every instruction prints nothing. |
-| `--stream` | Raw LangGraph events as they arrive | The *harness's* view of the stream, not the payload the model was sent; no tool schemas, no system prompt. |
-| M6 telemetry (`telemetry.py`) | Per-turn counts: `model_calls`, `tool_calls` by name, `tool_errors` | Deliberately carries **no** prompt, reply, or tool-argument text (M6 invariant 10). It says a tool call failed, never what the model was looking at when it did. |
-| `OLLAMA_DEBUG=1` | The model server's own rendered prompt | The workaround this milestone exists to remove: provider-specific, off-harness, gone the moment the provider changes. |
+| `DEEPAGENTS_DEBUG` (`cli.py:405–436`) | Uncapped error detail, full traceback, `_dump_partial`'s accumulated-state dump | **Failure-only.** A turn that "succeeds" while the model ignores every instruction prints nothing. |
+| `--stream` (`cli.py:944–951`) | `pprint` of raw LangGraph events | Real, but a different axis: graph events, not the model payload. No system prompt, no tool schemas. Also bypasses the resilience layer and the HITL loop, so it is not a mode you can leave on. |
+| `final_message_text` (`agent.py:436–465`) | The human-readable answer | **This is the transform being made skippable.** It keeps only `{"type": "text"}` parts and *deliberately drops* reasoning/thinking blocks and unknown part shapes — the comment at `agent.py:450–455` says so. Correct for an answer; it is also exactly the information a raw trace exists to show. |
+| M6 telemetry | Per-turn counts: `model_calls`, `tool_calls` by name, `tool_errors` | Carries **no** prompt/reply/tool-arg text by construction (M6 invariant 10). Says the tool-error rate spiked; never what the model was looking at. |
+| `OLLAMA_DEBUG=1` | The model server's own rendered prompt | The workaround this milestone removes: provider-specific, off-harness, gone the moment the provider changes. |
 
-Telemetry and raw trace are complements, not overlaps: telemetry says *the tool-error rate spiked at
-turn 7*, raw trace says *the model emitted `{"tool": "write_file"}` against a schema that wanted
-`{"name": ..., "args": ...}`*. Neither answers alone.
+Telemetry and raw trace are complements: telemetry says *the tool-error rate spiked at turn 7*, raw
+trace says *the model emitted `{"tool": "write_file"}` against a schema that wanted
+`{"name": …, "args": …}`*. Neither answers alone.
 
 ## 3. Fidelity — what "raw" can and cannot mean
 
-`design_doc.md` §11 asks for the payload "as close as possible to what the model itself sees (raw
-tags included, e.g. Ollama's chat-template markers)". Three distinct things hide inside that
-sentence, and only one of them is reachable from inside the harness:
+Three distinct things hide inside "as close as possible to what the model sees":
 
-- **L1 — message level.** The final `system_message`, `messages`, and `tools` at the innermost
-  middleware seam. This is exactly what the harness sends; everything downstream is serialization.
-  **This is what M7 ships.**
+- **L1 — message level.** The final `system_message`, `messages`, `tools` on the way out and the
+  complete message object on the way back, at the innermost middleware seam. Everything downstream
+  is serialization. **This is what M7 ships**, and the standard it is held to is *nothing dropped*
+  (§7), not *nothing added*.
 - **L2 — wire level.** The literal HTTP request/response body the provider client puts on the
-  socket. Reachable via an `httpx` event hook, but it is still JSON messages — it adds the provider
-  SDK's serialization choices and nothing else diagnostic. Deferred (§8).
-- **L3 — template level.** The token string after the model's chat template runs (`<|im_start|>` and
-  friends). **Not reachable client-side.** Ollama renders the template *server-side* inside
-  `/api/chat`; the body the harness sends is JSON. Reproducing it would mean pulling the template
-  from `/api/show` and re-rendering Go template semantics in Python — a second implementation of
-  someone else's renderer, which would be wrong in exactly the cases you were debugging.
+  socket, via an `httpx` event hook. Adds the SDK's serialization choices. **Deferred, not
+  rejected** — it is the natural next slice if L1 turns out to be hiding something, and it is the
+  only way to get strictly closer to L3 from inside the harness.
+- **L3 — template level.** The token string after the model's chat template runs (`<|im_start|>`
+  and friends). **Not reachable client-side.** Ollama renders the template *server-side* inside
+  `/api/chat`; the body the harness sends is JSON. Reproducing it means pulling the template from
+  `/api/show` and re-implementing Go template semantics in Python — a second copy of someone else's
+  renderer, wrong in exactly the cases you were debugging.
 
-**Decision: L1 only.** The failure modes this milestone targets — a hallucinated tool JSON, an
-instruction that never reached the model, a tool excluded from the schema list — are all visible at
-L1. §12 requires the `design_doc.md` §11 wording to be corrected rather than left aspirational: an
-operator who needs L3 should be sent to `OLLAMA_DEBUG=1` / `/api/show` by name, in the doc, instead
-of discovering the gap by reading a trace that doesn't have it.
+Raw tags are **ideal, not required**. The requirement is *everything the harness receives or emits*,
+which L1 satisfies completely. §12 requires `design_doc.md` §11 to be corrected so an operator who
+needs L3 is sent to `OLLAMA_DEBUG=1` / `/api/show` by name rather than discovering the gap by
+reading a trace that doesn't have it.
 
 ## 4. Scope (slices, in build order)
 
 | Slice | What lands |
 |---|---|
-| **S1** | `harness/rawtrace.py` — the sink: record formatting, the scrub call, the byte cap, `trace_path()`. Stdlib + `harness.scrub` only, so it stays in the host test tier. No langchain import. |
-| **S2** | `RawTraceMiddleware` in `harness/agent.py`, implementing `wrap_model_call` **and** `awrap_model_call`, appended after `_ExcludeToolsMiddleware` (§5). `build_agent` grows one keyword argument. |
-| **S3** | The knob: one `FieldSpec` entry (`raw_trace`, `tier="prespinup"`, `env_var="DEEPAGENTS_RAW_TRACE"`, `cast=_to_bool`, `default=False`, `profile_key="raw_trace"`), `cli` construction, and the turn bracket from `run_turn` (§5). |
-| **S4** | Launcher forwarding: `-e DEEPAGENTS_RAW_TRACE` in `run-docker.{sh,ps1}`, plus the state-dir note in both `CLAUDE.md` files. Both shells, per the parity rule. |
-| **S5** | `harness doctor` line + docs: `deepagent-image/CLAUDE.md` section, `design_doc.md` §11 correction (§3). |
+| **S1** | `harness/rawtrace.py` — the sink: the append-incremental record writer (§9), block rendering including the unknown-block and encrypted-reasoning cases (§7/§8), the scrub call, the byte cap, `trace_path()`. Stdlib + `harness.scrub` only; no langchain import, so it stays in the host test tier. |
+| **S2** | `RawTraceMiddleware` in `harness/agent.py` — `wrap_model_call` **and** `awrap_model_call`, appended after `_ExcludeToolsMiddleware` (§5). `build_agent` grows one keyword argument. Pass-through when the mode is `off`. |
+| **S3** | The knob: one `FieldSpec` (`raw_trace`, `tier="live"`, `choices=("off","file","console","both")`, `cast=str`, `default="off"`, `env_var="DEEPAGENTS_RAW_TRACE"`, `profile_key="raw_trace"`, `settable=True`) + the `cli._LIVE_APPLIERS` entry, and the `run_turn` turn bracket (§5). |
+| **S4** | Console mode: the REPL suppresses the rendered answer in `console`/`both` (§6). `run_turn`'s return value and the headless JSON are untouched. |
+| **S5** | Launcher forwarding (`-e DEEPAGENTS_RAW_TRACE`, both shells), `harness doctor` line, `deepagent-image/CLAUDE.md` section, `design_doc.md` §11 correction. |
 
 ## 5. The seam — innermost `wrap_model_call`, and why the ordering is load-bearing
 
-The capture point is `wrap_model_call(request, handler)`, the same seam
-`_ExcludeToolsMiddleware` (`agent.py:151`) already uses. At that seam `request` carries
-`system_message`, `messages`, `tools`, `tool_choice`, `response_format`, and `model_settings`
-(langchain 1.3.15) — the complete outgoing view. `handler(request)` returns a `ModelResponse`
-(`result`, `structured_response`), which is the reply half of the record.
+The capture point is `wrap_model_call(request, handler)`, the seam `_ExcludeToolsMiddleware`
+(`agent.py:151`) already uses. `request` carries `model`, `messages`, `system_message`,
+`tool_choice`, `tools`, `response_format`, `model_settings`, `state`, `runtime` (langchain 1.3.15) —
+the complete outgoing view. `handler(request)` returns a `ModelResponse` (`result`,
+`structured_response`), the reply half.
 
 **Ordering is not cosmetic.** langchain composes first-is-outermost (`cli.py:2182`), so the *last*
 middleware appended is the *innermost* — the one whose view of `request` is final.
 `_ExcludeToolsMiddleware` is appended last today (`agent.py:502`) precisely so it filters tools
-injected by deepagents' own middleware. A raw trace appended anywhere earlier would log a tool list
-the model never received — which is the exact bug class ("a tool the model never saw") this
-milestone is meant to diagnose, reproduced inside the diagnostic. **`RawTraceMiddleware` is appended
-after it**, and an invariant pins the position rather than the intent.
+injected by deepagents' own middleware. A trace appended earlier would log a tool list the model
+never received — the exact bug class ("a tool the model never saw") this milestone diagnoses,
+reproduced inside the diagnostic. **`RawTraceMiddleware` goes after it**, and an invariant pins the
+list position rather than the intent.
 
 That is also why the middleware is constructed in `cli.py` but *installed* by `build_agent`: only
 `build_agent` controls what comes after the exclusion filter. `cli.py` keeps the reference so it can
-bracket turns.
+bracket turns and flip the mode live.
 
-**Turn brackets come from `run_turn`, never from `before_agent`.** M6 learned this the expensive
-way (`cli.py:709–726`): `before_agent` fires once per *invoke*, and one turn can invoke several
-times — the resilience layer re-invokes on retry, and every HITL resume is another invoke. A record
-labelled by `before_agent` would restart its numbering mid-turn. `RawTraceMiddleware.begin_turn()`
-is called from `run_turn` for the same reason `TelemetryMiddleware.begin_turn()` is.
+**Turn brackets come from `run_turn`, never `before_agent`.** M6 learned this the expensive way
+(`cli.py:909–926`): `before_agent` fires once per *invoke*, and one turn can invoke several times —
+the resilience layer re-invokes on retry, and every HITL resume is another invoke. Numbering keyed to
+`before_agent` restarts mid-turn. `RawTraceMiddleware.begin_turn()` is called from `run_turn` for
+the same reason `TelemetryMiddleware.begin_turn()` is.
 
-Each record is therefore labelled `run_id / turn N / call M` — M being the model call *within* the
-turn, since a single turn legitimately makes many.
+Records are labelled `run_id / turn N / call M`, M being the model call *within* the turn, since one
+turn legitimately makes many.
 
-## 6. Sink, format, size
+## 6. Modes and destinations
 
-**Path:** `<state-dir>/raw-trace/<run_id>.log`, via `archive.state_dir(workspace)` (honours
-`DEEPAGENTS_STATE_DIR`; defaults to `<workspace>/.deepagents`). One file per run, so a bad run is
-one file to read and one file to delete.
+| Mode | File sink | Console | Rendered answer |
+|---|---|---|---|
+| `off` (default) | — | — | printed as today |
+| `file` | yes | — | printed as today |
+| `console` | — | yes | **suppressed** |
+| `both` | yes | yes | **suppressed** |
 
-**Not stderr.** The full history plus tool schemas, every call, would drown the `you>` REPL and make
-the session unusable — which would push an operator straight back to `OLLAMA_DEBUG`. stderr gets one
-line at startup: `[harness] raw trace -> <path>`.
+**Console mode replaces, it does not add.** The point is to see the harness's actual traffic instead
+of its human-facing summary; printing both would just bury one in the other. Suppression happens at
+the REPL's print site — `run_turn` still returns `final_message_text(result)` unchanged, so nothing
+downstream sees a different value. `--headless` JSON is **never** raw: it is a machine contract with
+a consumer (a benchmark sweep joins on it, M6 §5b), and a mode knob must not change a contract.
 
-**Format:** human-readable text, not JSON. The reader is a person diagnosing a model, not a parser
-(M6's `usage.jsonl` is the machine surface and stays that way). Each record:
+**File path:** `<state-dir>/raw-trace/<run_id>.log`, via `archive.state_dir(workspace)` (honours
+`DEEPAGENTS_STATE_DIR`, defaults to `<workspace>/.deepagents`). One file per run: a bad run is one
+file to read and one to delete. `run-docker`'s state dir is host-side, so the operator reads it at
+`deepagent-image/project/state/<ws-key>/raw-trace/`.
+
+**Format:** human-readable text, not JSON. The reader is a person; M6's `usage.jsonl` is the machine
+surface and stays that way. JSON would force either escaped newlines (unreadable prompts) or
+pretty-printing (no longer literal).
 
 ```
 ===== run <run_id> | turn 3 | call 2 | 2026-08-14T18:22:41.115Z | ollama:gemma4 =====
 --- system ---
 <the literal system_message text>
 --- messages (7) ---
-[0] human: ...
-[5] ai: (tool_calls: write_file)  <the literal content, then the literal tool_call blocks>
-[6] tool: (write_file, id=call_abc)  <the literal result content>
+[0] human: <literal content>
+[5] ai: <literal content, then each tool_call block verbatim>
+[6] tool: (write_file, id=call_abc) <literal result content>
 --- tools (12) ---
 write_file: {<the literal JSON schema>}
-...
---- response (1284 ms) ---
-<the literal reply content, then the literal tool_call blocks>
+--- response (1284 ms) | finish_reason=tool_calls ---
+[block 0] reasoning: <literal reasoning text>
+[block 1] text: <literal text>
+[block 2] tool_use: {<literal args>}
+--- response metadata ---
+usage_metadata: {...}
+response_metadata: {...}
+additional_kwargs: {...}
+=====
 ```
 
-Separators and the counts in the headers are the **only** added formatting; message and schema
-bodies go in verbatim (post-scrub, §7). Nothing is truncated per field — a trace that elides the
-long tool result is a trace that hides the reason the model got confused.
+Separators, indices, and counts are the **only** additions; bodies go in verbatim (post-scrub, §11).
+Nothing is truncated per field — a trace that elides the long tool result hides the reason the model
+got confused.
 
-**Size:** whole-file cap, default 64 MiB, a module constant rather than a knob. On reaching it the
-sink writes one `[raw-trace] cap reached, further calls not recorded` line and stops; the run
-continues. A debug flag must not be able to fill the disk under a long benchmark sweep. Fork §9.4
-records why this is a constant.
+**Size:** whole-file cap, default 64 MiB, a module constant (fork §10.5). On reaching it the sink
+writes one `[raw-trace] cap reached` line and stops; the run continues. Console mode is uncapped —
+the terminal is the operator's problem, and a cap there would silently hide the thing they asked to
+see.
 
-## 7. Secrets & containment
+## 7. The response side — nothing dropped
+
+This is where today's loss actually happens. `final_message_text` (`agent.py:449–465`) keeps only
+bare strings and `{"type": "text"}` / typeless `{"text": …}` blocks, and **drops everything else** —
+reasoning, thinking, tool_use, and any block shape it doesn't recognise. That is right for an answer
+(the comment at `agent.py:450–455` explains the `str(item)` leak it fixed) and is precisely what a
+raw trace must not do.
+
+The record therefore serializes the **whole** returned message:
+
+- **Every content block, in order, with its index and type.** A string content becomes one block.
+- **Unknown block types are dumped verbatim**, as their literal `repr`/JSON, never skipped. A block
+  type nobody anticipated is the single most interesting thing that can appear in a trace.
+- **`tool_calls`** with raw `args` as received — before any parsing or repair.
+- **`additional_kwargs`, `response_metadata`, `usage_metadata`,** and the finish reason. Providers
+  put refusals, safety verdicts, logprobs, and model-version drift here, and none of it reaches a
+  human today.
+- **Invalid tool calls.** langchain surfaces malformed tool JSON separately from `tool_calls`; that
+  list is the direct answer to "why did this local model's tool call do nothing", so it is recorded
+  explicitly rather than left to `additional_kwargs`.
+
+## 8. Reasoning traces
+
+If a provider emits reasoning, the trace shows it. Three cases, all handled at the block level (§7):
+
+1. **Plaintext reasoning / thinking.** Recorded verbatim as its own block, in position. This
+   includes the inline `<think>…</think>` convention local models use — it arrives as ordinary
+   content and needs no special handling, which is the point of recording blocks rather than
+   interpreting them.
+2. **Summarised reasoning.** Whatever the provider sends is what is recorded; the harness does not
+   distinguish a summary from full reasoning, because it cannot.
+3. **Encrypted / redacted reasoning.** Recorded **in position** as a typed placeholder:
+
+   ```
+   [block 1] <encrypted reasoning block: type=redacted_thinking, 2481 bytes>
+   ```
+
+   Position, type, and size, never the ciphertext — it is unreadable by construction, and dumping
+   kilobytes of base64 into a human-facing trace buries the blocks that *are* readable. The
+   placeholder is a **record that reasoning happened there**, which is the diagnostically useful
+   fact.
+
+The general rule: the trace reports block shapes, it does not interpret them. A provider that
+invents a new reasoning representation tomorrow shows up as an unknown block dumped verbatim (§7)
+rather than as silence.
+
+## 9. Streaming compatibility
+
+Not implemented in v1, but the design must not foreclose it.
+
+**What makes it extendable:** records are written **append-incrementally** — `open_record(header)`,
+then zero or more body appends, then `close_record(footer)`. Non-streaming writes all three in one
+call; a streaming implementation appends a chunk per token-batch to the already-open record. The
+on-disk format and the reader are identical either way, so streaming is a new *writer* path, not a
+new format. An invariant pins that the writer exposes the three-phase API even though v1 only ever
+calls it in one shot — an API that only works when the whole body is known in advance is the thing
+that would have to be rewritten.
+
+**Where a streaming implementation would hook.** `AgentMiddleware` exposes
+`transformers: Sequence[TransformerFactory]` (langchain 1.3.15) — stream transformer factories
+merged into the graph at compile time, each invoked as `factory(scope)` for a fresh instance per
+invocation. That is the seam for seeing token chunks. Two cautions to record now: the type comes
+from `langgraph.stream._mux`, a **private** module path, so the coupling needs the same
+construction-time guard `_WorkspaceShellBackend` uses for `_resolve_path` (`agent.py:187–195`); and
+the existing `--stream` flag is a *different* axis (LangGraph graph events, and it bypasses both the
+resilience layer and the HITL loop), so a future streaming trace composes with `--stream` rather
+than replacing it.
+
+**v1 behaviour under `--stream`:** `wrap_model_call` still fires, so records are still produced. In
+`console`/`both` the two outputs interleave; that is acceptable and documented, not fixed.
+
+## 10. The knob
+
+`FieldSpec(name="raw_trace", tier="live", env_var="DEEPAGENTS_RAW_TRACE",
+profile_key="raw_trace", cast=str, default="off",
+choices=("off", "file", "console", "both"), label="Raw trace", settable=True)`
+
+Consequences that come free from the M5.1 registry, none of them hand-written: precedence
+CLI > env > profile > default; rejection of an invalid value at every point of entry; the
+`/config set raw_trace` **picker** (M5.1 R6 opens one for any field carrying `choices`); a wizard
+entry; and inclusion in both `/config` renderers. It needs exactly one hand-written pairing — a
+`cli._LIVE_APPLIERS` entry — which M5.1 invariant 7 asserts in both directions.
+
+### 10.1 Live-settable — reversing the first draft
+
+The first draft made this pre-spinup, arguing that a middleware which can be enabled later must be
+installed always, which would break the removable contract. **The premise was wrong.** The contract
+in `docs/README.md`'s glossary is about *deleting the code* and about *observable behaviour* with
+the feature off — not about the middleware list's element count. An always-installed pass-through
+that returns `handler(request)` unchanged is behaviourally identical to today; the first draft's
+invariant 18 asserted list identity, which is stricter than the contract and is the only thing that
+made live toggling look hard. Rewritten (§10.2).
+
+The operator case is also better than the draft credited: the point of a live toggle is not to
+retro-trace a turn that already failed, it is to flip tracing on and **re-run the same prompt in the
+same session**, against the same thread and the same accumulated context. Restarting the container
+loses exactly the state that made the failure reproducible.
+
+`tier="live"` also means the applier can flip the mode on the already-constructed middleware — no
+agent rebuild, unlike `/config set model`.
+
+### 10.2 Removable contract (restated)
+
+- **Off:** the middleware's hooks return `handler(request)` / `await handler(request)` and nothing
+  else. No file, no directory, no output, and no record formatting performed — the mode is checked
+  before any work, so `off` costs one attribute read per model call.
+- **Deleted:** removing `harness/rawtrace.py`, the middleware class, the `FieldSpec` entry, the
+  applier entry, the REPL branch, and the launcher line leaves the harness behaving exactly as it
+  did at M6, with no dead references.
+
+## 11. Secrets & containment
 
 The trace contains the full context, so it contains anything the agent read — including whatever a
-workspace file happened to hold. Two controls, and the doc must not overstate either:
+workspace file happened to hold. Two controls, neither overstated:
 
-1. **Scrub before write.** Every record goes through `harness/scrub.py`'s `scrub()` (env-derived
-   credential values, longest-first, plus the `sk-`/`ghp-`/`xoxb-` style patterns) — the same
-   implementation `audit.py` and `telemetry.py` use. Redaction is visible: the `***REDACTED***`
-   marker tells the reader the text was altered rather than leaving them to wonder why the model saw
-   something different. It is a **backstop, not a boundary** — it redacts credentials it can
-   recognise, and nothing else. A trace file is a secret-bearing artifact and the docs say so
-   plainly.
-2. **State dir, not workspace** — beside `past.sqlite`, `denials.jsonl`, and `usage.jsonl`. Same
-   reasoning as M4 slice D and M6 §5a, with the same precision about what it buys: the sink is
-   **file-tool-proof always** (pathguard plus the workspace-rooted backend cannot address it) and
-   **shell-proof only under `DEEPAGENTS_JAIL=1`**. With the jail off, a container shell reaches it by
-   absolute path.
+1. **Scrub before write or print.** Every section goes through `harness/scrub.py`'s `scrub()` (env
+   credential values, longest first, plus `sk-`/`ghp-`/`xoxb-` style patterns) — the same
+   implementation `audit.py` and `telemetry.py` use, applied to console output too, so the two
+   destinations cannot disagree about what is safe. Redaction is visible (`***REDACTED***`) so a
+   reader can tell altered text from text the model genuinely saw. It is a **backstop, not a
+   boundary**: it redacts credentials it can recognise and nothing else.
+2. **State dir, not workspace** — beside `past.sqlite`, `denials.jsonl`, `usage.jsonl`. Same
+   reasoning as M4 slice D and M6 §5a, with the same precision: **file-tool-proof always**
+   (pathguard plus the workspace-rooted backend cannot address the path), **shell-proof only under
+   `DEEPAGENTS_JAIL=1`**.
 
-Unlike telemetry, containment here is about the **operator's** disk, not the agent's reach: the file
-is meant to hold prompt text. It is never appended to a PR, never read by a workflow, and never
-leaves the state dir. `run-docker`'s state dir is host-side, so the operator reads it at
-`deepagent-image/project/state/<ws-key>/raw-trace/`.
+Unlike telemetry, containment here is about the operator's disk, not the agent's reach: the file is
+*meant* to hold prompt text. A trace file is a **secret-bearing artifact** and the docs say so
+plainly. It is never appended to a PR, never read by a workflow, and never leaves the state dir.
 
-## 8. Non-goals
+## 12. Non-goals
 
-- **L2 wire-level and L3 template-level capture** (§3). L2 is a plausible later slice; L3 is not
-  reachable client-side and the docs must say that rather than promise it.
+- **L2 wire-level and L3 template-level capture** (§3). L2 is a later slice; L3 is not reachable
+  client-side and the docs must say so rather than promise it.
 - **A reader subcommand.** `harness telemetry show` exists because `usage.jsonl` is machine-shaped.
   This is a text file; `less` it.
-- **Live toggling.** See fork §9.1.
-- **Redaction beyond `scrub()`.** No PII detection, no workspace-file filtering. A trace is a
-  secret-bearing artifact; that is a property to document, not to half-fix.
+- **Streaming capture in v1** (§9) — extendability is required, implementation is not.
+- **Redaction beyond `scrub()`.** No PII detection, no workspace-file filtering.
 - **Trace-driven assertions.** Nothing in the harness may read its own trace back.
 
-## 9. Forks (resolved)
+## 13. Forks (resolved)
 
-**9.1 — prespinup, not live-settable.** Tempting to make `/config set raw_trace on` work mid-session
-("turn it on when the weird turn happens"). Rejected: a middleware that can be enabled later must be
-*installed* always, which breaks the removable contract (§10) — off would no longer mean a
-byte-identical stack. And it buys little, because you cannot retro-trace the turn that already went
-wrong; you re-run it. The container is disposable and a session is one command. `tier="prespinup"`,
-matching `telemetry`.
+**13.1 — enum, not bool.** Four modes need four values, and M5.1 gives an enum validation at every
+entry point plus a picker for free. A bool plus a second "where does it go" knob would be two knobs
+that can disagree. Note `cast=str`: M5.1 invariant 19 requires `cast is str` wherever `choices` is
+set, and bool knobs deliberately carry no `choices` so the launcher spellings keep working.
 
-**9.2 — scrub, and no opt-out.** A literal-bytes mode (`DEEPAGENTS_RAW_TRACE_SCRUB=0`) was
-considered and dropped: the only text `scrub()` alters is text that matches a credential, which is
-never the text you are debugging. A knob whose only function is "write my API key to disk verbatim"
-is a footgun with no diagnostic payoff.
+**13.2 — scrub, no opt-out.** A literal-bytes mode (`…_SCRUB=0`) was considered and dropped: the only
+text `scrub()` alters is text matching a credential, which is never the text being debugged. A knob
+whose sole function is "write my API key to disk verbatim" is a footgun with no diagnostic payoff.
 
-**9.3 — text, not JSON.** The audience is human. JSON would force either escaped newlines (unreadable
-prompts) or a pretty-printer (no longer literal). M6 owns the machine-readable surface.
+**13.3 — console replaces rather than adds.** Printing the rendered answer *and* the raw record
+buries the signal. An operator who wants both runs `both` and reads the file.
 
-**9.4 — the size cap is a constant, not a knob.** M5.1 makes adding a knob a one-line edit, so the
-argument is not cost — it is that 64 MiB of trace is already far past the point where the answer is
-in the first few records. Promote it to a `FieldSpec` if a real sweep hits the cap; do not
-pre-emptively add a knob nobody has needed.
+**13.4 — headless JSON is never raw.** It is a machine contract with a real consumer (M6 §5b's
+sweep join). Mode knobs must not change contracts.
 
-**9.5 — one file per run, no rotation.** `run_id` already scopes a run. Rotation would split the
+**13.5 — the size cap is a constant, not a knob.** M5.1 makes adding a knob a one-line edit, so the
+argument is not cost — it is that 64 MiB of trace is far past the point where the answer is in the
+first few records. Promote it if a real sweep hits it.
+
+**13.6 — one file per run, no rotation.** `run_id` already scopes a run; rotation would split the
 one artifact an operator wants to read end to end.
 
-## 10. Removable contract
-
-`DEEPAGENTS_RAW_TRACE` unset ⇒ `RawTraceMiddleware` is never constructed, `build_agent`'s new
-keyword defaults to `None`, and the middleware list is element-for-element what it is today. Deleting
-`harness/rawtrace.py`, the middleware class, the `FieldSpec` entry, and the launcher line reverts the
-harness to M6 behaviour with no residue.
-
-## 11. Risks
+## 14. Risks
 
 - **Ordering regression.** A future middleware appended after `RawTraceMiddleware` silently makes the
-  trace non-final. Invariant 3 pins the position by asserting it is last, so the failure is a red
-  test rather than a subtly wrong trace.
-- **The trace becomes the bug.** Formatting a huge message list on every call costs real time, and
-  M6's `duration_ms` decomposition would attribute it to `model_ms`. Mitigated by the flag being off
-  by default; §12 requires one live-model timing sanity check, and the docs must state that
-  telemetry numbers taken with raw trace on are not comparable to numbers taken with it off.
-- **Sink failure breaking a turn.** A full disk or a read-only state dir must not kill the run.
-  Invariant 6: every sink path is wrapped, one warning per run, never re-raised.
-- **False confidence.** An operator may read the trace as "what the model saw" in the L3 sense. The
-  header line and the docs name the level explicitly.
+  trace non-final. Invariant 6 pins the position, so it is a red test rather than a subtly wrong
+  trace.
+- **The trace becomes the bug.** Formatting a large message list on every call costs real time, and
+  M6's decomposition would attribute it to `model_ms`. Mitigated by `off` doing zero work; the docs
+  must state that telemetry taken with tracing on is not comparable to telemetry taken with it off.
+- **Sink failure breaking a turn.** A full disk or read-only state dir must not kill the run.
+  Invariant 16: every sink path is wrapped, one warning per run, never re-raised.
+- **Live toggle mid-turn.** `/config set` is processed between turns at the REPL prompt, so a mode
+  change cannot land halfway through a model call. The applier writes one attribute; the middleware
+  reads it at the top of each hook. Pinned by invariant 20 rather than assumed.
+- **False confidence.** An operator may read the trace as L3. The header names the level and the
+  docs say it.
 
-## 12. Test plan
+## 15. Test plan
 
 Host tier (stdlib, no image, no model) unless noted.
 
-- `tests/test_rawtrace.py` — record formatting is verbatim for bodies and additive only for
-  separators; the scrub is applied to every section; the cap stops writing and emits exactly one
-  notice; a sink `OSError` is swallowed and warns once; `trace_path` honours `DEEPAGENTS_STATE_DIR`.
+- `tests/test_rawtrace.py` — bodies verbatim, additions structural only; every block type rendered
+  including unknown shapes (dumped, not dropped) and encrypted reasoning (placeholder with type and
+  size, never ciphertext); scrub applied to every section; the three-phase writer produces the same
+  bytes when driven in one shot as in N appends (§9); the cap stops writing and emits one notice; an
+  `OSError` is swallowed and warns once; `trace_path` honours `DEEPAGENTS_STATE_DIR`.
 - `tests/test_agent.py` — the middleware is **last** in the assembled stack, after
-  `_ExcludeToolsMiddleware`; with the flag unset the stack equals the pre-M7 stack exactly; a stub
-  `wrap_model_call` round-trip records one call and returns the handler's response unchanged; the
-  async twin is present and behaves the same.
-- `tests/test_config.py` — the `FieldSpec` entry resolves CLI > env > profile > default, and the
-  removable default is `False`.
+  `_ExcludeToolsMiddleware`; with `DEEPAGENTS_EXCLUDE_TOOLS` set, the recorded tools are the
+  filtered list; `off` returns the handler's response object unchanged and writes nothing; both the
+  sync and async hooks record identically.
+- `tests/test_config.py` — the `FieldSpec` resolves through the four tiers, rejects an invalid mode
+  at every point of entry, and defaults to `off`; the applier pairing holds both ways (M5.1
+  invariant 7).
 - `tests/test_cli.py` (image tier) — `run_turn` brackets turns, so two model calls in one turn are
-  `call 1` / `call 2` of the same turn, and a retried turn does not restart the turn counter.
-- `tests/test_live_model.py` (`live_model` marker) — the one case a stub cannot cover: run a real
-  local-model turn with tracing on and assert the recorded tool schemas match the tools the agent was
-  actually built with, and that the recorded reply is the reply the turn returned. A stub answers
-  however the test wrote it to; this is the tier that catches a trace which is internally consistent
-  and describes nothing real.
+  `call 1` / `call 2` of the same turn and a retried turn does not restart the counter; in
+  `console`/`both` the rendered answer is suppressed while `run_turn`'s return value is unchanged;
+  the headless JSON is byte-identical across all four modes.
+- `tests/test_live_model.py` (`live_model` marker) — the case a stub cannot cover: a real
+  local-model turn with tracing on, asserting the recorded tool schemas match the tools the agent
+  was actually built with, that the recorded reply is the reply the turn returned, and — on a model
+  that emits them — that reasoning blocks appear in the trace and **not** in
+  `final_message_text`'s output. A stub answers however the test wrote it; this is the tier that
+  catches a trace which is internally consistent and describes nothing real.
