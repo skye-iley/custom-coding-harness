@@ -36,6 +36,16 @@ deepagent-image/project/.harness-config.yaml
 # .harness-profile.yaml.example; the active file stays local.
 deepagent-image/project/.harness-profile.yaml
 
+# Live NetJail allowlists. These were tracked until `harness config security`
+# grew quick-edit loops that rewrite them in place — which made every allowlist
+# experiment a dirty tracked file, one `git add -A` away from shipping a local
+# grant to everyone. Tracked templates are host-services.txt.example /
+# allowed-domains.txt.example; readers fall through to the template when the
+# live file is absent, so a fresh clone keeps the shipped defaults with nothing
+# to copy, and only a write materializes the local file.
+deepagent-image/netjail/host-services.txt
+deepagent-image/netjail/allowed-domains.txt
+
 # Host-side run outputs (all gitignored, all under deepagent-image/):
 #  - test-artifacts/  : files tests ship out under smoke -KeepArtifacts / KEEP_ARTIFACTS=1
 #  - .ephemeral/      : throwaway workspace copies for run-docker -Ephemeral (deleted on close)

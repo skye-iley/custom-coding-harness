@@ -77,7 +77,11 @@ netjail_up() {
 
   # Host-service forwarders. Each is attached to the egress net (has the host
   # route) plus the jail net (agent-visible), and relays exactly one TCP port.
+  # Live allowlist if the operator has one, else the tracked .example template
+  # (the live pair is gitignored). A READ never materializes the live file —
+  # smoke must not write into the repo tree. Mirror of run-docker.sh.
   local services="$NETJAIL_DIR/host-services.txt"
+  [[ -f "$services" ]] || services="$NETJAIL_DIR/host-services.txt.example"
   if [[ -f "$services" ]]; then
     local name port
     while read -r name port _; do
@@ -101,6 +105,7 @@ netjail_up() {
   # Egress proxy: domain-allowlisted HTTP(S) forward proxy for git/pip/npm. Only
   # started when the allowlist has at least one real entry.
   local domains="$NETJAIL_DIR/allowed-domains.txt"
+  [[ -f "$domains" ]] || domains="$NETJAIL_DIR/allowed-domains.txt.example"   # see the services note above
   if [[ -f "$domains" ]] && grep -qvE '^[[:space:]]*(#|$)' "$domains"; then
     # Generate the tinyproxy Filter file: anchor each plain domain so it matches
     # the domain and its subdomains (and only those), not arbitrary substrings.
@@ -163,6 +168,18 @@ ARTIFACT_HOST_DIR=""
 if [[ -n "$KEEP_ARTIFACTS" ]]; then
   ARTIFACT_HOST_DIR="$ROOT/test-artifacts/$(date +%Y%m%d-%H%M%S)"
   mkdir -p "$ARTIFACT_HOST_DIR"
+  # Same native-Linux mount-ownership trap run-docker's mask-scan hit: the dir is
+  # created by the HOST user, the test image runs as `USER agent` (uid 10001), and
+  # a native engine keeps mount ownership — so the `artifact_dir` fixture EACCESes
+  # and takes the suite red. run-docker fixes its case by mapping the container to
+  # the host uid; that is NOT usable here, because the test container also writes
+  # agent-owned paths inside the image (/project's __pycache__, .pytest_cache), so
+  # remapping trades one EACCES for another. Widening this one throwaway host dir
+  # is the narrow fix: it is a fresh timestamped dir under gitignored
+  # test-artifacts/, holds only what a test chose to ship out, and never exists
+  # unless KEEP_ARTIFACTS was asked for. No-op on Docker Desktop/WSL2 (they squash
+  # ownership) and on Windows (`smoke.ps1` has no equivalent, same as run-docker.ps1).
+  chmod 0777 "$ARTIFACT_HOST_DIR"
   ARTIFACT_ARGS=(-v "$ARTIFACT_HOST_DIR:/artifacts" -e "DEEPAGENTS_TEST_ARTIFACTS_DIR=/artifacts")
   echo "KeepArtifacts: on -> $ARTIFACT_HOST_DIR"
 fi
