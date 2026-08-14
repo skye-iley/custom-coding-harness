@@ -13,7 +13,7 @@ doesn't fit most of them anyway). One real bug the build surfaced and fixed alon
 `PauseMiddleware` caching note. §0.1 records the pre-merge review fixes (two passes, 16 items);
 §0.2 the one gap that ships open, deferred to M5.1 on purpose.
 
-**Follow-on: `docs/milestones/in-progress/milestone5.1.md` (Config Field Registry).** The reviews that
+**Follow-on: `docs/milestones/complete/milestone5.1.md` (Config Field Registry).** The reviews that
 produced §0.1 also found the *structural* reason the C5 menu was dropped: a knob is declared in ten
 places and none of them records its valid values, so no field can render a picker. 5.1 replaces that
 duplication with one `FieldSpec` table everything derives from, then adds the menu on top. It is a
@@ -98,7 +98,7 @@ operator who typos gets the opposite of what they asked for, with a success mess
 `if value not in ("deny", "allow")` bolted onto `_cmd_set` — a twelfth hand-maintained per-field
 constant, in a milestone whose follow-up exists specifically to delete the other eleven. M5.1 closes
 it structurally for *every* enum knob at once by giving each field a `choices` tuple in one registry
-(`docs/milestones/in-progress/milestone5.1.md` §3.1, and its §1 done-when). If M5.1 is dropped or
+(`docs/milestones/complete/milestone5.1.md` §3.1, and its §1 done-when). If M5.1 is dropped or
 deferred indefinitely, fix this directly instead of leaving it open.
 
 Only `mask_mode` is reachable through `harness config set` today; the three `hitl.*` fields are
@@ -127,7 +127,7 @@ Fold both into M5.1's write-up when it lands.
 > alow` exits 1 and writes nothing; `DEEPAGENTS_MASK_MODE=alow` refuses to start rather than
 > reaching the scan container as the opposite mode. Both corrections above are covered — the
 > hand-edit path and the env path were fixed alongside `harness config set`, not after it. Bool
-> knobs deliberately carry no `choices` (see `milestone5.1_invariants.md` #19), so
+> knobs deliberately carry no `choices` (see `milestone5.1.md` §9 #19), so
 > `DEEPAGENTS_JAIL=1`/`true`/`on` all still work. This section stays as the record of what M5
 > shipped.
 

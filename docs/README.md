@@ -35,60 +35,15 @@ A milestone moves through three folders. What each stage carries is deliberate:
 
 ## Planned milestones — `milestones/planned/`
 
-*(Empty — `milestone5.1.md` moved to `in-progress/` when its build started.)*
+*(Empty — nothing is queued. The forward candidates live in `design_doc.md` §11 (raw-trace debug
+mode, the benchmark ladder), §13 (file-read middleware), §12.6 (deepagents-native skills/memories),
+and the "Core identity — dependency chain" list; `features/` holds the two named non-milestone
+plans.)*
 
 ## In-progress milestones — `milestones/in-progress/`
 
-- **`milestone5.1.md`** — **Config Field Registry**: follow-on refactor of `milestone5.md`. M5 put
-  every run knob behind one precedence chain but not behind one *declaration* — adding a knob was a
-  ten-site edit where nine sites failed silently, and no field knew its own valid values, which is
-  what blocked the arrow-key `/config` menu M5 scoped out. One `FieldSpec` table is now the single
-  declaration; `Settings`, profile I/O, the resolver, both display renderers, `/config set`
-  dispatch, the wizard screens, and the new picker all derive from it. **Built — R1–R7 all landed**
-  on `feat/milestone5.1-config-field-registry`, with the M5 suite passing **unedited** (§0.2), plus
-  the one sanctioned behavior change: every enum knob now rejects an invalid value at the point of
-  entry, closing the M5 §0.2 gap where `mask_mode: alow` persisted and silently resolved to `deny`.
-- **`milestone5.1_invariants.md`** — the checkable properties behind that claim: derivation
-  (nothing that should derive is hand-written), behavior preservation, the enum-validation change,
-  and the picker's fallbacks. Test-facing companion; folds into `milestone5.1.md` on completion.
-- **`milestone6.md`** — **Telemetry** (`design_doc.md` §8 + §12.7): a durable per-turn sink
-  (`<state-dir>/usage.jsonl`), a derived session summary, that summary appended to the PR body
-  `git-pr` opens, and keyless read access. Not a from-scratch build — M1 already computes per-turn
-  tokens/cost/energy and throws them away, M2 persists only a session roll-up, and `audit.py`
-  already has the jsonl-append + recursive-scrub substrate; this is the missing **sink** and
-  **surface**. Picked as the next milestone because it is one of the two core-identity items with
-  no dependency on the trust-boundary chain, so it cannot be blocked on the open AppArmor
-  measurement. **Telemetry is treated as an audit surface** — the sink lives in the state dir with
-  `past.sqlite` / `denials.jsonl`, not in the agent-writable workspace, because the subject of the
-  audit must not be able to edit the record (§5a). **Built — T1–T6 all landed** on
-  `feat/milestone6-telemetry-impl`. §0.1 records what the build changed about the plan; the notable
-  one is that §3.1's probe **reversed the fix the spec had planned** (telemetry is the outer
-  `wrap_tool_call`, but the gate *suspends* the graph rather than blocking, so the human wait was
-  never inside the wrapper and the planned subtraction would have removed time nobody counted).
-  Its **primary purpose is benchmark-grade attribution** (§5b): wall clock decomposes into
-  `model_ms` / `tool_ms` / `retry_sleep_ms` / `paced_sleep_ms` + a bounded residual, each measured
-  at its own seam, with per-tool-name counts and `run_id` in the headless JSON so a sweep (e.g.
-  SWE-bench Lite, one instance per `--headless` run, `--topic <instance_id>` as the join key) can
-  aggregate. It does **not** score a benchmark — correctness stays with the benchmark's own
-  evaluation of the produced diff.
-- **`milestone6_invariants.md`** — the checkable properties, written before the code and now
-  implemented and covered:
-  capture (one record per turn, failed turns included, never breaks a turn, **and the wall-clock
-  decomposition** — invariant 4a, the one that catches a future blocking call vanishing into
-  "overhead"), derivation (the summary is derived and must agree with the `past.sqlite` row, which
-  stays authoritative), containment (no prompt/reply/tool-arg text by construction; aggregates only
-  reach a PR; git-pr degrades to today's body on any telemetry failure), removability, and
-  joinability. Folds into `milestone6.md` on completion.
-- **`milestone6_spec.md`** — the implementation-level spec (same relationship `milestone5_spec.md`
-  has to `milestone5.md`): exact `usage.jsonl` / `session.json` schemas, which hook captures which
-  field, the `scrub.py` extraction, the `FieldSpec` entry for the on/off knob, the PR-block format,
-  the `harness telemetry` argv grammar, failure paths, test plan, and build order. **Written to be
-  sufficient to build from cold** — including the one composition fact the repo had never verified
-  (whether telemetry's `wrap_tool_call` nests outside `PauseMiddleware`'s), which §3.1 made a probe
-  step rather than a guess. **§3.1 now records the answer and both findings**: telemetry is outer,
-  and the subtraction that fact was supposed to justify is wrong for an unrelated reason, so the
-  probe's real payoff was catching that the gate's control flow passes *through* telemetry's
-  wrapper.
+*(Empty — `milestone5.1.md` and `milestone6.md` moved to `complete/` when they merged. The
+directory is not tracked while empty; recreate it when the next build starts.)*
 
 ## Complete milestones — `milestones/complete/`
 
@@ -135,6 +90,53 @@ A milestone moves through three folders. What each stage carries is deliberate:
   `harness config security`) and one real bug the build surfaced and fixed
   (`PauseMiddleware` was caching `autonomy_level`/`on_deny` at construction instead of reading them
   live, so a `/config set hitl.*` edit would have had no effect). §8 holds the folded invariants.
+- **`milestone5.1.md`** — **Config Field Registry**: follow-on refactor of `milestone5.md`. M5 put
+  every run knob behind one precedence chain but not behind one *declaration* — adding a knob was a
+  ten-site edit where nine sites failed silently, and no field knew its own valid values, which is
+  what blocked the arrow-key `/config` menu M5 scoped out. One `FieldSpec` table is now the single
+  declaration; `Settings`, profile I/O, the resolver, both display renderers, `/config set`
+  dispatch, the wizard screens, and the new picker all derive from it. **Built — R1–R7 all landed**
+  on `feat/milestone5.1-config-field-registry`, with the M5 suite passing **unedited** (§0.2), plus
+  the one sanctioned behavior change: every enum knob now rejects an invalid value at the point of
+  entry, closing the M5 §0.2 gap where `mask_mode: alow` persisted and silently resolved to `deny`.
+  §9 holds the folded invariants: derivation (nothing that should derive is hand-written), behavior
+  preservation, the enum-validation change, and the picker's fallbacks.
+- **`milestone6.md`** — **Telemetry** (`design_doc.md` §8 + §12.7): a durable per-turn sink
+  (`<state-dir>/usage.jsonl`), a derived session summary, that summary appended to the PR body
+  `git-pr` opens, and keyless read access. Not a from-scratch build — M1 already computes per-turn
+  tokens/cost/energy and throws them away, M2 persists only a session roll-up, and `audit.py`
+  already has the jsonl-append + recursive-scrub substrate; this is the missing **sink** and
+  **surface**. Picked as the next milestone because it is one of the two core-identity items with
+  no dependency on the trust-boundary chain, so it cannot be blocked on the open AppArmor
+  measurement. **Telemetry is treated as an audit surface** — the sink lives in the state dir with
+  `past.sqlite` / `denials.jsonl`, not in the agent-writable workspace, because the subject of the
+  audit must not be able to edit the record (§5a). **Built — T1–T6 all landed** on
+  `feat/milestone6-telemetry-impl`. §0.1 records what the build changed about the plan; the notable
+  one is that §3.1's probe **reversed the fix the spec had planned** (telemetry is the outer
+  `wrap_tool_call`, but the gate *suspends* the graph rather than blocking, so the human wait was
+  never inside the wrapper and the planned subtraction would have removed time nobody counted).
+  Its **primary purpose is benchmark-grade attribution** (§5b): wall clock decomposes into
+  `model_ms` / `tool_ms` / `retry_sleep_ms` / `paced_sleep_ms` + a bounded residual, each measured
+  at its own seam, with per-tool-name counts and `run_id` in the headless JSON so a sweep (e.g.
+  SWE-bench Lite, one instance per `--headless` run, `--topic <instance_id>` as the join key) can
+  aggregate. It does **not** score a benchmark — correctness stays with the benchmark's own
+  evaluation of the produced diff. §8 holds the folded invariants, written before the code: capture
+  (one record per turn, failed turns included, never breaks a turn, **and the wall-clock
+  decomposition** — invariant 4a, the one that catches a future blocking call vanishing into
+  "overhead"), derivation (the summary is derived and must agree with the `past.sqlite` row, which
+  stays authoritative), containment (no prompt/reply/tool-arg text by construction; aggregates only
+  reach a PR; git-pr degrades to today's body on any telemetry failure), removability, and
+  joinability.
+- **`milestone6_spec.md`** — the implementation-level spec (same relationship `milestone5_spec.md`
+  has to `milestone5.md`): exact `usage.jsonl` / `session.json` schemas, which hook captures which
+  field, the `scrub.py` extraction, the `FieldSpec` entry for the on/off knob, the PR-block format,
+  the `harness telemetry` argv grammar, failure paths, test plan, and build order. **Written to be
+  sufficient to build from cold** — including the one composition fact the repo had never verified
+  (whether telemetry's `wrap_tool_call` nests outside `PauseMiddleware`'s), which §3.1 made a probe
+  step rather than a guess. **§3.1 now records the answer and both findings**: telemetry is outer,
+  and the subtraction that fact was supposed to justify is wrong for an unrelated reason, so the
+  probe's real payoff was catching that the gate's control flow passes *through* telemetry's
+  wrapper.
 
 ## Feature plans — `features/`
 
