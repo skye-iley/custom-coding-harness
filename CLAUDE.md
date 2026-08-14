@@ -45,30 +45,28 @@ secret-safe containers.
     a silent default — so with the jail off the boundary is still the container + deny-list mask, and
     the docs must keep saying so. The `bwrap --unshare-all` gate is **verified in the built image on a
     host with no LSM policy loaded** (Docker Desktop/WSL2) under the profile that ships, re-checkable
-    via `scripts/smoke.{sh,ps1}` `JAIL_CHECK=1`/`-JailCheck`. **On an AppArmor host the jail does not
-    start** without slice J: seccomp is only one of two independent gates, and Docker's
-    `docker-default` profile denies `mount` outright, so bwrap fails *after* `unshare` succeeds.
+    via `scripts/smoke.{sh,ps1}` `JAIL_CHECK=1`/`-JailCheck`. **On an AppArmor host the jail needs
+    slice J**: seccomp is only one of three independent gates, and Docker's `docker-default` profile
+    denies `mount` outright, so without J bwrap fails *after* `unshare` succeeds.
     **Slice J — vendored `docker-default` with only its `mount` rule narrowed** (same shape as
     `seccomp-sync`) — is **built** (`docs/milestones/in-progress/milestone4.1.md`): the profile,
     `apparmor-sync --check`, install script, and `run-docker`/`harness doctor` wiring have all
     landed, and the live-host measurement is **done** (2026-08-14, Ubuntu VM, kernel
-    `7.0.0-29-generic`, Docker 29.7.2). The rule set is **measured, not derived** — it went 7 → 8
-    rules with four corrections, and `jail-check.py` passes 5/5 under the vendored profile with zero
-    `deepagent-userns` denials (`milestone4.1.md` §13.1a has the round-by-round denial log).
-    **The jail did not start on a stock Ubuntu/Debian host**, because the measurement
-    surfaced a **third** gate nobody had accounted for: the kernel's `mount_too_revealing()` check
-    refuses bwrap's fresh `--proc` while Docker's `maskedPaths`/`readonlyPaths` cover the container's
-    procfs — `EPERM`, no denial logged, independent of both seccomp and AppArmor. Fork **J5** wires
-    the fix and is **built but not re-measured**: both launchers and both smoke scripts now pass
-    `--security-opt systempaths=unconfined` under `DEEPAGENTS_JAIL=1`
-    (`DEEPAGENTS_JAIL_SYSTEMPATHS=default` keeps the masks — the LSM-only control),
-    `classify_bwrap_failure` gained a third `procfs` class (told apart from `lsm` by **errno**,
-    EPERM vs. EACCES, since both fail at a mount), and `doctor` reports the container's *measured*
-    covering mounts — as a **warning**, since slice H passed with those masks on Docker
-    Desktop/WSL2. The host tier is green; **no live AppArmor host has run it end-to-end**, and fork
-    **J6** (is rule 6 dead weight?) needs that same VM session. So: the LSM half is finished and
-    verified, the procfs half is written and unverified, end-to-end usability on Linux is still
-    unproven — don't round any of those up to the next.
+    `7.0.0-29-generic`, Docker 29.7.2). The rule set is **measured, not derived**, across two runs:
+    7 → 8 with four corrections, then 8 → 7 when fork **J6** deleted a `mount fstype=proc -> /proc/,`
+    rule and re-measured no change — it was authorizing nothing (`milestone4.1.md` §13.1a/§13.1b have
+    the round-by-round denial logs). **All three gates are now closed and `DEEPAGENTS_JAIL=1` starts
+    end-to-end on a stock AppArmor host with no extra `docker run` flags.** The third gate, which the
+    measurement surfaced and nobody had accounted for, is the kernel's `mount_too_revealing()` check:
+    it refuses bwrap's fresh `--proc` while Docker's `maskedPaths`/`readonlyPaths` cover the
+    container's procfs — `EPERM`, no denial logged, independent of both seccomp and AppArmor. Fork
+    **J5** closes it: both launchers and both smoke scripts pass `--security-opt
+    systempaths=unconfined` under `DEEPAGENTS_JAIL=1` (`DEEPAGENTS_JAIL_SYSTEMPATHS=default` keeps
+    the masks), `classify_bwrap_failure` gained a third `procfs` class (told apart from `lsm` by
+    **errno**, EPERM vs. EACCES), and `doctor` reports the container's own measured covering mounts.
+    The pass is paired with its control — with the masks kept, the run fails at `--proc` with **zero**
+    `deepagent-userns` denials, which is what pins the cause rather than leaving a green run with two
+    variables in it.
     CI's `apparmor-load-probe` job is still non-gating — the measurement was taken
     on a local VM, not a GitHub runner (fork J2). The knob `DEEPAGENTS_JAIL_APPARMOR=unconfined`
     still works everywhere but drops the whole LSM profile rather than one rule — prefer the

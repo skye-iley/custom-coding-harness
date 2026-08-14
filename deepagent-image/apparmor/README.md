@@ -12,14 +12,16 @@ Two files live here:
 | `deepagent-userns` | the same profile with **only** its `deny mount,` line narrowed. What you load. |
 
 `diff docker-default.rendered deepagent-userns` is the whole review: one line
-becomes seven (plus a comment). `verify_profile` asserts exactly that property,
-so it cannot silently become more.
+becomes the seven measured rules (plus a comment). `verify_profile` asserts
+exactly that property, so it cannot silently become more.
 
 ## Why this exists
 
 M4 slice H runs the agent's file and shell tools inside a `bubblewrap` mount
 namespace (`DEEPAGENTS_JAIL=1`). Building that namespace requires `mount`
-syscalls. **Two independent kernel gates stand in the way, and both must allow:**
+syscalls. **Two independent policy gates stand in the way, and both must allow**
+(a third, the kernel's own procfs restriction, is neither seccomp nor an LSM and
+is covered at the end of this file):
 
 1. **seccomp** — Docker's default syscall filter blocks unprivileged
    user-namespace creation. Solved by `../seccomp/userns.json` (slice H).
@@ -57,9 +59,18 @@ kernel denial that demanded it** — measured 2026-08-14 on Ubuntu (kernel `7.0.
 | `mount options=(rw, bind),` | every `--bind` — principally the workspace, mounted read-write so the agent's edits still land live. Measured to need **no** `silent`, unlike the propagation mounts. |
 | `mount options=(rw, rbind),` | the recursive form, used for the read-only system binds (`/usr`, `/bin`, `/lib`, `/opt`, …). |
 | `mount options in (ro, silent, remount, bind, nosuid, nodev, noexec, noatime, relatime, nodiratime, strictatime),` | the second half of `--ro-bind`: Linux cannot create a read-only bind in one call, so bwrap binds then remounts read-only — re-supplying the **source mount's** existing flags. Those depend on the host's storage driver and on each bind source (`nosuid, nodev, relatime` on the measured host), so `=` would need one rule per combination and cannot converge. `in` (subset match) is the correct operator. **`rw` is deliberately absent** so this stays the read-only remount rule rather than becoming a general bind grant. |
-| `mount fstype=proc -> /proc/,` | `--proc /proc`. bwrap mounts a **fresh** procfs inside the jail rather than inheriting the container's. ⚠️ **Target unverified** — bwrap mounts at `newroot/proc` pre-pivot, and every measured denial named a pre-pivot path, yet the passing run logged no proc denial. A passing run cannot say which rule authorized a mount, so this may be inert. Tracked as `milestone4.1.md` fork J6; resolve by deleting it and re-measuring. |
 | `pivot_root,` | how bwrap swaps the assembled tree in as `/`. Denied by the stock profile because it is a mount-family operation. |
 | `mount options=(rw, silent, rprivate) -> /oldroot/,` | bwrap makes the old root rprivate before detaching it, so unmount events do not reach the parent namespace. This runs **after** all setup ops, which is why it was the last denial to surface — and why it was missing from the rule set originally derived by reading bwrap's syscall sequence. |
+
+**One rule was removed by measurement, and its absence is a result.** A
+`mount fstype=proc -> /proc/,` rule shipped in the first measured set on the theory
+that bwrap's `--proc` needed it. Fork J6 deleted it and re-measured (2026-08-14,
+same host): the jail still passes 5/5 and `dmesg` logs no proc denial, so the rule
+was authorizing nothing — bwrap mounts procfs at `newroot/proc` pre-pivot, which the
+bind rules above already cover. The mount *is* governed, just not by AppArmor: the
+kernel's own `mount_too_revealing()` check is what gates it, which is a different
+gate entirely (see "This profile is necessary but not sufficient" below). Do not
+re-add the rule without a denial that demands it.
 
 **Everything else in `docker-default` survives byte-for-byte** — all nine `deny`
 rules (`/proc/sysrq-trigger`, `/proc/kcore`, the `/proc/sys` write denials,
@@ -185,10 +196,13 @@ with zero `deepagent-userns` denials), no script edit required. `harness doctor`
 reports the container's covering `/proc` mounts, and `jail.classify_bwrap_failure`
 names this failure `procfs` rather than blaming either profile.
 
-⚠️ **Wired, not re-measured.** The 2026-08-14 VM run reached 5/5 only with the
-flag added *by hand*; nobody has yet run `JAIL_CHECK=1 ./scripts/smoke.sh` on an
-AppArmor host with the launcher supplying it. Treat "the jail starts on Ubuntu"
-as unproven until that happens.
+✅ **Measured 2026-08-14** on the same Ubuntu VM, with the launcher supplying the
+flag and nothing added by hand: `JAIL_CHECK=1 ./scripts/smoke.sh` passes 5/5. The
+control (`DEEPAGENTS_JAIL_SYSTEMPATHS=default`) fails at `--proc` with the
+`procfs` reason and **zero** `deepagent-userns` denials in `dmesg` — which is what
+establishes that the flag is the thing that moved, rather than something else
+having changed. `DEEPAGENTS_JAIL=1` now starts end-to-end on a stock
+Ubuntu/Debian host.
 
 Do **not** "fix" this by binding the container's `/proc` and dropping
 `--unshare-pid`. The harness and the agent's shell run as the same uid, so

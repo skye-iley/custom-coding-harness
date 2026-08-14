@@ -836,14 +836,19 @@ the relaxation stays *narrow and diffable against upstream*.
   single `deny mount,` line with the narrowest rule set bwrap actually needs:
 
   ```
-  mount options=(rw, rslave) -> /,        # the MS_SLAVE remount that fails today
-  mount fstype=tmpfs,                     # --tmpfs /tmp, and dir-type mask overmounts
-  mount options=(rw, bind),               # --ro-bind / --bind
-  mount options=(rw, rbind),
-  mount options=(ro, remount, bind),      # the ro half of --ro-bind
-  mount fstype=proc -> /proc/,            # --proc /proc
+  mount options=(rw, silent, rslave) -> /,          # the MS_SLAVE remount that fails today
+  mount fstype=tmpfs,                               # --tmpfs /tmp, and dir-type mask overmounts
+  mount options=(rw, bind),                         # --bind
+  mount options=(rw, rbind),                        # the recursive ro system binds
+  mount options in (ro, silent, remount, bind, …),  # the ro half of --ro-bind
   pivot_root,
+  mount options=(rw, silent, rprivate) -> /oldroot/,# pre-detach, after all setup ops
   ```
+
+  **This block is the MEASURED set** (`milestone4.1.md` §13.1a/§13.1b), not the one this section
+  originally sketched: four rules were wrong, `/oldroot/` was missing, and a `mount fstype=proc ->
+  /proc/,` rule that looked obviously necessary turned out to authorize nothing and was deleted.
+  `harness/apparmor.py:RELAXED_MOUNT_RULES` is authoritative; do not paraphrase from here.
 
   Every other rule in the template is carried through byte-for-byte, and `verify_profile` asserts
   that: the profile must be upstream's template plus **exactly** this mount set, so a swap to a

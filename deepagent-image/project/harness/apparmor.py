@@ -22,10 +22,16 @@ also rules out a setuid-root bwrap: that would fix the half that is not failing.
 So, exactly as `seccomp.py` does one layer down, we vendor Docker's own profile
 with **only** the `mount` rule narrowed:
 
-    mount options=(rw, rslave) -> /,     mount fstype=tmpfs,
-    mount options=(rw, bind),            mount options=(rw, rbind),
-    mount options=(ro, remount, bind),   mount fstype=proc -> /proc/,
+    mount options=(rw, silent, rslave) -> /,
+    mount fstype=tmpfs,
+    mount options=(rw, bind),
+    mount options=(rw, rbind),
+    mount options in (ro, silent, remount, bind, nosuid, nodev, ...),
     pivot_root,
+    mount options=(rw, silent, rprivate) -> /oldroot/,
+
+(the exact set is `RELAXED_MOUNT_RULES` below -- measured on a live host, not
+read off bwrap's source; do not paraphrase it from here)
 
 Every other rule -- all nine `deny` lines, the signal peers, the ptrace peer
 restriction -- carries through byte-for-byte, and `verify_profile` asserts it.
@@ -39,7 +45,7 @@ operator opt-in (`DEEPAGENTS_JAIL_APPARMOR`).
 `apparmor/deepagent-userns` (upstream + our relaxation). `verify_profile` then
 checks the strongest property available offline: the shipped profile is
 *exactly* `relax_mount(baseline)`. A reader diffing the two files sees one line
-become seven and nothing else.
+become the measured rule set and nothing else.
 
 **Unlike seccomp, this cannot ride along as a `docker run` file argument.** An
 AppArmor profile must be compiled into the *host* kernel by root before the
@@ -103,13 +109,16 @@ DENY_MOUNT_RULE = "deny mount,"
 # What replaces it: the mount operations bwrap actually performs, and nothing
 # else. Each is justified per-rule in apparmor/README.md.
 #
-# NOTE (milestone4.1.md §13.1): MEASURED, not derived. The original seven rules
-# were read off bwrap's syscall sequence; four of them were wrong, and this set is
-# what a live Ubuntu 25.10 / kernel 7.0.0-29-generic / Docker 29.7.2 host's
-# `apparmor="DENIED"` log actually demanded (see §13.1a for the round-by-round
-# record). Adding a rule here widens the profile -- it must arrive with a
-# justification in the README and a denial that demanded it. A bare `mount,`
-# catch-all is `unconfined` wearing a costume and verify_profile rejects it.
+# NOTE (milestone4.1.md §13.1): MEASURED, not derived, across TWO live runs. The
+# original seven rules were read off bwrap's syscall sequence; four of them were
+# wrong and an eighth was missing, and what a live Ubuntu 25.10 / kernel
+# 7.0.0-29-generic / Docker 29.7.2 host's `apparmor="DENIED"` log demanded is what
+# is here (§13.1a for the round-by-round record). The second run (fork J6) then
+# DELETED the `fstype=proc` rule and measured no change, so the set is seven again
+# -- narrowed by subtraction, which is the only safe direction to move it.
+# Adding a rule here widens the profile -- it must arrive with a justification in
+# the README and a denial that demanded it. A bare `mount,` catch-all is
+# `unconfined` wearing a costume and verify_profile rejects it.
 RELAXED_MOUNT_RULES = (
     # bwrap's first act after unshare. MS_SILENT is set on every mount bwrap
     # makes; AppArmor's `options=` is an EXACT flag-set match, so omitting it
@@ -125,11 +134,14 @@ RELAXED_MOUNT_RULES = (
     # would need one rule per combination. `rw` is deliberately absent so this
     # stays the read-only remount rule and cannot serve as a general bind grant.
     "mount options in (ro, silent, remount, bind, nosuid, nodev, noexec, noatime, relatime, nodiratime, strictatime),",
-    # UNVERIFIED TARGET: bwrap mounts procfs at `newroot/proc` pre-pivot, which
-    # AppArmor should see as /newroot/proc/, yet the measured run passed with this
-    # rule unchanged and logged no proc denial. A passing run cannot say WHICH rule
-    # authorized the mount, so this may be dead weight. milestone4.1.md fork J4.
-    "mount fstype=proc -> /proc/,",
+    # NO proc rule. bwrap DOES mount a fresh procfs, but nothing here has to permit
+    # it: the mount happens at `newroot/proc` pre-pivot and is covered by the bind
+    # rules above. A `mount fstype=proc -> /proc/,` rule shipped here through the
+    # first measurement and was removed in a second one (2026-08-14, fork J6) --
+    # deleting it changed nothing, so it was authorizing nothing. Kept as a comment
+    # because "we checked, and the obvious-looking rule is not needed" is the part a
+    # future reader would otherwise re-derive. The kernel's own procfs restriction,
+    # which IS what governs that mount, is not an LSM matter at all (§13.7).
     "pivot_root,",
     # bwrap makes the old root rprivate before detaching it, AFTER all setup ops --
     # which is why this denial only surfaced once rules 1-5 were correct and the
@@ -395,7 +407,8 @@ def render_template(template: str) -> str:
 def relax_mount(rendered: str) -> str:
     """Return `rendered` with `deny mount,` replaced by RELAXED_MOUNT_RULES.
 
-    One line becomes seven, at the same indent, and every other line passes
+    One line becomes len(RELAXED_MOUNT_RULES), at the same indent, and every
+    other line passes
     through byte-identical -- so a reader diffing the vendored profile against
     the vendored baseline sees exactly our change and nothing else.
 

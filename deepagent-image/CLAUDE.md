@@ -944,16 +944,21 @@ sudo deepagent-image/scripts/install-apparmor-profile.sh          # load (enforc
 if an LSM is in force asks whether `deepagent-userns` is loaded. Not loaded ⇒ it **aborts before
 `docker run`** with the install command. It never falls back to `unconfined` on its own.
 
-**✅ Measured 2026-08-14** on an Ubuntu VM (kernel `7.0.0-29-generic`, Docker 29.7.2). The rule set
-is no longer derived: it went **7 → 8 rules with four corrections**, and `jail-check.py` passes 5/5
-under the vendored profile with zero `deepagent-userns` denials. Round-by-round log:
-`milestone4.1.md` §13.1a. If you ever change `RELAXED_MOUNT_RULES`, the process is unchanged — read
+**✅ Measured 2026-08-14** on an Ubuntu VM (kernel `7.0.0-29-generic`, Docker 29.7.2), twice. The
+rule set is no longer derived: it went **7 → 8 with four corrections**, then **8 → 7** when fork J6
+deleted a `mount fstype=proc -> /proc/,` rule and re-measured no change — it was authorizing nothing.
+`jail-check.py` passes 5/5 under the vendored profile with zero `deepagent-userns` denials.
+Round-by-round logs: `milestone4.1.md` §13.1a and §13.1b. Note what J6 shows: a profile can pass
+every test and still be too wide, because `verify_profile` checks the set matches
+`RELAXED_MOUNT_RULES`, not that each member earns its place. Deletion + re-measurement is the only
+instrument for that. If you ever change `RELAXED_MOUNT_RULES`, the process is unchanged — read
 `dmesg | grep 'apparmor="DENIED"'` and add **only** the rule the denial demands, with a justification
 in `apparmor/README.md`; a broad `mount,` catch-all is `unconfined` in disguise and `verify_profile`
 rejects it. Reinstall after every `apparmor-sync`: the kernel holds the old rules until replaced, and
 nothing in-container can detect a stale load.
 
-**⚠️ But the jail still does not start on a stock Ubuntu/Debian host — there is a THIRD gate.**
+**⚠️ There is a THIRD gate, and it is why the jail long did not start on a stock Ubuntu/Debian
+host.**
 The AppArmor measurement surfaced it: with the LSM satisfied, bwrap dies at
 
 ```
@@ -965,7 +970,9 @@ cannot be mounted from a non-initial user namespace while the visible procfs is 
 submounts, and Docker's `maskedPaths`/`readonlyPaths` are 13 such mounts. Independent of seccomp
 *and* AppArmor.
 
-**Fork J5 is now wired** (and **not yet re-measured on an AppArmor host** — say it that way):
+**Fork J5 is wired and measured** (2026-08-14, `milestone4.1.md` §13.1b: 5/5 through the launcher
+with no hand-added flags; the `DEEPAGENTS_JAIL_SYSTEMPATHS=default` control fails at `--proc` with
+**zero** LSM denials, which is the evidence the pass rests on):
 `run-docker.{sh,ps1}` and `smoke.{sh,ps1}` pass `--security-opt systempaths=unconfined` from the
 same `DEEPAGENTS_JAIL=1` block that passes seccomp and AppArmor, announcing it;
 `DEEPAGENTS_JAIL_SYSTEMPATHS=default` keeps Docker's `/proc` masks (the **LSM-only control**, no

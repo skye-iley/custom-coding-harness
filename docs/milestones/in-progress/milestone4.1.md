@@ -1,25 +1,26 @@
 # Milestone 4.1 — LSM Parity (Slice J: vendored AppArmor profile)
 
-> **Status:** 🚧 In-progress — **the LSM gate is closed and measured; a third, non-LSM gate is
-> now the blocker.** §15 step 4, the live-host measurement, **is done** (2026-08-14, Ubuntu VM,
-> kernel `7.0.0-29-generic`, Docker 29.7.2): the rule set in §6 is now **measured, not derived** —
-> four of the original seven rules were wrong and an eighth was missing entirely (§13.1a records
-> the round-by-round denial log). With the 8-rule profile loaded, `jail-check.py` passes all five
-> boundary checks plus the control, and a jail run logs **zero** `deepagent-userns` denials.
+> **Status:** ✅ **All three gates closed and measured on a live host.** `DEEPAGENTS_JAIL=1`
+> starts end-to-end on a stock AppArmor-confined Ubuntu host with **no extra `docker run` flags**
+> (measured 2026-08-14, Ubuntu VM, kernel `7.0.0-29-generic`, Docker 29.7.2).
 >
-> **What is not done:** the measurement surfaced a **third independent gate** the milestone never
-> accounted for — the kernel's fully-visible-procfs restriction blocks bwrap's `--proc` on a stock
-> Docker container, with no AppArmor denial involved (§13.7). Fork **J5** is now **written**: both
-> launchers and both smoke scripts pass `--security-opt systempaths=unconfined` under
-> `DEEPAGENTS_JAIL=1` (overridable with `DEEPAGENTS_JAIL_SYSTEMPATHS=default`, which is how the
-> LSM-only control is reproduced), `classify_bwrap_failure` has a third `procfs` class, and
-> `doctor` reads the container's own mount table instead of trusting a forwarded flag. **It has not
-> been run on a live AppArmor host yet** — the host tier is green and the wiring is a hand-verified
-> mirror of the by-hand workaround that did work on 2026-08-14, which is not the same as a measured
-> end-to-end pass. So: `deepagent-userns` is finished and verified; `DEEPAGENTS_JAIL=1` on an
-> AppArmor host is wired but unverified. Say it that way — the LSM half being done is not the
-> milestone being done, and code that mirrors a working manual step is not a measurement.
-> **J6 (is rule 6 dead weight?) is still open** and needs the same VM session.
+> Three gates, not the two this doc was written for, each independently satisfied:
+>
+> 1. **seccomp** — the vendored narrow profile (slice H, unchanged).
+> 2. **AppArmor** — `deepagent-userns`, and the rule set is **measured, not derived**: the original
+>    seven rules had four wrong and one missing (§13.1a), and a second run then deleted a seventh as
+>    inert (§13.1b, fork J6). Seven rules again — narrowed by subtraction.
+> 3. **The kernel's fully-visible-procfs restriction** — `mount_too_revealing()` refuses bwrap's
+>    fresh `--proc` while Docker's `maskedPaths`/`readonlyPaths` cover the container's procfs. Not an
+>    LSM, no denial logged, invisible to both profile checks. Fork **J5** wires the fix: both
+>    launchers and both smoke scripts pass `--security-opt systempaths=unconfined` under
+>    `DEEPAGENTS_JAIL=1`, `classify_bwrap_failure` has a third `procfs` class, and `doctor` reads the
+>    container's own mount table (§13.7).
+>
+> The pass is **paired with its control**: with `DEEPAGENTS_JAIL_SYSTEMPATHS=default` the run fails
+> at `--proc` with **zero** `deepagent-userns` denials, which is what establishes that the flag is
+> the thing that moved rather than something else having changed. Forks J5 and J6 are closed; **J2
+> (CI gate) and J4 (SELinux) remain open**.
 >
 > CI's `apparmor-load-probe` job (§10) remains non-gating; the measurement above was taken on a
 > local VM rather than a GitHub runner, so fork J2 is still open. Follow-up to
@@ -84,12 +85,13 @@ LSM**, and make the profile's narrowness a CI-checked regression guard rather th
   read-only — i.e. `milestone4.md` §11.4's gate table reproduced under `deepagent-userns`, with the
   LSM named in the record. **Done 2026-08-14** (Ubuntu VM, kernel `7.0.0-29-generic`, Docker 29.7.2,
   `docker-default` in force by default); `jail-check.py` printed `JAIL CHECK PASSED` with all five
-  checks green. Caveat on the record: it passed **with `--security-opt systempaths=unconfined`**,
-  needed for the unrelated procfs gate in §13.7, not for anything AppArmor mediates.
-- ⬜ **`DEEPAGENTS_JAIL=1` starts on a stock AppArmor host with no extra `docker run` flags.** Not
-  met — §13.7's procfs gate blocks `--proc` independently of the LSM. Fork J5 decides the fix. This
-  bullet is *new*: the milestone was written believing AppArmor was the last gate, and the
-  measurement disproved that.
+  checks green. On the record: that first pass needed `--security-opt systempaths=unconfined` added
+  by hand, for the unrelated procfs gate in §13.7, not for anything AppArmor mediates.
+- ✅ **`DEEPAGENTS_JAIL=1` starts on a stock AppArmor host with no extra `docker run` flags.**
+  Met 2026-08-14 after fork J5: `JAIL_CHECK=1 ./scripts/smoke.sh` passes 5/5 with the launcher
+  supplying the flag, and the `DEEPAGENTS_JAIL_SYSTEMPATHS=default` control fails at `--proc` with
+  zero LSM denials. This bullet is *new*: the milestone was written believing AppArmor was the last
+  gate, and the measurement disproved that.
 - `milestone4.md` §1/§11.6/§0, `milestone4_invariants.md` 37–38, `deepagent-image/CLAUDE.md`, and
   `ENV_VARS.md` no longer describe the jail's reach as "no-LSM hosts plus `unconfined` opters."
 
@@ -225,14 +227,15 @@ RELAXED_MOUNT_RULES = (
     "mount options=(rw, rbind),",                 # the recursive form
     "mount options in (ro, silent, remount, bind, nosuid, nodev, noexec, "
     "noatime, relatime, nodiratime, strictatime),",  # read-only half of --ro-bind
-    "mount fstype=proc -> /proc/,",               # --proc /proc  (target UNVERIFIED, fork J4)
+    # (no proc rule -- fork J6 deleted it and measured no change; see below)
     "pivot_root,",
     "mount options=(rw, silent, rprivate) -> /oldroot/,",  # pre-detach, after all setup ops
 )
 ```
 
-**This rule set is MEASURED** (2026-08-14 — §13.1a). The seven rules above it in this doc's original
-revision were derived from bwrap's syscall sequence, and four were wrong:
+**This rule set is MEASURED across two runs** (2026-08-14 — §13.1a, §13.1b). The seven rules in this
+doc's original revision were derived from bwrap's syscall sequence; four were wrong, one was missing,
+and one turned out to be inert:
 
 | Derived | Measured | Why the derivation missed it |
 |---|---|---|
@@ -519,8 +522,9 @@ it costs to run it.
 
 **Resolved 2026-08-14.** §6's original seven rules came from reading bwrap's syscall sequence
 (`unshare` → `mount(MS_SLAVE|MS_REC, /)` → binds → `--proc` → `--dev` → `pivot_root` → `umount`),
-not from a passing run. The risk was called correctly: **four of seven were wrong**, and the eighth
-rule was absent. §13.1a is the record. Keep this section as the process for any future change to
+not from a passing run. The risk was called correctly: **four of seven were wrong**, an eighth was
+absent, and a second run (§13.1b, fork J6) then found one of the survivors inert and deleted it —
+seven again, but a different seven. §13.1a and §13.1b are the record. Keep this section as the process for any future change to
 `RELAXED_MOUNT_RULES` — the rule stands that a rule arrives only when a denial demands it.
 
 **Process:** on a live Ubuntu host with the profile loaded, run the jail and read the kernel's own
@@ -552,7 +556,7 @@ each round yields exactly one.
 | 4 | `name="/oldroot/" flags="rw, silent, rprivate"` | Post-setup `MS_REC\|MS_PRIVATE` on the old root; absent from the derived set. | rule 8 added |
 | 5 | *(none)* — `JAIL CHECK PASSED`, 5/5 + control | — | — |
 
-Confirmation with the 8-rule profile: `apparmor-sync --check` green (`docker-default` plus exactly 8
+Confirmation with the 8-rule profile (later narrowed to 7 by fork J6 — §13.1b): `apparmor-sync --check` green (`docker-default` plus exactly 8
 mount rules); `test_apparmor.py` + `test_jail.py` + `test_doctor.py` 88 passed in the image tier;
 artifact body sha `712f42bfea34ac3277369bec69ef87919cb988d28b44fea390494dbbdbbf8944`, reproduced
 byte-identically from a second machine's `apparmor-sync`, which is the §7 reproducibility property
@@ -561,6 +565,31 @@ holding in practice rather than only in `test_committed_baseline_is_reproducible
 **Final control:** with `systempaths` back to default, the run fails at `--proc` and logs **zero**
 `deepagent-userns` denials. That is what closes the LSM question — not the passing run, which had a
 second variable in it.
+
+### 13.1b Second measurement — J5 verified, J6 resolved (same host, same day)
+
+Run 1 in §13.1a held the procfs gate open by hand. This run closes both remaining questions with
+the launcher doing the work, which is the only configuration an operator ever gets.
+
+| Step | Command | Result |
+|---|---|---|
+| J5, default path | `JAIL_CHECK=1 ./scripts/smoke.sh` | ✅ 5/5 + control. **No hand-added `docker run` flags** — the launcher supplied `systempaths=unconfined`. |
+| J5, control | `DEEPAGENTS_JAIL_SYSTEMPATHS=default JAIL_CHECK=1 ./scripts/smoke.sh` | ✅ fails as required: `SKIPPED: the kernel refuses bwrap's fresh /proc`, escalated to a failure by `JAIL_CHECK`, with **0** `deepagent-userns` denials. |
+| J5, doctor | `doctor` in a jailed container, both ways | ✅ `procfs is uncovered` with the flag; the 13-covering-mount warning + a `procfs`-named bwrap error without it. Neither blames a profile. |
+| J6 | delete `mount fstype=proc -> /proc/,` → `apparmor-sync` → reinstall → re-run | ✅ still 5/5, **no proc denial**. The rule was inert. Deleted; profile sha `712f42bf…` → `52a14460…`, rule count 8 → 7. |
+
+Two things this buys beyond a green run:
+
+- **The control is the evidence, not the pass.** A passing run has one variable too many; the failing
+  control with zero LSM denials is what pins the cause to the kernel's procfs check rather than to
+  anything AppArmor mediates. Same reasoning §13.1a's final control applied to the LSM question.
+- **J6 shows a passing profile can still be too wide.** A rule that authorizes nothing costs nothing
+  at run time and is invisible to every test — `verify_profile` checks the set matches
+  `RELAXED_MOUNT_RULES`, not that each member earns its place. The only instrument is deletion plus
+  re-measurement. Worth repeating for any rule that arrives on a theory rather than on a denial.
+
+The regenerated artifact was reproduced byte-identically on a second machine (`52a14460…` from a
+Windows `apparmor-sync`), which is §7's reproducibility property holding in practice again.
 
 ### 13.2 Stale profile drift is undetectable from inside the container
 
@@ -624,7 +653,7 @@ distinguishable by how far bwrap got, only by errno and the absence of a denial.
 `classify_bwrap_failure` folded it into `unknown`; that was a wiring gap fork J5 had to close
 alongside the fix, or the next operator re-runs this whole investigation.
 
-**Wired (fork J5, not yet re-measured on a live host):**
+**Wired and measured (fork J5 — §13.1b):**
 
 | Seam | Behaviour |
 |---|---|
@@ -657,25 +686,25 @@ negotiable.
 
 Fix options are fork **J5**.
 
-### 13.8 Next VM session — the two things left, in order
+### 13.8 Reproducing the whole thing on a fresh host
 
-Both need the AppArmor host from §13.1 (profile loaded, `install-apparmor-profile.sh --status`
-green). Neither needs a code change first.
+Both measurements above, as a runbook. Profile loaded first
+(`install-apparmor-profile.sh --status` green).
 
-1. **Verify J5 end-to-end.** `JAIL_CHECK=1 ./scripts/smoke.sh` with **no hand-added flags**. Pass =
-   the launcher supplies `systempaths=unconfined` and `jail-check.py` reports 5/5. Then the control:
-   `DEEPAGENTS_JAIL_SYSTEMPATHS=default JAIL_CHECK=1 ./scripts/smoke.sh` must **fail** with the
-   `procfs` SKIP reason (rc 77 turned into a failure by `JAIL_CHECK`) and **zero**
-   `deepagent-userns` denials in `dmesg` — that is what proves the flag is the thing that moved,
-   rather than something else having changed since 2026-08-14. Also run `harness doctor` inside a
-   jailed container both ways and confirm the covering-mounts line flips.
-2. **Resolve J6.** Delete rule 6 (`mount fstype=proc -> /proc/,`) from `RELAXED_MOUNT_RULES`,
-   `python3 -m harness apparmor-sync`, reinstall the profile (**the kernel keeps the old rules until
-   replaced**), re-run step 1. A `proc` denial in `dmesg` ⇒ the rule was load-bearing and its target
-   is wrong (`/newroot/proc/`); no denial ⇒ delete it for good. Either outcome narrows the profile;
-   record which in §6 and `apparmor/README.md`'s rule table.
+```bash
+JAIL_CHECK=1 ./scripts/smoke.sh                                     # expect 5/5, no hand flags
+sudo dmesg -C
+DEEPAGENTS_JAIL_SYSTEMPATHS=default JAIL_CHECK=1 ./scripts/smoke.sh # expect procfs SKIP -> failure
+sudo dmesg | grep 'apparmor="DENIED"' | grep -c deepagent-userns    # expect 0
+```
 
-Then §16's smoke row flips, and §15 step 9 closes.
+The second command failing is the pass condition; the `0` is what makes the first meaningful. If the
+denial count is non-zero the profile has drifted and the first run passed for a reason nobody
+checked — re-run `apparmor-sync --check` and reinstall before believing anything.
+
+**Reinstall after every `apparmor-sync`.** The kernel holds the old rules until replaced, and nothing
+in-container can detect a stale load (§13.2). Half the rounds in §13.1a would have been unreadable
+without it.
 
 ## 14. Open forks
 
@@ -695,8 +724,9 @@ Then §16's smoke row flips, and §15 step 9 closes.
   host.** **Decided: option 1.** Pass `--security-opt systempaths=unconfined` from
   `run-docker.{sh,ps1}` and `smoke.{sh,ps1}`, in the same block that already passes
   `seccomp=userns.json` and `apparmor=deepagent-userns` — i.e. **only when `DEEPAGENTS_JAIL=1`**,
-  with a `check-parity` marker so the pair cannot drift. **Built** (see §13.7's wiring table);
-  **not yet re-measured on the VM**, which is what would let the §16 smoke row flip.
+  with a `check-parity` marker so the pair cannot drift. **Built and measured** — §13.1b: 5/5
+  through the launcher with no hand-added flags, and the control fails at `--proc` with zero LSM
+  denials. Closed.
 
   The rejected alternative is option 2 (bind `/proc`, drop `--unshare-pid`), ruled out on the
   credential-path and outer/nested-chain grounds in §13.7. It is worth recording *why* option 2 was
@@ -722,15 +752,16 @@ Then §16's smoke row flips, and §15 step 9 closes.
   Ships with: the launcher printing what it gave up (same treatment `unconfined` gets today),
   `harness doctor` reporting it, and `classify_bwrap_failure` learning a third `procfs` class so the
   next operator gets a diagnosis instead of `unknown` (§13.7).
-- **J6 — is rule 6 dead weight?** `mount fstype=proc -> /proc/,` targets a post-pivot path, but
-  bwrap mounts procfs at `newroot/proc` and every other denial in §13.1a named a pre-pivot
-  `/newroot/…` or `/oldroot/` path. The measured run nevertheless passed with the rule unchanged and
-  logged no proc denial — and **a passing run cannot say which rule authorized a mount**, so either
-  the rule matches by a mechanism not understood here, or something else permits the mount and the
-  rule is inert. Neither is acceptable in a profile whose whole claim is "exactly what bwrap needs."
-  Resolve by removing the rule and re-measuring: a denial means it was load-bearing (and its target
-  needs fixing to `/newroot/proc/`); no denial means delete it. **Cheap, and it narrows the profile
-  either way.** Do it in the same pass as J5, since both need a live host.
+- **J6 — is rule 6 dead weight? RESOLVED 2026-08-14: yes, deleted.**
+  `mount fstype=proc -> /proc/,` targeted a post-pivot path while bwrap mounts procfs at
+  `newroot/proc`, and every other denial in §13.1a named a pre-pivot `/newroot/…` or `/oldroot/`
+  path — but a passing run cannot say *which* rule authorized a mount, so the only way to know was
+  to remove it and re-measure. Removed, re-synced, reloaded: `jail-check.py` still passes **5/5**
+  and `dmesg` logs **no** proc denial. The rule was authorizing nothing; bwrap's `--proc` is covered
+  by the bind rules, and what actually gates that mount is the kernel's own `mount_too_revealing()`
+  check (§13.7), which is not an LSM matter at all. Profile is back to **seven** rules, narrowed by
+  subtraction — the only safe direction. Recorded in `apparmor/README.md` as a *result*, not an
+  omission, so nobody re-adds it on the same theory.
 
 ## 15. PR plan
 
@@ -747,12 +778,12 @@ in this order — each step leaves the tree green:
    went 7 → 8 with four corrections (§13.1a), re-synced, re-committed. Steps 5–8 were built against
    the derived set and needed no change beyond the re-sync, since they consume the constant rather
    than the rules.
-9. 🚧 **Fork J5 + J6** — `systempaths=unconfined` in both launchers and both smoke scripts, the
-   `classify_bwrap_failure` `procfs` class, `doctor` reporting, parity markers: **all built**
-   (§13.7). Still open, and both need the VM: (a) an end-to-end `JAIL_CHECK=1 ./scripts/smoke.sh`
-   on the AppArmor host with no hand-added flags, and (b) **J6** — delete rule 6, re-measure,
-   keep or drop it on what `dmesg` says. **This is what makes `DEEPAGENTS_JAIL=1` actually start
-   on an AppArmor host**; steps 1–8 make the LSM stop being the reason it doesn't.
+9. ✅ **Fork J5 + J6** — `systempaths=unconfined` in both launchers and both smoke scripts, the
+   `classify_bwrap_failure` `procfs` class, `doctor` reporting from the measured mount table, parity
+   markers; then measured on the VM (§13.1b): 5/5 with no hand-added flags, control fails with zero
+   LSM denials, and J6's rule deletion changed nothing so the profile is 7 rules again. **This is
+   what makes `DEEPAGENTS_JAIL=1` actually start on an AppArmor host**; steps 1–8 make the LSM stop
+   being the reason it doesn't.
 5. ✅ Launcher default + probe (`run-docker.{sh,ps1}`, `smoke.{sh,ps1}`) + parity markers.
 6. ✅ `doctor` branch + its tests.
 7. ✅ CI step 1 (host-tier `test_apparmor.py`); CI step 2 shipped as the non-gating
@@ -771,7 +802,9 @@ in this order — each step leaves the tree green:
 | `jail-check.py` | with `deepagent-userns` loaded on an AppArmor host: bwrap unshares, a masked path reads 0 bytes inside the jail with no docker mask, an unmasked file is byte-identical, workspace writable, `/project` read-only | image | ✅ 5/5 + control, 2026-08-14 — **with `systempaths=unconfined`** (§13.7) |
 | nested shell jail | an outer process's PID is invisible inside `sandbox-exec exec`, which lists only `/proc/1`, `/proc/2` — the property that keeps `/proc/<harness>/environ` away from the shell (§13.7) | manual | ✅ same host/run |
 | LSM-only control | `systempaths` at default: run fails at `--proc` with **zero** `deepagent-userns` denials | manual | ✅ — this is what closes §13.1, not the passing run |
-| smoke (`JAIL_CHECK=1`) | the above driven end-to-end through `smoke.sh` on an AppArmor host, **with no hand-added flags** | image | ⬜ **unblocked, unmeasured** — J5's wiring passes `systempaths=unconfined` for the operator; the VM re-run that proves it has not happened yet |
+| smoke (`JAIL_CHECK=1`) | the above driven end-to-end through `smoke.sh` on an AppArmor host, **with no hand-added flags** | image | ✅ 2026-08-14 (§13.1b) — 5/5, launcher-supplied `systempaths=unconfined` |
+| smoke control | `DEEPAGENTS_JAIL_SYSTEMPATHS=default` must FAIL with the `procfs` reason and **zero** `deepagent-userns` denials — the evidence the pass rests on | image | ✅ same run |
+| J6 deletion | removing `mount fstype=proc -> /proc/,` changes nothing: 5/5, no proc denial, profile 8 → 7 rules | image | ✅ same run |
 | `tests/test_jail.py` (add, 6) | the `procfs` class is not `lsm` and not `unknown`; EPERM on a non-proc mount is *not* the procfs gate; `/proc/self/mountinfo` parsing finds Docker's masks, ignores `/proc` itself and `/procfoo`, and yields `[]` when unreadable ("no evidence", never a manufactured diagnosis); the hint names the fix and clears the other two gates | host | ✅ 45 pass |
 | `tests/test_doctor.py` (add, 2) | covering mounts are reported with the remedy and are a **warning** not an error (they are the configuration that trips the kernel, not proof it trips here); an uncovered procfs reports clean | host | ✅ 29 pass |
 
