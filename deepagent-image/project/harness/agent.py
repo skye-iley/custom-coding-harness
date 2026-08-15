@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shlex
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -12,7 +13,7 @@ from deepagents import create_deep_agent
 from deepagents.backends import LocalShellBackend
 from langchain.agents.middleware.types import AgentMiddleware
 
-from harness import jail, nsguard
+from harness import jail, nsguard, rawtrace
 from harness.loaders import _read_optional_text
 from harness.mask import append_deny
 from harness.pathguard import PathGuardDenied, validate_path
@@ -153,6 +154,92 @@ class _ExcludeToolsMiddleware(AgentMiddleware):
 
     async def awrap_model_call(self, request, handler):
         return await handler(self._filter(request))
+
+
+class RawTraceMiddleware(AgentMiddleware):
+    """Record the literal payload of every model call (Milestone 7).
+
+    **Position is load-bearing, not cosmetic.** langchain composes middleware
+    first-is-outermost, so the *last* one appended is the *innermost* — the one
+    whose view of `request` is final. `build_agent` appends this **after**
+    `_ExcludeToolsMiddleware` for exactly that reason: a trace installed one
+    layer out would log tools the model never received, which is the exact bug
+    class ("a tool the model never saw") this middleware exists to diagnose,
+    reproduced inside the diagnostic. `tests/test_agent.py` pins the list
+    position rather than the intent.
+
+    Constructed by `cli.py` (which keeps the reference so it can bracket turns
+    and flip the mode live) but *installed* by `build_agent`, since only
+    `build_agent` controls what comes after the exclusion filter.
+
+    Both hooks are implemented and record identically: a sync-only trace would go
+    blank the day a path goes async, with no error to notice.
+    """
+
+    def __init__(self, sink: "rawtrace.TraceSink"):
+        super().__init__()
+        self.sink = sink
+        self.turn_index = 0
+        self.call_index = 0
+
+    def begin_turn(self) -> None:
+        """Start a new turn's call numbering. Called by `cli.run_turn` — **never
+        from `before_agent`**, which fires once per *invoke*: the resilience layer
+        re-invokes on a retry and every HITL resume is another invoke, so numbering
+        keyed there restarts mid-turn. Same lesson `TelemetryMiddleware.begin_turn`
+        records, applied here rather than re-derived wrong."""
+        self.turn_index += 1
+        self.call_index = 0
+
+    def _open(self, request) -> float:
+        self.call_index += 1
+        self.sink.open_record(rawtrace.format_header(
+            run_id=self.sink.run_id,
+            turn=self.turn_index,
+            call=self.call_index,
+            model=getattr(request, "model", None),
+        ))
+        self.sink.append(rawtrace.format_request(request))
+        return time.perf_counter()
+
+    def _close(self, started: float, response=None, exc: BaseException | None = None) -> None:
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        if exc is not None:
+            self.sink.append(rawtrace.format_error(exc, elapsed_ms=elapsed_ms))
+        else:
+            self.sink.append(rawtrace.format_response(response, elapsed_ms=elapsed_ms))
+        self.sink.close_record()
+
+    def wrap_model_call(self, request, handler):
+        # The mode is read here, before any work: with `off` this method is a
+        # pure pass-through costing one attribute read per model call — no file,
+        # no directory, no output, and no record formatting performed.
+        if self.sink.mode == rawtrace.MODE_OFF:
+            return handler(request)
+        started = self._open(request)
+        try:
+            response = handler(request)
+        except BaseException as exc:
+            # A call that raises still produces exactly one record: the request
+            # half is already written and this marks the outcome.
+            self._close(started, exc=exc)
+            raise
+        self._close(started, response=response)
+        # Exactly what the handler returned — same object, no copy, no
+        # `override`. This middleware observes; it does not shape.
+        return response
+
+    async def awrap_model_call(self, request, handler):
+        if self.sink.mode == rawtrace.MODE_OFF:
+            return await handler(request)
+        started = self._open(request)
+        try:
+            response = await handler(request)
+        except BaseException as exc:
+            self._close(started, exc=exc)
+            raise
+        self._close(started, response=response)
+        return response
 
 
 class _WorkspaceShellBackend(LocalShellBackend):
@@ -475,6 +562,7 @@ def build_agent(
     checkpointer: Any = None,
     on_path_denied: Callable[[str, str], bool] | None = None,
     on_command_denied: Callable[[str, str, str], None] | None = None,
+    raw_trace: "RawTraceMiddleware | None" = None,
 ):
     workspace.mkdir(parents=True, exist_ok=True)
     backend = _WorkspaceShellBackend(
@@ -500,6 +588,14 @@ def build_agent(
     excluded = excluded_tools_from_env()
     if excluded:
         mw.append(_ExcludeToolsMiddleware(excluded))
+
+    # M7: the raw trace goes AFTER the exclusion filter, so it is the innermost
+    # wrap_model_call and its view of `request` is the final one. Appended one
+    # position earlier it would record the pre-filter tool list -- i.e. tools the
+    # model never received -- which is the bug class the trace exists to find.
+    # Nothing may be appended after this; tests/test_agent.py pins the position.
+    if raw_trace is not None:
+        mw.append(raw_trace)
 
     return create_deep_agent(
         model=model,

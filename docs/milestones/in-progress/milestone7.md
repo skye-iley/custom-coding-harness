@@ -2,9 +2,13 @@
 
 ## 0. Build status
 
-**Spec only — no code yet.** Doc lands first on `feat/raw-trace-debug`; the build follows on the
-same branch. Checkable properties: `milestone7_invariants.md` (same folder), which folds in here as
-a section on completion.
+**Built — S1–S5 all landed** on `feat/raw-trace-debug`. Checkable properties:
+`milestone7_invariants.md` (same folder) until the milestone moves to `complete/`, at which point it
+folds in here as a section.
+
+Suite state at build end: **988 passed, 4 skipped** (the four are Windows-platform skips —
+posix container paths, symlink privilege), including the `live_model` tier run for real against
+`ollama:gemma4`. §0.2 records what the build changed about this plan.
 
 Source: `design_doc.md` §11 "Framework Enhancements → Raw prompt/response debug mode".
 
@@ -21,6 +25,45 @@ file sink only, and specced the *request* side in detail while treating the resp
 Both are corrected: the response side is where the interesting loss is happening today (§7), and a
 console mode that *replaces* the rendered answer is now first-class (§6). §8 (reasoning traces) and
 §9 (streaming) are new requirements, not present in the first draft.
+
+### 0.2 What the build changed about this plan
+
+Four things, one of them a real bug the plan could not have predicted.
+
+**1. `console` goes to stdout — except under `--headless`, where it goes to stderr.**
+Invariant 10 says "stdout only", and §6/§13.4 say the headless JSON is a machine contract with a
+real consumer (M6 §5b's sweep join). Taken literally together those conflict: `--headless
+--raw-trace console` would interleave trace records into the one stream a sweep parses. The JSON
+*object* would still be byte-identical, and the invariant would still read green, while the
+contract was broken in practice. `build_raw_trace` therefore takes `headless=` and points the sink
+at stderr in that mode. Invariant 10's "stdout only" holds for the interactive case it was written
+about; the headless case gets the treatment §13.4 actually intends.
+
+**2. The system prompt needed unwrapping, and only the live model found it.**
+`ModelRequest.system_message` is a **`SystemMessage` object**, not a string. Passing it straight to
+`format_content` produced `content=[{'type': 'text', 'text': 'You are an expert...` — the whole
+prompt escaped inside a `repr`. That satisfies "nothing dropped" and violates "bodies are verbatim"
+(invariant 1), and it is unreadable exactly where readability is the entire product.
+
+The instructive part is *how* it surfaced. Every stubbed case passed, because a stub hands the
+formatter a string. The live case passed too at first, because it asserted
+`BASE_SYSTEM_PROMPT[:40] in text` — and the prompt **is** a substring of its own `repr`. It was
+caught by *reading a real trace*. `format_system` is the fix; the live case now asserts
+`"content=[" not in` the system section, which is the property, not the symptom. Filed here because
+it generalises: a substring assertion against a serialised blob cannot tell verbatim from escaped.
+
+**3. `config.py` imports `harness.rawtrace`.** The module's docstring said "stdlib only", and it now
+takes one intra-package import to get `MODES` for the `raw_trace` spec's `choices`. Deliberate and
+narrow: `rawtrace` is a leaf (stdlib + `harness.scrub`, no langchain), so the keyless/host import
+profile `test_import_isolation` pins is untouched. The alternative — spelling the four values a
+second time in `config.py` — is precisely the drift M5.1 exists to remove, and would leave the
+validator and the writer able to disagree.
+
+**4. `/config save`'s value collection is still hand-written.** M5.1 derived nearly everything from
+the registry, but `_handle_config`'s `save` branch builds its `values` dict field by field, so
+`raw_trace` needed a line there. Not fixed in this milestone (it is M5.1's seam, not M7's), but
+noted: it is the one remaining place where adding a persisted live field is more than a `FieldSpec`
+plus an applier.
 
 ## 1. Goal & Definition of Done
 
@@ -92,6 +135,8 @@ needs L3 is sent to `OLLAMA_DEBUG=1` / `/api/show` by name rather than discoveri
 reading a trace that doesn't have it.
 
 ## 4. Scope (slices, in build order)
+
+All five landed; the "what lands" column is what shipped.
 
 | Slice | What lands |
 |---|---|

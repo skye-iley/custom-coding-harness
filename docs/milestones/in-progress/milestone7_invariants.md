@@ -5,9 +5,29 @@
 > this folds into `milestone7.md` as a section and the standalone file is dropped (see the milestone
 > lifecycle in `docs/README.md`).
 >
-> **Status: written before the code**, on the M6 precedent. A debug surface whose correctness is
-> "the output looks about right" is untestable by construction, so what "right" means is pinned
-> first.
+> **Status: written before the code**, on the M6 precedent — and now **satisfied by it**. A debug
+> surface whose correctness is "the output looks about right" is untestable by construction, so what
+> "right" means was pinned first. Where each is checked:
+>
+> | Invariant | Pinned by |
+> |---|---|
+> | 1, 2 (verbatim / structural additions) | `test_rawtrace.py` — bodies, no truncation, plus the `format_system` regression |
+> | 3 (one record per call, raising included) | `test_agent.py::test_a_model_call_that_raises_still_produces_one_record` |
+> | 4 (labels across retries/resumes) | `test_cli.py` — turn bracket + the retry case |
+> | 5, 5a, 5b, 5c (response completeness) | `test_rawtrace.py` blocks/metadata/unknown/encrypted, and `test_live_model.py` for 5 |
+> | 6, 7, 8 (seam position, filtered tools, both hooks) | `test_agent.py` |
+> | 9, 10, 10a, 11 (destinations, modes, cap) | `test_rawtrace.py` + `test_cli.py` headless/console cases |
+> | 13, 14 (scrub on both paths, visible) | `test_rawtrace.py` |
+> | 16, 17, 18 (never breaks a turn, pass-through) | `test_rawtrace.py` + `test_agent.py` |
+> | 20, 20a (live, derived, validated knob) | `test_config.py` + `test_cli.py` applier cases |
+> | 21 (import profile) | `test_rawtrace.py::test_rawtrace_imports_stdlib_plus_scrub_only` |
+> | 22 (both launchers forward the env var) | `check-parity` + the launcher diff |
+> | 23 (three-phase writer) | `test_rawtrace.py::test_one_shot_and_n_appends_produce_identical_bytes` |
+>
+> **12, 15, 19, 24 are documentation/absence properties**, not test targets: they assert what is
+> *said* (tamper-resistance at its real strength), what does *not* exist (no other reader of the
+> trace; no dead references after deletion), and what is not built yet (the streaming guard). See
+> `milestone7.md` §0.2 for the two places the code deviates from an invariant's literal wording.
 >
 > **Revised from the first draft** alongside `milestone7.md` §0.1. Invariant 18 previously asserted
 > that the middleware list is element-for-element the pre-M7 list when the feature is off. That was

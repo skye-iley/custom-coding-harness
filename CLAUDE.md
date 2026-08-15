@@ -144,8 +144,11 @@ secret-safe containers.
       the harness hands the model — final system prompt, full message history, tool schemas,
       tool-call/tool-result blocks — for diagnosing weak/local-model failures (hallucinated tool
       JSON, ignored instructions, a tool the model never saw) without falling back to the model
-      server's own debug logging (`OLLAMA_DEBUG=1`). **Spec only — no code yet**, on
-      `feat/raw-trace-debug`. Complements M6, does not overlap it: telemetry carries **no** text by
+      server's own debug logging (`OLLAMA_DEBUG=1`). **Built — S1–S5 all landed** on
+      `feat/raw-trace-debug` (988 passed / 4 platform skips, live tier included); §0.2 records what
+      the build changed about the plan. See the **"Raw trace debug mode"** section in
+      `deepagent-image/CLAUDE.md` for the operator- and maintainer-facing summary.
+      Complements M6, does not overlap it: telemetry carries **no** text by
       construction (M6 invariant 10) and says the tool-error rate spiked; this says what the model
       was looking at when it did. Two things to know before touching the code. **The seam is the
       innermost `wrap_model_call`, appended after `_ExcludeToolsMiddleware`** — langchain composes
@@ -172,7 +175,12 @@ secret-safe containers.
       through `harness/scrub.py` on the console path too; the file is a **secret-bearing artifact**
       and the docs say so rather than implying the scrub is a boundary. §0.1 records what the first
       draft got wrong — notably that pre-spinup-only was justified by an invariant stricter than the
-      removable contract actually requires.
+      removable contract actually requires. **§0.2 is the build's own lesson, and it generalises:**
+      `system_message` is a `SystemMessage` *object*, not a string, so the prompt was rendered as a
+      `repr` with its own text escaped inside. Every stub passed (a stub hands the formatter a
+      string), and the live case passed too at first — because a prompt is a substring of its own
+      `repr`. It was caught by *reading a real trace*. A substring assertion against a serialised
+      blob cannot tell verbatim from escaped.
   - `docs/milestones/planned/` — **not-yet-built** milestones (docs only). Wins over `design_doc.md`
     for "what we build next." *(Currently empty — the forward candidates live in `design_doc.md`
     §11 (the benchmark ladder), §12.6, §13, and its "Core identity — dependency chain" list.)*

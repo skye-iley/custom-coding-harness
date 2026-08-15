@@ -314,8 +314,11 @@ def test_resolve_settings_removable_contract_matches_pre_m5_defaults(tmp_path):
 
 
 def test_live_fields_matches_milestone5_table():
+    # milestone5.md §3's table, plus `raw_trace` (M7 §10.1 -- live because the
+    # operator case is flipping tracing on and re-running the same prompt in the
+    # SAME session, against the same thread and accumulated context).
     assert cfg.LIVE_FIELDS == frozenset(
-        {"model", "thread_id", "topic", "max_cost", "max_tokens", "hitl"}
+        {"model", "thread_id", "topic", "max_cost", "max_tokens", "hitl", "raw_trace"}
     )
 
 
@@ -517,6 +520,66 @@ def test_cli_rejects_an_invalid_enum_value(tmp_path):
             profile_path=tmp_path / "none.yaml",
             hitl_path=tmp_path / "none-hitl.yaml",
         )
+
+
+# --- Milestone 7: the raw_trace knob ------------------------------------------
+
+
+def test_raw_trace_defaults_to_off(tmp_path):
+    settings, sources = cfg.resolve_settings(
+        env={}, profile_path=tmp_path / "none.yaml", hitl_path=tmp_path / "none-hitl.yaml"
+    )
+    assert (settings.raw_trace, sources.raw_trace) == ("off", "default")
+
+
+def test_raw_trace_resolves_through_all_four_tiers(tmp_path):
+    p = tmp_path / cfg.PROFILE_NAME
+    p.write_text("raw_trace: file\n", encoding="utf-8")
+    hitl = tmp_path / "none-hitl.yaml"
+
+    settings, sources = cfg.resolve_settings(env={}, profile_path=p, hitl_path=hitl)
+    assert (settings.raw_trace, sources.raw_trace) == ("file", "profile")
+
+    settings, sources = cfg.resolve_settings(
+        env={"DEEPAGENTS_RAW_TRACE": "console"}, profile_path=p, hitl_path=hitl
+    )
+    assert (settings.raw_trace, sources.raw_trace) == ("console", "env")
+
+    settings, sources = cfg.resolve_settings(
+        cli={"raw_trace": "both"},
+        env={"DEEPAGENTS_RAW_TRACE": "console"}, profile_path=p, hitl_path=hitl,
+    )
+    assert (settings.raw_trace, sources.raw_trace) == ("both", "cli")
+
+
+def test_raw_trace_rejects_an_invalid_mode_at_every_point_of_entry(tmp_path):
+    p = tmp_path / cfg.PROFILE_NAME
+    p.write_text("raw_trace: fille\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="must be one of"):
+        cfg.load_profile(p)
+
+    with pytest.raises(SystemExit, match="must be one of"):
+        cfg.save_profile(tmp_path / "out.yaml", {"raw_trace": "fille"})
+
+    with pytest.raises(SystemExit, match="DEEPAGENTS_RAW_TRACE: raw_trace must be one of"):
+        cfg.resolve_settings(
+            env={"DEEPAGENTS_RAW_TRACE": "fille"},
+            profile_path=tmp_path / "none.yaml", hitl_path=tmp_path / "none-hitl.yaml",
+        )
+
+    with pytest.raises(SystemExit, match="must be one of"):
+        cfg.resolve_settings(
+            cli={"raw_trace": "fille"}, env={},
+            profile_path=tmp_path / "none.yaml", hitl_path=tmp_path / "none-hitl.yaml",
+        )
+
+
+def test_raw_trace_choices_are_the_sinks_own_modes():
+    # One declaration: the registry validating a different list than the writer
+    # accepts is exactly the drift M5.1 exists to remove.
+    rawtrace = _load("harness.rawtrace")
+    assert cfg.SPECS_BY_NAME["raw_trace"].choices == rawtrace.MODES
+    assert cfg.SPECS_BY_NAME["raw_trace"].cast is str  # invariant 19: choices => str
 
 
 def test_bool_knobs_still_accept_every_launcher_spelling(tmp_path):

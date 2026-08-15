@@ -31,6 +31,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+# The only ``harness`` import here, and deliberately a leaf one: ``rawtrace``
+# pulls stdlib plus ``harness.scrub`` and nothing else (no langchain), so the
+# keyless/host import profile this module is pinned to is untouched. Taken so
+# the raw-trace mode names have **one** declaration -- the sink and the registry
+# validating different lists is exactly the drift M5.1 exists to remove.
+from harness.rawtrace import MODES as RAW_TRACE_MODES
+
 CONFIG_NAME = ".harness-config.yaml"
 
 # --- valid enum values (validated loudly, like the workflow manifest) --------
@@ -407,6 +414,23 @@ FIELD_SPECS: tuple[FieldSpec, ...] = (
         cast=int, label="Max tokens", settable=True,
     ),
     FieldSpec(
+        # Milestone 7. A four-valued enum, not a bool plus a "where does it go"
+        # knob -- two knobs that can disagree. `cast=str` because `choices` is
+        # set (invariant 19), and the four values are the sink's own MODES, so
+        # the validator and the writer cannot drift.
+        #
+        # tier="live": the operator case is flipping tracing on and re-running
+        # the same prompt **in the same session**, against the same thread and
+        # accumulated context. Restarting the container loses exactly the state
+        # that made the failure reproducible. Safe to toggle live because `off`
+        # is a true pass-through, not an absent middleware -- the removable
+        # contract is about observable behaviour, not the middleware list's
+        # element count (milestone7.md §10.1/§10.2).
+        name="raw_trace", tier="live", env_var="DEEPAGENTS_RAW_TRACE",
+        profile_key="raw_trace", cast=str, default="off",
+        choices=RAW_TRACE_MODES, label="Raw trace", settable=True,
+    ),
+    FieldSpec(
         # env_var=None / profile_key=None: HITL is a whole-file object in its own
         # file (CONFIG_NAME) whose *presence* is the on/off switch, so it resolves
         # as one object rather than through the scalar precedence chain. The three
@@ -541,6 +565,7 @@ class Settings:
     topic: str | None = None
     max_cost: float | None = None
     max_tokens: int | None = None
+    raw_trace: str = "off"
     hitl: HitlSection | None = None
 
     # --- pre-spinup-only (fixed at container start; shown read-only in /config) ---
@@ -568,6 +593,7 @@ class SettingsSources:
     topic: str = "default"
     max_cost: str = "default"
     max_tokens: str = "default"
+    raw_trace: str = "default"
     hitl: str = "default"
     headless: str = "default"
     mask_enabled: str = "default"

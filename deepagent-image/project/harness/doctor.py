@@ -22,6 +22,7 @@ import os
 import sys
 from pathlib import Path
 
+from harness import rawtrace
 from harness.config import resolve_settings
 from harness.mask import PATTERN_DEFAULTS, resolve
 
@@ -60,6 +61,7 @@ def doctor_main(argv: list[str]) -> int:
     # --- Milestone 5, C8: resolved config summary -------------------------------
     # No cli= override: this reflects what an *unflagged* run would actually do
     # (CLI flag > env > profile > default), not this doctor invocation's own argv.
+    settings = None
     try:
         settings, sources = resolve_settings()
         hitl_desc = f"{settings.hitl.autonomy_level} ({sources.hitl})" if settings.hitl else "off"
@@ -211,6 +213,28 @@ def doctor_main(argv: list[str]) -> int:
             ))
     else:
         records.append(("info", f"state dir {state_dir} is outside the workspace"))
+
+    # --- Raw trace (M7) --------------------------------------------------------
+    # Report the mode, and in file/both the directory the run's log lands in.
+    # Stated at its real strength, like every other state-dir surface: the trace
+    # is beyond the agent's *file tools* always, beyond its *shell* only under
+    # DEEPAGENTS_JAIL=1. It is also a secret-bearing artifact -- it holds the full
+    # prompt context by design -- and doctor says so rather than letting the
+    # scrub() backstop read as a boundary.
+    raw_mode = getattr(settings, "raw_trace", rawtrace.MODE_OFF) if settings else rawtrace.MODE_OFF
+    if raw_mode == rawtrace.MODE_OFF:
+        records.append(("info", "raw trace: off"))
+    else:
+        detail = f"raw trace: {raw_mode}"
+        if raw_mode in (rawtrace.MODE_FILE, rawtrace.MODE_BOTH):
+            detail += (
+                f" -> {state_dir / rawtrace.TRACE_DIR}/<run_id>.log "
+                "(secret-bearing: holds the full prompt context; scrub() redacts "
+                "known credential shapes only)"
+            )
+        if raw_mode in rawtrace.console_modes():
+            detail += " (console mode REPLACES the rendered answer at the prompt)"
+        records.append(("warning", detail))
 
     # --- Jail / seccomp (M4 slice H) -------------------------------------------
     # Only checked when the operator opted in: the jail is off by default (§13),

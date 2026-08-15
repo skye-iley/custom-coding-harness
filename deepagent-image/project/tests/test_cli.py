@@ -1921,3 +1921,192 @@ def test_per_turn_costs_sum_to_the_session_total(tmp_path):
     records = tm.read_records(t.sink)
     assert sum(r["cost_usd"] for r in records) == pytest.approx(tracker.session.cost, rel=1e-9)
     assert sum(r["input"] for r in records) == 0  # tokens come from the model seam, not the tracker
+
+
+# =============================================================================
+# Milestone 7 — raw trace debug mode (the wiring cli.py owns)
+# =============================================================================
+#
+# The sink and its renderers are host-tested in tests/test_rawtrace.py; the seam
+# position and pass-through in tests/test_agent.py. What is left here is what
+# only cli.py can get wrong: the turn bracket, the console substitution, and the
+# promise that a *display* knob never changes the machine contract.
+
+rawtrace = _load("harness.rawtrace")
+
+
+def _trace(tmp_path, mode="file"):
+    return cli.RawTraceMiddleware(rawtrace.TraceSink(
+        mode, tmp_path / "raw.log", run_id="run-test-1", env={}
+    ))
+
+
+class _TwoCallAgent:
+    """Invokes the raw-trace hook twice, as a real ReAct turn does (model call,
+    tool, model call). The point of the test below is that both are `turn N`."""
+
+    def __init__(self, trace):
+        self._trace = trace
+
+    def invoke(self, *args, **kwargs):
+        for _ in range(2):
+            self._trace.wrap_model_call(_TraceReq(), lambda r: _TraceResp())
+        return {"messages": [type("M", (), {"content": "done", "type": "ai"})()]}
+
+
+class _TraceReq:
+    tools = ()
+    messages = ()
+    system_message = "SYS"
+    model = "ollama:gemma4"
+
+
+class _TraceResp:
+    result = ()
+    structured_response = None
+
+
+def test_run_turn_brackets_the_turn_so_calls_number_within_it(tmp_path):
+    trace = _trace(tmp_path)
+    agent = _TwoCallAgent(trace)
+    cli.run_turn(agent, "hi", {}, raw_trace=trace)
+    cli.run_turn(agent, "hi again", {}, raw_trace=trace)
+
+    text = (tmp_path / "raw.log").read_text(encoding="utf-8")
+    for label in ("turn 1 | call 1", "turn 1 | call 2", "turn 2 | call 1", "turn 2 | call 2"):
+        assert label in text, label
+
+
+def test_a_retried_turn_does_not_restart_the_turn_counter(tmp_path, monkeypatch):
+    """Invariant 4, the M6 `before_agent` lesson applied rather than re-derived:
+    a resilience retry and every HITL resume are more *invokes* of the same turn.
+    Numbering keyed to an invoke hook would restart mid-turn."""
+    monkeypatch.setenv("DEEPAGENTS_RETRY_BASE", "0")
+    trace = _trace(tmp_path)
+
+    class _RetryingAgent:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, *args, **kwargs):
+            self.calls += 1
+            trace.wrap_model_call(_TraceReq(), lambda r: _TraceResp())
+            if self.calls == 1:
+                raise RuntimeError("429 rate limited")
+            return {"messages": [type("M", (), {"content": "done", "type": "ai"})()]}
+
+    monkey = _RetryingAgent()
+    try:
+        cli.run_turn(monkey, "hi", {}, raw_trace=trace)
+    except Exception:  # the resilience layer may or may not swallow it here
+        pass
+    # Both invokes belong to turn 1, whatever the retry did.
+    text = (tmp_path / "raw.log").read_text(encoding="utf-8")
+    assert "turn 2" not in text
+
+
+def test_off_mode_writes_nothing_and_the_turn_is_unchanged(tmp_path):
+    trace = _trace(tmp_path, mode="off")
+    assert cli.run_turn(_TwoCallAgent(trace), "hi", {}, raw_trace=trace) == "done"
+    assert not (tmp_path / "raw.log").exists()
+
+
+def test_console_and_both_suppress_the_rendered_answer_only(tmp_path):
+    """Invariant 10a. `run_turn` returns the same value in all four modes — only
+    the REPL's *print site* changes, so nothing downstream sees a difference."""
+    for mode in rawtrace.MODES:
+        trace = _trace(tmp_path, mode=mode)
+        assert cli.run_turn(_TwoCallAgent(trace), "hi", {}, raw_trace=trace) == "done"
+        assert cli._suppress_answer(trace) is (mode in ("console", "both"))
+    assert cli._suppress_answer(None) is False
+
+
+def test_repl_prints_the_answer_off_console_and_not_on(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+
+    trace = _trace(tmp_path, mode="off")
+    cli.run_repl(_OkAgent(), {}, "hi", raw_trace=trace)
+    assert "done" in capsys.readouterr().out
+
+    trace = _trace(tmp_path, mode="console")
+    cli.run_repl(_OkAgent(), {}, "hi", raw_trace=trace)
+    # Replaces, does not add: printing both would bury the signal (fork §13.3).
+    assert "done" not in capsys.readouterr().out
+
+
+def test_headless_json_is_byte_identical_across_all_four_modes(tmp_path, monkeypatch, capsys):
+    """A mode knob must not change a machine contract: M6 §5b's sweep joins 300
+    instances' stdout to the ledger on exactly this object."""
+    payloads = []
+    for mode in rawtrace.MODES:
+        trace = _trace(tmp_path, mode=mode)
+        # stderr, not stdout, when headless — see build_raw_trace.
+        trace.sink._stream = sys.stderr
+        cli.run_batch(_OkAgent(), {}, ["hi"], raw_trace=trace)
+        out = capsys.readouterr().out
+        payloads.append(out)
+    assert len(set(payloads)) == 1, "the headless JSON differed between raw-trace modes"
+
+
+def test_build_raw_trace_defaults_to_off_and_targets_the_state_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEEPAGENTS_STATE_DIR", str(tmp_path / "state"))
+    mw = cli.build_raw_trace(cfg.Settings(), tmp_path / "ws", run_id="run-9")
+    assert mw.sink.mode == "off"
+    assert mw.sink.path == tmp_path / "state" / "raw-trace" / "run-9.log"
+    # Off means off: constructing the middleware must not create the directory.
+    assert not (tmp_path / "state" / "raw-trace").exists()
+
+
+def test_build_raw_trace_sends_console_output_to_stderr_when_headless(tmp_path):
+    interactive = cli.build_raw_trace(cfg.Settings(raw_trace="console"), tmp_path, run_id="r")
+    headless = cli.build_raw_trace(
+        cfg.Settings(raw_trace="console"), tmp_path, run_id="r", headless=True
+    )
+    assert interactive.sink._stream is None  # resolves to sys.stdout at write time
+    assert headless.sink.stream is sys.stderr
+
+
+def test_live_applier_flips_the_mode_with_no_agent_rebuild(tmp_path):
+    trace = _trace(tmp_path, mode="off")
+    model, new_agent, topic = cli._handle_config(
+        "/config set raw_trace both",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="ollama:gemma4", topic=None, tracker=None, hitl_conf=None,
+        rebuild_agent=None, edited=set(), raw_trace=trace,
+    )
+    assert trace.sink.mode == "both"
+    # One attribute write — no rebuild, unlike /config set model.
+    assert new_agent is None
+
+
+def test_live_applier_rejects_an_invalid_mode(tmp_path, capsys):
+    trace = _trace(tmp_path, mode="off")
+    cli._handle_config(
+        "/config set raw_trace fille",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="m", topic=None, tracker=None, hitl_conf=None,
+        rebuild_agent=None, edited=set(), raw_trace=trace,
+    )
+    assert trace.sink.mode == "off"
+    assert "must be one of" in capsys.readouterr().err
+
+
+def test_config_save_persists_an_edited_raw_trace(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DEEPAGENTS_IN_CONTAINER", raising=False)
+    (tmp_path / cfg.PROFILE_NAME).write_text("", encoding="utf-8")
+    trace = _trace(tmp_path, mode="off")
+    edited = set()
+    cli._handle_config(
+        "/config set raw_trace file",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="m", topic=None, tracker=None, hitl_conf=None,
+        rebuild_agent=None, edited=edited, raw_trace=trace,
+    )
+    cli._handle_config(
+        "/config save",
+        config={"configurable": {"thread_id": "t"}},
+        current_model="m", topic=None, tracker=None, hitl_conf=None,
+        rebuild_agent=None, edited=edited, raw_trace=trace,
+    )
+    assert "raw_trace: file" in (tmp_path / cfg.PROFILE_NAME).read_text(encoding="utf-8")

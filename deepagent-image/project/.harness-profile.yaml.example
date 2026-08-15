@@ -20,6 +20,12 @@ model:                 # e.g. openai:gpt-5.5 -- same spec as DEEPAGENTS_MODEL / 
 topic:
 max_cost:
 max_tokens:
+raw_trace: off         # off | file | console | both -- Milestone 7 raw prompt/response
+                       # trace. `console`/`both` print the record INSTEAD of the rendered
+                       # answer. The file sink (<state-dir>/raw-trace/<run_id>.log) is a
+                       # SECRET-BEARING artifact: it holds the full prompt context, and
+                       # scrub() only redacts credential shapes it recognises. Leave off
+                       # unless you are debugging a model.
 
 # --- pre-spinup (fixed at container start; edit via `harness config` before the next launch) ---
 

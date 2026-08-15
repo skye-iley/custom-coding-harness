@@ -167,3 +167,69 @@ def test_a_real_turn_produces_a_decomposable_record(live_model, tmp_path):
         rec["input"] + rec["output"] + rec["cache_read"] + rec["cache_write"]
     )
     assert summary["time"]["residual_ms"] >= 0
+
+
+def test_a_real_turn_leaves_a_faithful_raw_trace(live_model, tmp_path):
+    """The one thing a stub cannot check: that the trace describes something real.
+
+    A stubbed test proves the sink can format whatever the test handed it. It
+    cannot catch a trace that is internally consistent and describes nothing —
+    the wrong tool list, a reply the turn never used, a response shape the
+    renderer silently drops. So this asserts the record against the *same
+    objects the turn actually used*:
+
+    * the recorded tool schemas are the tools the agent was really built with;
+    * the recorded reply is the reply `run_turn` returned;
+    * reasoning/thinking blocks, when a model emits them, appear in the trace
+      and **not** in `final_message_text`'s output — which is the entire point
+      of the milestone (`agent.py`'s extractor drops them by design).
+    """
+    from _bootstrap import _load
+
+    pytest.importorskip("deepagents")
+    agent_mod = _load("harness.agent")
+    cli = _load("harness.cli")
+    rawtrace = _load("harness.rawtrace")
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "hello.txt").write_text("the file says pineapple\n", encoding="utf-8")
+
+    trace = cli.RawTraceMiddleware(rawtrace.TraceSink(
+        rawtrace.MODE_FILE, rawtrace.trace_path(tmp_path / "state", "run-live-trace"),
+        run_id="run-live-trace",
+    ))
+    agent = agent_mod.build_agent(live_model, workspace, raw_trace=trace)
+
+    answer = cli.run_turn(
+        agent, "Read hello.txt and tell me the one unusual word in it.", {},
+        raw_trace=trace,
+    )
+    text = trace.sink.path.read_text(encoding="utf-8", errors="replace")
+
+    assert "===== run run-live-trace | turn 1 | call 1" in text
+    assert "--- system ---" in text and agent_mod.BASE_SYSTEM_PROMPT[:40] in text
+    # Verbatim, not a `repr` of the SystemMessage that happens to CONTAIN the
+    # prompt — the bug a real turn surfaced and a substring check would miss.
+    system_section = text.split("--- system ---", 1)[1].split("--- messages", 1)[0]
+    assert "content=[" not in system_section
+
+    # The recorded tools are the tools the model was really offered. A trace one
+    # middleware layer out would list tools the model never received.
+    assert "--- tools (" in text
+    assert "read_file" in text, "the fs tools the agent was built with are missing"
+
+    # The recorded reply is the reply the turn used.
+    if answer:
+        first_line = answer.strip().splitlines()[0][:40]
+        assert first_line in text, "the recorded response is not the one the turn returned"
+
+    # Reasoning, if this model emits any, is in the trace and not in the answer.
+    if "] reasoning:" in text or "] thinking:" in text:
+        marker = "] reasoning:" if "] reasoning:" in text else "] thinking:"
+        body = text.split(marker, 1)[1].splitlines()[1].strip()
+        if body and answer:
+            assert body not in answer, (
+                "final_message_text leaked a reasoning block into the answer -- "
+                "it is supposed to drop them, which is why the raw trace exists"
+            )

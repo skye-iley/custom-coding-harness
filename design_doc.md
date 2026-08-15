@@ -1082,20 +1082,28 @@ system_interrupts:                # which harness events raise (vs. log/crash)
 *   **Long-Term Project Memory**: Integrate a vector database (e.g., Qdrant or ChromaDB) to store a persistent, compressed index of the entire project history and decision logs.
 
 ### Framework Enhancements
-*   **Raw prompt/response debug mode** — **now specced as Milestone 7**
-    (`docs/milestones/in-progress/milestone7.md`), which supersedes this entry where the two
-    disagree. Note in particular that the "raw tags included" clause below is **not deliverable**
-    client-side (Ollama renders the chat template server-side); M7 §3 defines the three fidelity
-    levels and ships the message level. This wording is corrected when M7's slice S5 lands. A
-    `DEEPAGENTS_RAW_TRACE=1` (or `--raw-trace`) startup flag
-    that prints, per turn, the literal text the model receives and returns — full system prompt,
-    message/turn history, tool schemas, and tool-call/tool-result blocks, as close as possible to
-    what the model itself sees (raw tags included, e.g. Ollama's chat-template markers), with only
-    minimal formatting added (turn/role separators) for human readability. Distinct from
-    `DEEPAGENTS_DEBUG` (checkpointer-state dump, failure-only): this is always-on-when-set, every
-    turn, success or failure — for diagnosing weak/local-model tool-calling failures (hallucinated
-    tool JSON, ignored instructions) without switching to the model server's own debug logging
-    (e.g. `OLLAMA_DEBUG=1`) as a workaround.
+*   **Raw prompt/response debug mode** — **BUILT as Milestone 7**
+    (`docs/milestones/complete/milestone7.md`, authoritative where the two disagree).
+    `DEEPAGENTS_RAW_TRACE` / `--raw-trace` / `/config set raw_trace` is a four-valued knob
+    (`off`/`file`/`console`/`both`) that records, **per model call**, the literal payload the
+    harness hands the model and the whole object the model hands back — final system prompt, full
+    message history, tool schemas, tool-call/tool-result blocks, every reply content block in order
+    (reasoning included), `tool_calls` with raw args, invalid tool calls, and the metadata bags.
+    Only separators, indices and counts are added. Distinct from `DEEPAGENTS_DEBUG` (checkpointer
+    state, failure-only): this fires every model call, success or failure — for diagnosing
+    weak/local-model tool-calling failures (hallucinated tool JSON, ignored instructions, a tool
+    the model never saw).
+
+    **Correction to this entry's original wording:** "raw tags included, e.g. Ollama's
+    chat-template markers" is **not deliverable client-side** and was never promised by the
+    implementation. Ollama renders the chat template *server-side* inside `/api/chat`; the body the
+    harness sends is JSON. M7 §3 splits fidelity into three levels and ships **L1, the message
+    level** — the final `system_message`/`messages`/`tools` at the innermost middleware seam, held
+    to the standard *nothing dropped* rather than *nothing added*. L2 (the literal HTTP body, via an
+    `httpx` event hook) is deferred, not rejected. L3 (the template-rendered token string) needs the
+    model server's own debug logging — `OLLAMA_DEBUG=1` with a foreground `ollama serve`, or the
+    template from `/api/show` — and the record header names its own level so an operator cannot
+    mistake one for the other.
 *   **Automated Benchmarking Suite**: Quantitatively measure the harness (routing, compression, memory) against known-correct coding tasks. Budget is tight — full SWE-bench (2294 instances) is out of reach — so the plan is a cost-tiered ladder, cheapest signal first, built on a shared batch driver.
 
     **Benchmark tiers (cheapest first):**
