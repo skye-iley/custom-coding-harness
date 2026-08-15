@@ -602,6 +602,18 @@ RESOLVED_MODEL="$(_resolve_host_setting "${DEEPAGENTS_MODEL:-}" DEEPAGENTS_MODEL
 MASK_MODE_ARGS=()
 [[ -n "${RESOLVED_MASK_MODE:-}" ]] && MASK_MODE_ARGS=(-e "DEEPAGENTS_MASK_MODE=$RESOLVED_MASK_MODE")
 
+# Milestone 7: the raw-trace mode. Forwarded explicitly for the same reason
+# DEEPAGENTS_JAIL is (milestone5.md §0.1) -- a knob resolved on the HOST from a
+# flag/host env/profile that the container never sees is a knob the operator set
+# and the harness ignored, silently. --env-file alone only covers the .env tier.
+RAW_TRACE_ARGS=()
+RESOLVED_RAW_TRACE="$(_resolve_host_setting "${DEEPAGENTS_RAW_TRACE:-}" DEEPAGENTS_RAW_TRACE raw_trace "")"
+if [[ -n "$RESOLVED_RAW_TRACE" && "$RESOLVED_RAW_TRACE" != "off" ]]; then
+  RAW_TRACE_ARGS=(-e "DEEPAGENTS_RAW_TRACE=$RESOLVED_RAW_TRACE")
+  echo "[raw-trace] mode=$RESOLVED_RAW_TRACE — the trace holds the full prompt context;" >&2
+  echo "            treat <state-dir>/raw-trace/<run_id>.log as a secret-bearing artifact." >&2
+fi
+
 # Assemble the agent `docker run` invocation into an array. NET_ARGS / PROXY_ENV
 # are set either by netjail_up (jail mode) or to the bridge defaults below.
 build_agent_run() {
@@ -623,6 +635,7 @@ build_agent_run() {
     ${MASK_ARGS[@]+"${MASK_ARGS[@]}"}
     ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}
     ${MASK_MODE_ARGS[@]+"${MASK_MODE_ARGS[@]}"}
+    ${RAW_TRACE_ARGS[@]+"${RAW_TRACE_ARGS[@]}"}
     "${CAP_ENV[@]}"
     deepagent-harness)
   if [[ $# -gt 0 ]]; then

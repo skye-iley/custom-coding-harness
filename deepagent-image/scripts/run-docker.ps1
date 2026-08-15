@@ -36,6 +36,11 @@ param(
     # masks so bwrap can mount its own procfs; `default` keeps them, which is the
     # LSM-only control and the right choice where the jail starts without it.
     [string]$JailSystempaths = "",
+    # Milestone 7: raw prompt/response trace (off|file|console|both). `console`
+    # REPLACES the rendered answer at the prompt. The file lands in the state dir
+    # and is a secret-bearing artifact -- it holds the full prompt context by
+    # design. Also settable in-session with /config set raw_trace.
+    [string]$RawTrace = "",
     # Write/update .harness-config.yaml's autonomy_level before launch (strict|
     # guided|autonomous). An imperative action, not a resolved Settings field --
     # HITL's presence-of-file-turns-it-on design (M3) means this necessarily
@@ -541,6 +546,19 @@ if (-not [string]::IsNullOrEmpty($ScanMode)) {
     $MaskModeArgs = @("-e", "DEEPAGENTS_MASK_MODE=$ScanMode")
 }
 
+# Milestone 7: the raw-trace mode. Forwarded explicitly for the same reason
+# DEEPAGENTS_JAIL is (milestone5.md §0.1) -- a knob resolved on the HOST from a
+# flag/host env/profile that the container never sees is a knob the operator set
+# and the harness ignored, silently. --env-file alone only covers the .env tier.
+$ResolvedRawTrace = Resolve-HostSetting -Value $RawTrace -EnvVarName "DEEPAGENTS_RAW_TRACE" `
+    -ProfileKey "raw_trace" -Default "" -EnvFile $EnvFile -ProfileFile $ProfileFile
+$RawTraceArgs = @()
+if ((-not [string]::IsNullOrEmpty($ResolvedRawTrace)) -and ($ResolvedRawTrace -ne "off")) {
+    $RawTraceArgs = @("-e", "DEEPAGENTS_RAW_TRACE=$ResolvedRawTrace")
+    Write-Host "[raw-trace] mode=$ResolvedRawTrace - the trace holds the full prompt context;"
+    Write-Host "            treat <state-dir>\raw-trace\<run_id>.log as a secret-bearing artifact."
+}
+
 # Host-only knobs the container cannot otherwise observe: --cpus/--memory/
 # --pids-limit/NetJail are `docker run` flags, never env vars, so without these
 # the in-session `/config` read-only view and `harness doctor` would report the
@@ -566,7 +584,7 @@ $dockerArgs = @(
     "-e", "DEEPAGENTS_STATE_DIR=/project/state",
     "-v", "${MountWorkspace}:/project/workspace",
     "-v", "${StateHostDir}:/project/state"
-) + $SrcMountArgs + $MaskArgs + $ModelArgs + $MaskModeArgs + $CapEnvArgs
+) + $SrcMountArgs + $MaskArgs + $ModelArgs + $MaskModeArgs + $RawTraceArgs + $CapEnvArgs
 
 # Git identity: mount host .gitconfig read-only into the agent user's home (uid 10001 -> /home/agent),
 # not /root (container runs USER agent). Never mount ~/.ssh into an autonomous-agent container -

@@ -383,6 +383,156 @@ def test_build_agent_appends_exclusion_middleware_when_env_set(workspace_sandbox
     assert not any(isinstance(m, agent._ExcludeToolsMiddleware) for m in captured["middleware"])
 
 
+# --- M7: RawTraceMiddleware position and behaviour ----------------------------
+#
+# The seam's *position* is the load-bearing part. langchain composes
+# first-is-outermost, so the last middleware appended is the innermost — the one
+# whose view of `request` is final. A trace one layer out logs tools the model
+# never received, which is the exact bug class the milestone exists to diagnose,
+# reproduced inside the diagnostic. Pinned as a list position, not a comment,
+# because the failure is otherwise silent: a subtly wrong trace, still trusted.
+
+rawtrace = _load("harness.rawtrace")
+
+
+class _TraceRequest:
+    def __init__(self, tools=(), messages=(), system_message="SYS", model="ollama:gemma4"):
+        self.tools = list(tools)
+        self.messages = list(messages)
+        self.system_message = system_message
+        self.model = model
+
+    def override(self, *, tools):
+        return _TraceRequest(tools, self.messages, self.system_message, self.model)
+
+
+def _trace_mw(tmp_path, mode=None):
+    sink = rawtrace.TraceSink(
+        mode or rawtrace.MODE_FILE, tmp_path / "t.log", run_id="run-x", env={}
+    )
+    return agent.RawTraceMiddleware(sink)
+
+
+def test_raw_trace_middleware_is_last_in_the_assembled_stack(workspace_sandbox, monkeypatch, tmp_path):
+    captured = {}
+    monkeypatch.setattr(agent, "create_deep_agent", lambda **kw: captured.update(kw) or "AGENT")
+    monkeypatch.setenv("DEEPAGENTS_LEAN_TOOLS", "1")
+    mw = _trace_mw(tmp_path)
+    agent.build_agent("model:x", workspace_sandbox, raw_trace=mw)
+    stack = captured["middleware"]
+    assert stack[-1] is mw
+    # and specifically AFTER the exclusion filter, not merely somewhere late.
+    exclude_at = [i for i, m in enumerate(stack) if isinstance(m, agent._ExcludeToolsMiddleware)]
+    assert exclude_at and exclude_at[-1] < len(stack) - 1
+
+
+def test_raw_trace_records_the_filtered_tool_list(tmp_path):
+    # With DEEPAGENTS_EXCLUDE_TOOLS set, the recorded tools must be the list the
+    # model actually received — excluded names appear nowhere in the record.
+    exclude = agent._ExcludeToolsMiddleware(frozenset({"task"}))
+    trace = _trace_mw(tmp_path)
+    req = _TraceRequest(tools=[_NamedTool("execute"), _NamedTool("task")])
+
+    exclude.wrap_model_call(req, lambda r: trace.wrap_model_call(r, lambda r2: _FakeResponse()))
+
+    text = (tmp_path / "t.log").read_text(encoding="utf-8")
+    assert "execute" in text
+    assert "task" not in text
+    assert "--- tools (1) ---" in text
+
+
+class _FakeMessage:
+    def __init__(self, content="hello"):
+        self.content = content
+        self.tool_calls = []
+        self.invalid_tool_calls = []
+        self.response_metadata = {"finish_reason": "stop"}
+        self.usage_metadata = {"input_tokens": 3}
+        self.additional_kwargs = {}
+
+
+class _FakeResponse:
+    def __init__(self):
+        self.result = [_FakeMessage()]
+        self.structured_response = None
+
+
+def test_off_mode_is_a_true_pass_through(tmp_path, capsys):
+    mw = _trace_mw(tmp_path, mode=rawtrace.MODE_OFF)
+    response = _FakeResponse()
+    out = mw.wrap_model_call(_TraceRequest(), lambda r: response)
+    # Same object back — the middleware observes, it does not shape.
+    assert out is response
+    assert not (tmp_path / "t.log").exists()
+    assert not (tmp_path / "t.log").parent.joinpath("raw-trace").exists()
+    assert capsys.readouterr().out == ""
+
+
+def test_the_handlers_return_value_is_passed_through_untouched(tmp_path):
+    mw = _trace_mw(tmp_path)
+    response = _FakeResponse()
+    assert mw.wrap_model_call(_TraceRequest(), lambda r: response) is response
+
+
+def test_a_model_call_that_raises_still_produces_one_record(tmp_path):
+    mw = _trace_mw(tmp_path)
+
+    def _boom(_request):
+        raise RuntimeError("provider exploded")
+
+    with pytest.raises(RuntimeError):
+        mw.wrap_model_call(_TraceRequest(), _boom)
+
+    text = (tmp_path / "t.log").read_text(encoding="utf-8")
+    assert text.count("===== run run-x") == 1
+    assert "RAISED" in text and "provider exploded" in text
+
+
+def test_both_hooks_record_identically(tmp_path):
+    import asyncio
+
+    sync_mw = _trace_mw(tmp_path)
+    sync_mw.wrap_model_call(_TraceRequest(), lambda r: _FakeResponse())
+    sync_text = (tmp_path / "t.log").read_text(encoding="utf-8")
+
+    async_sink = rawtrace.TraceSink(
+        rawtrace.MODE_FILE, tmp_path / "a.log", run_id="run-x", env={}
+    )
+    async_mw = agent.RawTraceMiddleware(async_sink)
+
+    async def _handler(_request):
+        return _FakeResponse()
+
+    asyncio.run(async_mw.awrap_model_call(_TraceRequest(), _handler))
+    async_text = (tmp_path / "a.log").read_text(encoding="utf-8")
+
+    # A sync-only trace would go blank the day a path goes async, with no error
+    # to notice. Timestamps and elapsed ms legitimately differ; structure and
+    # bodies must not.
+    def _structure(text):
+        return [
+            line
+            for line in text.splitlines()
+            if not line.startswith("===== run") and not line.startswith("--- response (")
+        ]
+
+    assert _structure(sync_text) == _structure(async_text)
+
+
+def test_call_numbering_restarts_per_turn_not_per_invoke(tmp_path):
+    mw = _trace_mw(tmp_path)
+    mw.begin_turn()
+    mw.wrap_model_call(_TraceRequest(), lambda r: _FakeResponse())
+    mw.wrap_model_call(_TraceRequest(), lambda r: _FakeResponse())
+    mw.begin_turn()
+    mw.wrap_model_call(_TraceRequest(), lambda r: _FakeResponse())
+
+    text = (tmp_path / "t.log").read_text(encoding="utf-8")
+    assert "turn 1 | call 1" in text
+    assert "turn 1 | call 2" in text  # one turn legitimately makes many calls
+    assert "turn 2 | call 1" in text
+
+
 # --- M4 slice H backstop: the namespace guard on the shell tool ---------------
 # The seccomp relaxation the jail needs is applied to the WHOLE container, so it
 # hands the agent's shell the same five syscalls. These cover the backend seam;

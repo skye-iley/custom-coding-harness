@@ -398,6 +398,96 @@ in `tests/test_cli.py` (image), the `open-pr.sh` cases in `tests/test_workflows.
 `tests/test_live_model.py::test_a_real_turn_produces_a_decomposable_record` — the one thing
 a stub cannot check, since a stub populates `usage_metadata` however the test wrote it.
 
+## Raw trace debug mode (Milestone 7)
+
+Per **model call**, record the literal payload the harness hands the model and the whole
+object the model hands back. **Defaults off.** Four-valued knob, live and
+`/config`-settable:
+
+| Mode | File sink | Console | Rendered answer |
+|---|---|---|---|
+| `off` (default) | — | — | printed as today |
+| `file` | yes | — | printed as today |
+| `console` | — | yes | **suppressed** |
+| `both` | yes | yes | **suppressed** |
+
+```bash
+DEEPAGENTS_RAW_TRACE=file            # .env, host env, or run-docker's -RawTrace
+python3 main.py --raw-trace console  # CLI flag
+/config set raw_trace                # in-session; opens the M5.1 arrow-key picker
+```
+
+File sink: `<state-dir>/raw-trace/<run_id>.log` — one file per run, human-readable text
+(not JSON: escaped newlines make a prompt unreadable, pretty-printing makes it not
+literal). Via `run-docker` you read it on the host at
+`deepagent-image/project/state/<ws-key>/raw-trace/`.
+
+**What it is for.** `DEEPAGENTS_DEBUG` is failure-only; `--stream` is graph events, not
+the model payload; M6 telemetry carries **no** text by construction. Telemetry says *the
+tool-error rate spiked at turn 7*; this says *the model emitted `{"tool": "write_file"}`
+against a schema that wanted `{"name": …, "args": …}`*. Neither answers alone.
+
+Six things to know before touching this code:
+
+- **The seam is the innermost `wrap_model_call`, and the position is load-bearing.**
+  langchain composes first-is-outermost, so the **last** middleware appended is the one
+  whose view of `request` is final. `build_agent` appends `RawTraceMiddleware` **after**
+  `_ExcludeToolsMiddleware`, and **nothing may be appended after it**. One layer out and
+  the trace lists tools the model never received — which is the exact bug class the
+  feature exists to diagnose, reproduced inside the diagnostic. Pinned as a list position
+  in `tests/test_agent.py`, not as a comment, because the failure is otherwise silent.
+- **The turn bracket comes from `run_turn`, never `before_agent`** — the same lesson M6
+  paid for. `before_agent` fires once per *invoke*, and one turn invokes several times (a
+  resilience retry; every HITL resume), so numbering keyed there restarts mid-turn.
+  Records are `run_id / turn N / call M`; one turn legitimately makes many calls.
+- **Nothing on the response is dropped.** This is the point of the milestone.
+  `agent.final_message_text` keeps `{"type": "text"}` parts and *deliberately* drops
+  reasoning/thinking and unknown shapes — correct for an answer, and exactly what a raw
+  trace must not do. So: every content block in order with its index and type, unknown
+  block types dumped verbatim rather than skipped, `tool_calls` with **raw args
+  pre-parse**, invalid tool calls in their own section, plus `additional_kwargs` /
+  `response_metadata` / `usage_metadata` / finish reason.
+- **Encrypted or redacted reasoning is recorded in position** as
+  `[block 1] <encrypted reasoning block: type=redacted_thinking, 2481 bytes>` — never
+  omitted, never dumped as ciphertext. A trace in which reasoning happened but nothing
+  marks the spot is a false negative.
+- **The trace file is a secret-bearing artifact and the docs say so plainly.** It holds
+  the full context, so it holds anything the agent read. `harness/scrub.py` runs on every
+  section before any byte is written **or printed** (so the file and the console cannot
+  disagree), but it is a **backstop, not a boundary**: it redacts credential env values
+  and `sk-`/`ghp-`/`xoxb-` shapes and nothing else. Containment is the usual state-dir
+  strength — **file-tool-proof always, shell-proof only under `DEEPAGENTS_JAIL=1`**. It is
+  never appended to a PR, never read by a workflow, never leaves the state dir.
+- **Fidelity is L1, the message level**, and the record header says so. Not the HTTP body
+  (L2, deferred), and **not** the chat-template token string (L3) — Ollama renders the
+  template server-side, so that needs `OLLAMA_DEBUG=1` / `/api/show`. `design_doc.md` §11's
+  old "raw tags included" wording promised L3 and is corrected there.
+
+Other properties worth not rediscovering: `off` is a **true pass-through** (mode checked
+before any work — no file, no directory, no formatting), which is what makes a live toggle
+safe; the whole-file cap is 64 MiB, a module constant, and console is deliberately
+uncapped; a sink failure degrades to **one** stderr warning per run and never breaks a
+turn; the writer is three-phase (`open_record`/append/`close_record`) so a future streaming
+path appends chunks without changing the format; and **the `--headless` JSON is
+byte-identical in all four modes** — a display knob must not change a machine contract
+(M6 §5b's sweep joins on it), so console output goes to stderr when headless.
+
+**Timing caveat:** formatting a large message list costs real time and M6 attributes it to
+`model_ms`. Telemetry taken with tracing on is **not** comparable to telemetry taken with
+it off.
+
+Layout mirrors telemetry's split: `harness/rawtrace.py` is the sink + renderers (stdlib +
+`harness.scrub` only, **no langchain**, so it stays in the host test tier);
+`RawTraceMiddleware` lives in `agent.py` because it needs the langchain base.
+
+Tests: `tests/test_rawtrace.py` (host), the M7 blocks in `tests/test_agent.py` (seam
+position, pass-through, both hooks) and `tests/test_cli.py` (turn bracket, console
+substitution, headless contract), `tests/test_config.py` (the knob), and
+`tests/test_live_model.py::test_a_real_turn_leaves_a_faithful_raw_trace` — the tier that
+catches a trace which is internally consistent and describes nothing real. It already
+earned itself: a stub passed while the real `system_message` (a `SystemMessage` object,
+not a string) was being rendered as a `repr` with the whole prompt escaped inside it.
+
 ## Present / past memory (Milestone 2)
 
 The harness keeps **two** stores in the harness **state dir** (`archive.state_dir`),
@@ -854,13 +944,11 @@ is image-only (smoke).
   (accumulated AI reasoning / tool calls / tool results from earlier super-steps, via
   `cli._dump_partial`); off by default. A pre-generation failure (e.g. a 500 that
   fails before the model emits anything) legitimately shows no new state.
-  **No built-in way to see the raw prompt/response on a successful turn** (system
-  prompt, full message history, tool schemas, tool-call/result blocks, as literally
-  sent to/from the model) — `DEEPAGENTS_DEBUG` is failure-only and checkpointer-state,
-  not raw wire text. Today's workaround for a local model: run the model server with
-  its own debug logging (e.g. `OLLAMA_DEBUG=1` + `ollama serve` in a foreground
-  terminal) and watch that. A `DEEPAGENTS_RAW_TRACE` mode is proposed in
-  `design_doc.md` §11 (Framework Enhancements) — not built.
+  `DEEPAGENTS_DEBUG` is **failure-only and checkpointer-state**, not the model payload.
+  To see the raw prompt/response on a *successful* turn, use `DEEPAGENTS_RAW_TRACE`
+  (M7 — see "Raw trace debug mode" below), which fires every model call regardless of
+  outcome. For the model server's own *template-rendered* prompt (a level the harness
+  cannot see), `OLLAMA_DEBUG=1` + a foreground `ollama serve` is still the only route.
 - **NetJail is deny-all by default.** When you implement a feature that needs a host service
   (e.g. a daemon on the Docker host) or internet access (a model API, package registry, git
   remote), you MUST also grant it in the jail or it silently breaks under `NET_JAIL=1` /
@@ -1303,6 +1391,7 @@ When a session is running, type these at the `you>` prompt:
 | `/show` | Expand a truncated interrupt/approval context (HITL) | (used when an approval prompt is capped) |
 | `/refresh [subpath]` | Pull live host edits into ephemeral workspace copy (ephemeral mode only). Omit subpath to refresh root. | `/refresh src/` |
 | `/config` | Show resolved config (source-tagged); `set <field> <value>` edits one live field; `save` persists session edits to the profile | `/config set model openai:gpt-5.5` |
+| `/config set raw_trace` | Raw prompt/response trace (`off`/`file`/`console`/`both`). Bare (no value) opens the picker. `console`/`both` print the record **instead of** the answer. | `/config set raw_trace file` |
 
 ## Admin Commands (keyless, outside container)
 
@@ -1359,6 +1448,7 @@ how to disable them, and what behavior they enable/disable:
 | HITL | M3 | n/a (config file) | off | (not set by env) | Only if `.harness-config.yaml` exists in project root | No approval gates; agent runs freely |
 | Unified Config profile | M5 | n/a (`.harness-profile.yaml`) | off (no file) | Never; hand-edit `.env`/flags for a one-off | No `.harness-profile.yaml` present ⇒ every knob resolves exactly as it did pre-M5 (env var → default) |
 | Telemetry | M6 | `DEEPAGENTS_TELEMETRY` | 1 | Rarely — the run you want telemetry for is the one you did not expect to go wrong | No `usage.jsonl`, no `session.json`, no PR block, no middleware appended, no new stderr line |
+| Raw trace | M7 | `DEEPAGENTS_RAW_TRACE` | `off` | n/a — off IS the default; turn it **on** (`file`/`console`/`both`) to debug a model, then back off | Middleware installed but a pure pass-through: no file, no directory, no output, no formatting performed |
 
 **Removable contract:** Each "off" state is byte-for-byte identical to the prior milestone 
 (see [Glossary](../docs/README.md#glossary)). E.g., `DEEPAGENTS_MASK=0` ⇒ M3 parity.

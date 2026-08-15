@@ -138,11 +138,52 @@ secret-safe containers.
       `TelemetryMiddleware` must not ride on `CostTrackerMiddleware`: M1 omits the tracker entirely
       on a `pricing = "free"` model, which is the default local-Ollama benchmark case.
   - `docs/milestones/in-progress/` — **being built** milestones (doc + separate invariants doc + code
-    on a feature branch). *(Currently empty — M5.1 and M6 moved to `complete/` on merge; the
-    directory is not tracked while empty, recreate it when the next build starts.)*
+    on a feature branch).
+    - `milestone7.md` (+ `milestone7_invariants.md`) — **Raw Trace Debug Mode**
+      (`design_doc.md` §11). `DEEPAGENTS_RAW_TRACE=1` writes, per model call, the literal payload
+      the harness hands the model — final system prompt, full message history, tool schemas,
+      tool-call/tool-result blocks — for diagnosing weak/local-model failures (hallucinated tool
+      JSON, ignored instructions, a tool the model never saw) without falling back to the model
+      server's own debug logging (`OLLAMA_DEBUG=1`). **Built — S1–S5 all landed** on
+      `feat/raw-trace-debug` (988 passed / 4 platform skips, live tier included); §0.2 records what
+      the build changed about the plan. See the **"Raw trace debug mode"** section in
+      `deepagent-image/CLAUDE.md` for the operator- and maintainer-facing summary.
+      Complements M6, does not overlap it: telemetry carries **no** text by
+      construction (M6 invariant 10) and says the tool-error rate spiked; this says what the model
+      was looking at when it did. Two things to know before touching the code. **The seam is the
+      innermost `wrap_model_call`, appended after `_ExcludeToolsMiddleware`** — langchain composes
+      first-is-outermost, so a trace installed one layer out logs tools the model never received,
+      which is the exact bug class the milestone exists to diagnose; an invariant pins the list
+      position rather than the intent (§5). And **`design_doc.md` §11's "raw tags included, e.g.
+      Ollama's chat-template markers" is not deliverable** — Ollama renders the chat template
+      server-side, so §3 splits fidelity into three levels, ships the message level, and makes
+      correcting that design-doc sentence part of done-when. The knob is a **four-valued enum**
+      (`off`/`file`/`console`/`both`), **live and `/config`-settable** — M5.1's registry gives the
+      picker and the enum validation for free — and `console` **replaces** the rendered answer
+      rather than adding to it. That substitution is the milestone in one line:
+      `final_message_text` (`agent.py:449–465`) keeps `{"type": "text"}` parts and **deliberately
+      drops** reasoning/thinking blocks and unknown part shapes, so the raw mode is "skip that
+      transform" (§7). Response capture drops nothing — every block in order, unknown types dumped
+      verbatim rather than skipped, plus `tool_calls`/invalid tool calls/`response_metadata`/
+      `usage_metadata`. Encrypted reasoning is recorded **in position** as a typed placeholder with
+      its byte size, never as ciphertext (§8). Streaming is **not implemented in v1 but must not be
+      foreclosed**: the writer is three-phase (`open_record`/append/`close_record`) so a streaming
+      path appends chunks without changing the format, and `AgentMiddleware.transformers` is the
+      named future seam — its `TransformerFactory` comes from the private `langgraph.stream._mux`,
+      so it needs the same construction-time guard `_WorkspaceShellBackend` uses for `_resolve_path`
+      (§9). File sink is `<state-dir>/raw-trace/<run_id>.log` (never the workspace), scrubbed
+      through `harness/scrub.py` on the console path too; the file is a **secret-bearing artifact**
+      and the docs say so rather than implying the scrub is a boundary. §0.1 records what the first
+      draft got wrong — notably that pre-spinup-only was justified by an invariant stricter than the
+      removable contract actually requires. **§0.2 is the build's own lesson, and it generalises:**
+      `system_message` is a `SystemMessage` *object*, not a string, so the prompt was rendered as a
+      `repr` with its own text escaped inside. Every stub passed (a stub hands the formatter a
+      string), and the live case passed too at first — because a prompt is a substring of its own
+      `repr`. It was caught by *reading a real trace*. A substring assertion against a serialised
+      blob cannot tell verbatim from escaped.
   - `docs/milestones/planned/` — **not-yet-built** milestones (docs only). Wins over `design_doc.md`
     for "what we build next." *(Currently empty — the forward candidates live in `design_doc.md`
-    §11/§12.6/§13 and its "Core identity — dependency chain" list.)*
+    §11 (the benchmark ladder), §12.6, §13, and its "Core identity — dependency chain" list.)*
   - `docs/features/workspace_visibility.md` — **named feature plan** (not a numbered milestone): restrict
     which workspace paths an agent can see (`.agentignore` policy, designated-secret floor, docker-mask
     → bwrap fs-tool jail → optional overlayfs). **Planned** — summarized in `design_doc.md` §2.

@@ -30,6 +30,7 @@ from harness import (
     interrupt,
     jail,
     ratelimit,
+    rawtrace,
     refresh,
     resilience,
     telemetry as telemetry_mod,
@@ -37,6 +38,7 @@ from harness import (
 from harness.config import (
     FIELD_SPECS,
     PROFILE_NAME,
+    RAW_TRACE_MODES,
     SPECS_BY_NAME,
     format_config_lines,
     resolve_settings,
@@ -44,6 +46,7 @@ from harness.config import (
 )
 from harness.agent import (
     DEFAULT_TASK,
+    RawTraceMiddleware,
     build_agent,
     final_message_text,
     make_mask_add_tool,
@@ -142,6 +145,15 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="End the session once cumulative tokens cross this (also DEEPAGENTS_MAX_TOKENS).",
     )
+    parser.add_argument(
+        "--raw-trace",
+        default=None,
+        choices=RAW_TRACE_MODES,
+        help="Record the literal payload of every model call (M7). 'file' writes "
+        "<state-dir>/raw-trace/<run_id>.log, 'console' prints it INSTEAD of the "
+        "rendered answer, 'both' does both (also DEEPAGENTS_RAW_TRACE, and "
+        "/config set raw_trace in-session).",
+    )
     args = parser.parse_args()
 
     settings, sources = resolve_settings(cli=args)
@@ -151,6 +163,7 @@ def parse_args() -> argparse.Namespace:
     args.headless = settings.headless
     args.max_cost = settings.max_cost
     args.max_tokens = settings.max_tokens
+    args.raw_trace = settings.raw_trace
     args.settings = settings
     args.settings_sources = sources
     return args
@@ -894,6 +907,47 @@ def build_telemetry(settings, workspace: Path, *, run_id: str, thread_id: str | 
     )
 
 
+def build_raw_trace(settings, workspace: Path, *, run_id: str, headless: bool = False):
+    """The M7 raw-trace middleware. **Always built**, even in `off` mode.
+
+    Unlike telemetry (which returns `None` and appends nothing), this middleware
+    is installed unconditionally because the knob is *live*: an operator can
+    `/config set raw_trace file` mid-session and re-run the failing prompt
+    against the same thread and accumulated context, which is the whole point of
+    a live toggle. `off` is a true pass-through — the mode is checked before any
+    work, so it costs one attribute read per model call and creates no file and
+    no directory. The removable contract is about observable behaviour, not the
+    middleware list's element count (`milestone7.md` §10.1/§10.2).
+
+    The file sink is in the **state dir**, never the workspace. The trace holds
+    the full context, so it holds anything the agent read: it is a
+    **secret-bearing artifact**, and `scrub()` in front of it is a backstop
+    (known credential shapes), not a boundary.
+
+    Console output goes to stdout — except under `--headless`, where it goes to
+    stderr. The headless JSON is a machine contract with a real consumer (a
+    benchmark sweep joins on it, `milestone6.md` §5b), and a display knob must
+    not put unparseable lines in the stream that contract lives in.
+    """
+    return RawTraceMiddleware(rawtrace.TraceSink(
+        getattr(settings, "raw_trace", rawtrace.MODE_OFF),
+        rawtrace.trace_path(archive.state_dir(workspace), run_id),
+        run_id=run_id,
+        stream=sys.stderr if headless else None,
+    ))
+
+
+def _suppress_answer(raw_trace: "RawTraceMiddleware | None") -> bool:
+    """True when the raw record REPLACES the rendered answer (`console`/`both`).
+
+    Substitution, not addition (fork §13.3): the point is to see the harness's
+    actual traffic instead of its human-facing summary, and printing both buries
+    one in the other. Only the *print site* changes — `run_turn` still returns
+    `final_message_text(result)` unchanged in every mode, so nothing downstream
+    (the headless JSON included) sees a different value."""
+    return raw_trace is not None and raw_trace.sink.mode in rawtrace.console_modes()
+
+
 def run_turn(
     agent,
     text: str,
@@ -902,6 +956,7 @@ def run_turn(
     extra_messages: list | None = None,
     hitl_ctx: "hitl.HitlContext | None" = None,
     telemetry: "TelemetryMiddleware | None" = None,
+    raw_trace: "RawTraceMiddleware | None" = None,
 ) -> str | None:
     """One invoke on the given thread. Returns the answer text, or None when
     --stream already printed raw events instead of a final message.
@@ -937,6 +992,11 @@ def run_turn(
         # not — it fires per invoke, and a turn can invoke several times (a
         # resilience retry, every HITL resume). See TelemetryMiddleware.begin_turn.
         telemetry.begin_turn()
+    if raw_trace is not None:
+        # Same bracket, same reason: records are labelled `turn N / call M`, and
+        # `N` keyed off `before_agent` would restart mid-turn on a retry or a
+        # HITL resume (invariant 4).
+        raw_trace.begin_turn()
     started = time.perf_counter()
     outcome = telemetry_mod.OUTCOME_OK
     try:
@@ -1179,6 +1239,7 @@ def _config_display_lines(
     max_tokens: int | None,
     hitl_conf,
     edited: set[str],
+    raw_trace_mode: str | None = None,
 ) -> list[str]:
     """The lines a bare `/config` prints: live fields first (source-tagged --
     "session" once `/config set` has touched a field this run, else whatever
@@ -1205,6 +1266,9 @@ def _config_display_lines(
             "max_cost": max_cost,
             "max_tokens": max_tokens,
             "hitl": hitl_conf,
+            # None => no middleware in this (bare host-test) call, so fall back
+            # to whatever `resolve_settings` saw rather than reporting "off".
+            **({"raw_trace": raw_trace_mode} if raw_trace_mode is not None else {}),
         },
         edited=edited,
     )
@@ -1252,6 +1316,7 @@ class LiveContext:
     edited: set
     archive_conn: object = None
     run_id: str | None = None
+    raw_trace: object = None
     new_agent: object = None
 
 
@@ -1334,6 +1399,35 @@ def _apply_hitl(ctx: LiveContext, spec, value) -> None:
     _stage(f"config: {spec.name} {old} -> {value} (this session only; /config save to persist)")
 
 
+def _apply_raw_trace(ctx: LiveContext, spec, value) -> None:
+    """Flip the raw-trace mode on the already-constructed middleware.
+
+    One attribute write, no agent rebuild: the middleware is installed in every
+    mode (`off` is a pass-through), and each hook reads `sink.mode` at its top.
+    `/config` is processed between turns at the REPL prompt, so a mode change
+    cannot land halfway through a model call (invariant 20a).
+    """
+    if ctx.raw_trace is None:
+        _stage("config: raw trace unavailable in this context")
+        return
+    sink = ctx.raw_trace.sink
+    old = sink.mode
+    sink.mode = value
+    ctx.edited.add("raw_trace")
+    where = f" -> {sink.path}" if value in (rawtrace.MODE_FILE, rawtrace.MODE_BOTH) else ""
+    _stage(f"config: raw_trace {old} -> {value}{where} (this session only; /config save to persist)")
+    if value in rawtrace.console_modes():
+        _stage(
+            "config: the raw record now REPLACES the rendered answer at the prompt "
+            "(/config set raw_trace off to get it back)"
+        )
+    if value in (rawtrace.MODE_FILE, rawtrace.MODE_BOTH):
+        # Said plainly, every time it is turned on: the trace holds the whole
+        # context, so it holds anything the agent read. scrub() redacts the
+        # credential shapes it recognises and nothing else.
+        _stage("config: the trace file is a secret-bearing artifact — it holds the full prompt context")
+
+
 # Behaviour, keyed by the registry's own field names. It lives here rather than
 # on the FieldSpec because an applier touches the tracker / archive / agent, and
 # `config.py` imports none of those (the acyclic rule). `test_cli` asserts the
@@ -1345,6 +1439,7 @@ _LIVE_APPLIERS = {
     "topic": _apply_topic,
     "max_cost": _apply_budget,
     "max_tokens": _apply_budget,
+    "raw_trace": _apply_raw_trace,
     "hitl.autonomy_level": _apply_hitl,
     "hitl.on_deny": _apply_hitl,
     "hitl.interruption_policy": _apply_hitl,
@@ -1365,6 +1460,7 @@ def _handle_config(
     sources=None,
     archive_conn=None,
     run_id: str | None = None,
+    raw_trace=None,
 ) -> tuple[str, object | None, str | None]:
     """Handle one `/config`, `/config set <field> <value>`, or `/config save`
     line. Returns `(current_model, new_agent_or_None, current_topic)` --
@@ -1401,6 +1497,7 @@ def _handle_config(
             max_tokens=getattr(tracker, "_max_tokens", None) if tracker else None,
             hitl_conf=hitl_conf,
             edited=edited,
+            raw_trace_mode=(raw_trace.sink.mode if raw_trace is not None else None),
         ):
             print(out, file=sys.stderr)
         return current_model, None, topic
@@ -1415,6 +1512,8 @@ def _handle_config(
             values["max_cost"] = tracker._max_cost
         if "max_tokens" in edited and tracker is not None:
             values["max_tokens"] = tracker._max_tokens
+        if "raw_trace" in edited and raw_trace is not None:
+            values["raw_trace"] = raw_trace.sink.mode
         if not values:
             _stage("config: nothing session-edited to save (pre-spinup fields aren't touched by /config)")
             return current_model, None, topic
@@ -1485,6 +1584,7 @@ def _handle_config(
         edited=edited,
         archive_conn=archive_conn,
         run_id=run_id,
+        raw_trace=raw_trace,
     )
     _LIVE_APPLIERS[field](ctx, spec, value)
     return ctx.current_model, ctx.new_agent, ctx.topic
@@ -1591,7 +1691,8 @@ def _print_session_total(tracker: CostTrackerMiddleware | None) -> None:
         )
 
 
-def _run_turn_hitl(agent, text, config, *, stream, extra_messages, hitl_ctx, telemetry=None):
+def _run_turn_hitl(agent, text, config, *, stream, extra_messages, hitl_ctx, telemetry=None,
+                   raw_trace=None):
     """`run_turn` plus the S4 *provider-error* system interrupt.
 
     When the resilience layer (P1) has exhausted its retries and re-raised a
@@ -1612,7 +1713,7 @@ def _run_turn_hitl(agent, text, config, *, stream, extra_messages, hitl_ctx, tel
             return run_turn(
                 agent, text, config,
                 stream=stream, extra_messages=extra_messages, hitl_ctx=hitl_ctx,
-                telemetry=telemetry,
+                telemetry=telemetry, raw_trace=raw_trace,
             )
         except BudgetExceeded:
             raise
@@ -1710,6 +1811,7 @@ def run_repl(
     settings=None,
     settings_sources=None,
     telemetry: "TelemetryMiddleware | None" = None,
+    raw_trace: "RawTraceMiddleware | None" = None,
 ) -> int:
     """Container-lifetime loop: build once (by the caller), then prompt -> invoke
     -> answer until /exit, /quit, or EOF. A non-TTY stdin collapses to the single
@@ -1757,7 +1859,7 @@ def run_repl(
         try:
             answer = _run_turn_hitl(
                 agent, initial_task, config, stream=stream, extra_messages=None,
-                hitl_ctx=hitl_ctx, telemetry=telemetry,
+                hitl_ctx=hitl_ctx, telemetry=telemetry, raw_trace=raw_trace,
             )
         except KeyboardInterrupt:
             # Ctrl-C during a turn cancels that turn only; the session survives.
@@ -1778,7 +1880,7 @@ def run_repl(
             _dump_error(exc)
             _dump_partial(agent, config)
             answer = None
-        if answer is not None:
+        if answer is not None and not _suppress_answer(raw_trace):
             print(answer)
             print()
 
@@ -1838,6 +1940,7 @@ def run_repl(
                     sources=settings_sources,
                     archive_conn=archive_conn,
                     run_id=run_id,
+                    raw_trace=raw_trace,
                 )
             except Exception as exc:  # noqa: BLE001
                 _stage(f"config: command failed: {_err_detail(exc)}")
@@ -1855,7 +1958,7 @@ def run_repl(
         try:
             answer = _run_turn_hitl(
                 agent, line, config, stream=stream, extra_messages=pending,
-                hitl_ctx=hitl_ctx, telemetry=telemetry,
+                hitl_ctx=hitl_ctx, telemetry=telemetry, raw_trace=raw_trace,
             )
             pending = []
         except KeyboardInterrupt:
@@ -1882,7 +1985,7 @@ def run_repl(
             pending = []
             continue
 
-        if answer is not None:
+        if answer is not None and not _suppress_answer(raw_trace):
             print(answer)
             print()
 
@@ -2024,6 +2127,7 @@ def run_batch(
     hitl_conf=None,
     workspace: Path | None = None,
     telemetry: "TelemetryMiddleware | None" = None,
+    raw_trace: "RawTraceMiddleware | None" = None,
 ) -> int:
     """Headless one-shot mode (P2 / design_doc.md §12.3).
 
@@ -2042,8 +2146,14 @@ def run_batch(
         for task in tasks:
             if not task:
                 continue
+            # The headless JSON is NEVER raw, in any mode: it is a machine
+            # contract with a real consumer (a benchmark sweep joins on it), and
+            # a display knob must not change a contract. `run_turn` returns
+            # `final_message_text(result)` here exactly as it does with tracing
+            # off (invariant 10a).
             final_message = run_turn(
-                agent, task, config, stream=stream, hitl_ctx=hitl_ctx, telemetry=telemetry
+                agent, task, config, stream=stream, hitl_ctx=hitl_ctx,
+                telemetry=telemetry, raw_trace=raw_trace,
             )
     except hitl.InterruptAborted as exc:
         _stage(f"headless abort: {exc}")
@@ -2192,6 +2302,14 @@ def main() -> int:
                 middleware.append(telemetry)
             if tracker is not None:
                 middleware.append(tracker)
+            # M7: constructed here (main keeps the reference to bracket turns and
+            # flip the mode live) but INSTALLED by build_agent, which is the only
+            # thing that controls what comes after _ExcludeToolsMiddleware. Not
+            # appended to `middleware` -- doing so would put it before the tool
+            # filter and record tools the model never received.
+            raw_trace = build_raw_trace(
+                args.settings, workspace, run_id=run_id, headless=args.headless
+            )
 
             tools = list(mcp_tools)
             chat_model = resolve_chat_model(model)
@@ -2257,6 +2375,7 @@ def main() -> int:
                 checkpointer=checkpointer,
                 on_path_denied=on_path_denied,
                 on_command_denied=on_command_denied,
+                raw_trace=raw_trace,
             )
 
             def _rebuild_agent(new_model: str):
@@ -2291,6 +2410,7 @@ def main() -> int:
                     hitl_conf=hitl_conf,
                     workspace=workspace,
                     telemetry=telemetry,
+                    raw_trace=raw_trace,
                 )
             else:
                 rc = run_repl(
@@ -2310,6 +2430,7 @@ def main() -> int:
                     settings=args.settings,
                     settings_sources=args.settings_sources,
                     telemetry=telemetry,
+                    raw_trace=raw_trace,
                 )
             if archive_conn is not None:
                 # After the M1 session-total line printed (inside run_repl), so the

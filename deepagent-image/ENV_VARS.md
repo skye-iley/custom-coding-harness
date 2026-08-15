@@ -109,6 +109,7 @@ for the config file schema.
 | Var | Purpose | Type | Default | Example |
 |-----|---------|------|---------|---------|
 | `DEEPAGENTS_DEBUG` | Dump partial checkpointer state on turn failure | 0/1 | 0 | — |
+| `DEEPAGENTS_RAW_TRACE` | Record the literal payload of every model call (M7). `console`/`both` print the record **instead of** the rendered answer. File sink: `<state-dir>/raw-trace/<run_id>.log` — a **secret-bearing artifact** (holds the full prompt context). Also `--raw-trace` and `/config set raw_trace`. | off\|file\|console\|both | `off` | `file` |
 | `LANGSMITH_TRACING` | Enable LangSmith tracing (requires LANGSMITH_API_KEY) | true/false | false | — |
 | `LANGSMITH_API_KEY` | LangSmith API key | string | unset | — |
 | `LANGSMITH_PROJECT` | LangSmith project name | string | unset | — |
