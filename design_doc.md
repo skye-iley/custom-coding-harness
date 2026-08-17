@@ -1177,8 +1177,7 @@ system_interrupts:                # which harness events raise (vs. log/crash)
 
 ### Framework Enhancements
 *   **Raw prompt/response debug mode** — **BUILT as Milestone 7**
-    (`docs/milestones/in-progress/milestone7.md` until the branch merges, then
-    `docs/milestones/complete/`; authoritative where the two disagree).
+    (`docs/milestones/complete/milestone7.md`; authoritative where the two disagree).
     `DEEPAGENTS_RAW_TRACE` / `--raw-trace` / `/config set raw_trace` is a four-valued knob
     (`off`/`file`/`console`/`both`) that records, **per model call**, the literal payload the
     harness hands the model and the whole object the model hands back — final system prompt, full

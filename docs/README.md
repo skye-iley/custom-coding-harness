@@ -41,39 +41,8 @@ identity — dependency chain" list; `features/` holds the two named non-milesto
 
 ## In-progress milestones — `milestones/in-progress/`
 
-- **`milestone7.md`** — **Raw Trace Debug Mode** (`design_doc.md` §11): `DEEPAGENTS_RAW_TRACE=file`
-  writes, per model call, the literal payload the harness hands the model — final system prompt,
-  full message history, tool schemas, tool-call/tool-result blocks — so a weak-model failure
-  (hallucinated tool JSON, ignored instructions, a tool the model never saw) is diagnosable from the
-  harness's own output instead of by switching on the model server's debug logging
-  (`OLLAMA_DEBUG=1`, the workaround this removes). **Built — S1–S5 all landed** on
-  `feat/raw-trace-debug`; §0 is the build status and §0.2 what the build changed about the plan.
-  Moves to `complete/` (invariants folded in) when the branch merges. Complements M6 rather than
-  overlapping it: telemetry says the tool-error
-  rate spiked at turn 7 and deliberately carries no text; this says what the model was looking at.
-  Two decisions worth knowing before reading: the capture point is the **innermost**
-  `wrap_model_call`, *after* `_ExcludeToolsMiddleware`, because a trace taken one layer out logs
-  tools the model never received — the exact bug class it exists to diagnose (§5); and the
-  design-doc's "raw tags included, e.g. Ollama's chat-template markers" is **not deliverable** —
-  Ollama renders the template server-side, so §3 defines three fidelity levels, ships the
-  message-level one, and requires `design_doc.md` §11 to be corrected rather than left aspirational.
-  The knob is a four-valued enum (`off`/`file`/`console`/`both`), **live and `/config`-settable**,
-  which gets the M5.1 picker and enum validation for free; `console` **replaces** the rendered
-  answer, which is the point — `final_message_text` (`agent.py:449–465`) deliberately drops
-  reasoning/thinking blocks and unknown part shapes, and that transform is what this makes
-  skippable (§7). §8 covers reasoning traces, including encrypted ones (recorded in position as a
-  typed placeholder with its byte size, never as ciphertext); §9 covers streaming, which v1 does not
-  implement but must not foreclose — hence a three-phase append-incremental writer and a note on
-  `AgentMiddleware.transformers` as the future seam. §0.1 records what the first draft got wrong.
-- **`milestone7_invariants.md`** — the checkable properties, written before the code: fidelity
-  (bodies verbatim, additions structural only, one record per model call, labels correct across
-  retries and HITL resumes, **nothing on the response dropped** — unknown block types dumped rather
-  than skipped), position (the middleware is last in the stack, asserted not commented), destination
-  (mode-exact output; console changes the display and never `run_turn`'s return value or the
-  headless JSON), containment (state-dir sink, scrub on every section including the console path,
-  tamper-resistance stated at its real strength), non-interference/removability (a sink failure
-  never breaks a turn; `off` is a true pass-through), and streaming extendability. Folds into
-  `milestone7.md` on completion.
+*(Empty — nothing is being built. The last occupant, `milestone7.md`, merged and moved to
+`complete/` with its invariants folded in.)*
 
 ## Complete milestones — `milestones/complete/`
 
@@ -167,6 +136,38 @@ identity — dependency chain" list; `features/` holds the two named non-milesto
   and the subtraction that fact was supposed to justify is wrong for an unrelated reason, so the
   probe's real payoff was catching that the gate's control flow passes *through* telemetry's
   wrapper.
+
+- **`milestone7.md`** — **Raw Trace Debug Mode** (`design_doc.md` §11): `DEEPAGENTS_RAW_TRACE=file`
+  writes, per model call, the literal payload the harness hands the model — final system prompt,
+  full message history, tool schemas, tool-call/tool-result blocks — so a weak-model failure
+  (hallucinated tool JSON, ignored instructions, a tool the model never saw) is diagnosable from the
+  harness's own output instead of by switching on the model server's debug logging
+  (`OLLAMA_DEBUG=1`, the workaround this removes). **Built — S1–S5 all landed** on
+  `feat/raw-trace-debug`, merged in PR #52; §0 is the build status and §0.2 what the build changed
+  about the plan. Complements M6 rather than overlapping it: telemetry says the tool-error
+  rate spiked at turn 7 and deliberately carries no text; this says what the model was looking at.
+  Two decisions worth knowing before reading: the capture point is the **innermost**
+  `wrap_model_call`, *after* `_ExcludeToolsMiddleware`, because a trace taken one layer out logs
+  tools the model never received — the exact bug class it exists to diagnose (§5); and the
+  design-doc's "raw tags included, e.g. Ollama's chat-template markers" is **not deliverable** —
+  Ollama renders the template server-side, so §3 defines three fidelity levels, ships the
+  message-level one, and required `design_doc.md` §11 to be corrected rather than left aspirational.
+  The knob is a four-valued enum (`off`/`file`/`console`/`both`), **live and `/config`-settable**,
+  which gets the M5.1 picker and enum validation for free; `console` **replaces** the rendered
+  answer, which is the point — `final_message_text` (`agent.py:449–465`) deliberately drops
+  reasoning/thinking blocks and unknown part shapes, and that transform is what this makes
+  skippable (§7). §8 covers reasoning traces, including encrypted ones (recorded in position as a
+  typed placeholder with its byte size, never as ciphertext); §9 covers streaming, which v1 does not
+  implement but must not foreclose — hence a three-phase append-incremental writer and a note on
+  `AgentMiddleware.transformers` as the future seam. §0.1 records what the first draft got wrong.
+  **§16 holds the folded invariants**, written before the code: fidelity (bodies verbatim, additions
+  structural only, one record per model call, labels correct across retries and HITL resumes,
+  **nothing on the response dropped** — unknown block types dumped rather than skipped), position
+  (the middleware is last in the stack, asserted not commented), destination (mode-exact output;
+  console changes the display and never `run_turn`'s return value or the headless JSON), containment
+  (state-dir sink, scrub on every section including the console path, tamper-resistance stated at
+  its real strength), non-interference/removability (a sink failure never breaks a turn; `off` is a
+  true pass-through), and streaming extendability.
 
 ## Feature plans — `features/`
 
