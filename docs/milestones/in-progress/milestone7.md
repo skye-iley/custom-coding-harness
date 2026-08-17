@@ -212,6 +212,34 @@ Not fixed here, and deliberately: making a weak model emit structured tool calls
 question (a smaller tool set via `DEEPAGENTS_LEAN_TOOLS`, a different tag, or a tool-call repair
 layer), not a tracing one. M7's job was to make it legible, which it now does.
 
+### 3.3 The blind spot has a second direction — server-side truncation
+
+Both cases above lose data on the **response** side. A third, found while building a negative control
+for §3.1's warning, loses it on the **request** side, and L1 cannot see that either.
+
+Running `ollama:gemma4:latest` — the spelling `ollama list` prints — the trace read
+`--- tools (11) ---` and `input_tokens: 2051`, on two consecutive turns. Identical input counts
+across turns whose histories differ by 1694 tokens is the signature of truncation to a fixed
+ceiling, and 2051 ≈ Ollama's default `num_ctx` of 2048. The registry entry is named `gemma4`, so the
+`:latest` spelling matched nothing, resolved to zero options, and never received the registry's
+`num_ctx = 65536`. About 5500 tokens were discarded by the daemon — from the **left**, so the model
+kept the tail and saw only the last 3 of its 11 tool schemas. It then described exactly those three
+when asked what tools it had.
+
+The trace was not wrong: the harness really did send 11 tools, and L1 records what the harness
+emitted. What it cannot record is what the server discarded before the model read it. So the symptom
+— *"the model only knows about the last three tools"* — reads as a model attention problem and is
+actually a config miss two layers away. The fix is `Provider.registry_key` normalizing a trailing
+`:latest` to the registered stem (`providers.py`), since in Ollama `name` and `name:latest` are the
+same model by definition; verified by the same run going 2051 → **7583** input tokens.
+
+Three measured cases now, in three different places: a response-parser drop, a model-behaviour
+failure the first was masking, and a server-side request truncation. Only the middle one is visible
+at L1. That is not an argument that the trace is weak — it caught all three by making the numbers
+disagree in public — but it is a standing argument that **L1's honest scope is "what the harness
+handed over"**, and every question of the form *"what did the model actually read"* needs L2 or the
+server's own logs. §12's done-when already requires saying so; these are the cases that show why.
+
 Raw tags are **ideal, not required**. The requirement is *everything the harness receives or emits*,
 which L1 satisfies completely. §12 requires `design_doc.md` §11 to be corrected so an operator who
 needs L3 is sent to `OLLAMA_DEBUG=1` / `/api/show` by name rather than discovering the gap by
