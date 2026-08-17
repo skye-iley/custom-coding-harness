@@ -10,7 +10,7 @@ secret-safe containers.
   code → `complete/` doc-only with invariants folded in). In short:
   - `docs/milestones/complete/` — **built + merged** milestones (`mvp.md`, `milestone1.md`,
     `milestone2.md`, `milestone3.md`, `milestone4.md`, `milestone4.1.md`, `milestone5.md`,
-    `milestone5.1.md`, `milestone6.md`). These record shipped scope; the code is
+    `milestone5.1.md`, `milestone6.md`, `milestone7.md`). These record shipped scope; the code is
     authoritative where they drift.
     - `mvp.md` — the shipped baseline: one-command containerized Deep Agents coding agent.
     - `milestone1.md` — cost/token visibility + resource caps.
@@ -137,9 +137,7 @@ secret-safe containers.
       correctness comes from the benchmark's own evaluation of the produced diff. Note
       `TelemetryMiddleware` must not ride on `CostTrackerMiddleware`: M1 omits the tracker entirely
       on a `pricing = "free"` model, which is the default local-Ollama benchmark case.
-  - `docs/milestones/in-progress/` — **being built** milestones (doc + separate invariants doc + code
-    on a feature branch).
-    - `milestone7.md` (+ `milestone7_invariants.md`) — **Raw Trace Debug Mode**
+    - `milestone7.md` — **Raw Trace Debug Mode**
       (`design_doc.md` §11). `DEEPAGENTS_RAW_TRACE=file` writes, per model call, the literal payload
       the harness hands the model — final system prompt, full message history, tool schemas,
       tool-call/tool-result blocks — for diagnosing weak/local-model failures (hallucinated tool
@@ -181,6 +179,8 @@ secret-safe containers.
       string), and the live case passed too at first — because a prompt is a substring of its own
       `repr`. It was caught by *reading a real trace*. A substring assertion against a serialised
       blob cannot tell verbatim from escaped.
+  - `docs/milestones/in-progress/` — **being built** milestones (doc + separate invariants doc + code
+    on a feature branch). *(Currently empty — M7 merged and moved to `complete/`.)*
   - `docs/milestones/planned/` — **not-yet-built** milestones (docs only). Wins over `design_doc.md`
     for "what we build next." *(Currently empty — the forward candidates live in `design_doc.md`
     §11 (the benchmark ladder), §12.6, §13, and its "Core identity — dependency chain" list.)*
