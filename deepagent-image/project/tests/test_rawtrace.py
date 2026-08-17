@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from _bootstrap import _load
 
 rt = _load("harness.rawtrace")
@@ -248,6 +250,54 @@ def test_encrypted_reasoning_is_a_placeholder_with_type_and_size_never_ciphertex
     assert ciphertext not in out
 
 
+def test_a_signed_thinking_block_keeps_its_plaintext(tmp_path):
+    # Regression: `_encrypted_size` used to fire on the mere PRESENCE of a
+    # `signature`/`data` key, before the text-bearing branch ran. Anthropic's
+    # ordinary (non-redacted) thinking block is plaintext reasoning PLUS a
+    # signature, so an entire extended-thinking run was replaced by
+    # "<encrypted reasoning block: type=thinking, N bytes>" — the trace hiding
+    # the exact thing it exists to show (invariants 5a/5b).
+    reasoning = "Let me work through this step by step."
+    out = rt.format_block(0, {
+        "type": "thinking", "thinking": reasoning, "signature": "ErUB" + "x" * 40,
+    })
+    assert reasoning in out
+    assert "encrypted reasoning block" not in out
+    # The signature is still recorded as present and measured — just not dumped.
+    assert "signature" in out
+    assert "ErUBxxxx" not in out
+    assert "<opaque: 44 bytes>" in out
+
+
+def test_a_signed_text_block_keeps_its_answer():
+    # Same defect, worse blast radius: a signed `text` block lost the answer.
+    out = rt.format_block(1, {"type": "text", "text": "the answer", "signature": "sig"})
+    assert "the answer" in out
+    assert "encrypted reasoning block" not in out
+
+
+def test_an_unknown_signed_block_renders_its_prose_not_its_base64():
+    # A shape nobody anticipated, carrying readable prose next to an opaque
+    # payload. Neither branch above covers it, and a raw JSON dump would put
+    # kilobytes of base64 in front of the text a reader came for.
+    out = rt.format_block(2, {
+        "type": "novel_shape", "text": "readable prose", "data": "B" * 100,
+    })
+    assert "readable prose" in out
+    assert "B" * 100 not in out
+    assert "<opaque: 100 bytes>" in out
+
+
+def test_an_opaque_payload_with_no_readable_text_is_still_a_placeholder():
+    # The narrowing must not go too far: a block whose payload is genuinely all
+    # there is stays a sized placeholder, marked type or not.
+    out = rt.format_block(3, {"type": "thinking", "signature": "Z" * 64})
+    assert "[block 3] <encrypted reasoning block: type=thinking, 64 bytes>" == out
+    # An empty text field is not readable text either.
+    blank = rt.format_block(4, {"type": "thinking", "thinking": "  ", "data": "Q" * 10})
+    assert "<encrypted reasoning block:" in blank
+
+
 def test_an_encrypted_block_is_never_omitted_even_mid_list():
     blocks = [
         {"type": "text", "text": "before"},
@@ -387,6 +437,35 @@ def test_a_sink_failure_never_raises_and_warns_once(tmp_path, capsys):
     for _ in range(3):
         _drive(sink, "body")  # must not raise
     assert capsys.readouterr().err.count("raw-trace:") == 1
+
+
+class _BrokenStream:
+    """A console that fails the way a closed pipe does."""
+
+    def __init__(self, exc):
+        self._exc = exc
+
+    def write(self, _text):
+        raise self._exc
+
+    def flush(self):
+        pass
+
+
+@pytest.mark.parametrize("exc", [
+    BrokenPipeError("closed"),          # `--raw-trace console | head`
+    UnicodeEncodeError("cp1252", "x", 0, 1, "no"),  # non-ASCII on a Windows console
+    ValueError("I/O operation on closed file"),
+])
+def test_a_console_failure_never_raises_and_warns_once(exc, capsys):
+    # Regression, invariant 16 ("tracing is never load-bearing"): only the FILE
+    # path was guarded. `RawTraceMiddleware` calls `_open`/`_close` outside its
+    # try/except around `handler(request)`, so a console error escaping here
+    # killed the model call before the model was ever reached.
+    sink = rt.TraceSink(rt.MODE_CONSOLE, None, run_id="r", stream=_BrokenStream(exc), env={})
+    for _ in range(3):
+        _drive(sink, "body")  # must not raise
+    assert capsys.readouterr().err.count("raw-trace console:") == 1
 
 
 # --- import profile (invariant 21) --------------------------------------------

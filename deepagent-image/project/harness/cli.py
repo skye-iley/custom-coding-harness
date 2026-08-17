@@ -2384,7 +2384,15 @@ def main() -> int:
                 main() makes at startup, so a bad model fails the same way live
                 as it would at launch, not mid-turn. Everything else (tools,
                 middleware, checkpointer, path/command-denied handlers) stays
-                fixed for the container's lifetime; only the chat model swaps."""
+                fixed for the container's lifetime; only the chat model swaps.
+
+                M7: `raw_trace` must be re-passed, and it is not optional
+                housekeeping. `build_agent` appends the middleware only when the
+                kwarg is present, but `run_repl` keeps its own reference to the
+                same object -- so omitting it here left `_suppress_answer` still
+                returning True in console/both while no middleware existed to
+                print a record. Every turn after a `/config set model` rendered
+                neither a trace nor an answer: a silent blank REPL."""
                 validate_credentials(new_model)
                 new_chat_model = resolve_chat_model(new_model)
                 return build_agent(
@@ -2395,6 +2403,7 @@ def main() -> int:
                     checkpointer=checkpointer,
                     on_path_denied=on_path_denied,
                     on_command_denied=on_command_denied,
+                    raw_trace=raw_trace,
                 )
 
             if args.headless:

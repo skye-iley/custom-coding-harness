@@ -154,21 +154,62 @@ _TEXT_BEARING = {
 }
 
 
+def _readable_text_key(block: dict) -> str | None:
+    """The key holding this block's plaintext body, if it has one.
+
+    Checked against the block's declared type first, then the generic `text`
+    slot, so an unknown type that still carries readable prose is recognised.
+    """
+    for key in _TEXT_BEARING.get(str(block.get("type") or ""), ()) + ("text",):
+        value = block.get(key)
+        if isinstance(value, str) and value.strip():
+            return key
+    return None
+
+
 def _encrypted_size(block: dict) -> int | None:
     """Byte size of an encrypted block's payload, or None if it isn't one.
 
     Size and position are the diagnostically useful facts; the ciphertext is not
     (invariant 5c). Dumping kilobytes of base64 into a human-facing trace buries
     the blocks that *are* readable.
+
+    **An opaque payload key is not by itself evidence the block is opaque.**
+    Anthropic's ordinary (non-redacted) thinking block is
+    ``{"type": "thinking", "thinking": "<plaintext>", "signature": "<b64>"}`` —
+    readable reasoning *plus* a signature. Keying the placeholder on the presence
+    of `signature`/`data` alone replaced that whole block with a size, which
+    hides the reasoning the trace exists to show and violates invariants 5a/5b in
+    the one place they matter most. So: a `redacted`/`encrypted` **type** is
+    always a placeholder; a payload key demotes to a placeholder only when the
+    block carries no readable text of its own. When it does, `format_block`
+    renders the text and sizes the opaque field in the `+ extra:` tail.
     """
     btype = str(block.get("type") or "")
     payload_keys = [k for k in _ENCRYPTED_PAYLOAD_KEYS if k in block]
     marked = any(m in btype.lower() for m in _ENCRYPTED_TYPE_MARKERS)
     if not marked and not payload_keys:
         return None
+    if not marked and _readable_text_key(block) is not None:
+        return None
     if payload_keys:
         return sum(len(str(block[k]).encode("utf-8")) for k in payload_keys)
     return len(_json(block).encode("utf-8"))
+
+
+def _size_opaque(rest: dict) -> dict:
+    """Replace opaque payload values with a typed size marker.
+
+    Applied to the leftover keys of a block whose text *is* readable, so a
+    signature is recorded as present and measured without dumping kilobytes of
+    base64 in front of the prose a reader came for. Same trade as the whole-block
+    placeholder, one field down.
+    """
+    return {
+        k: (f"<opaque: {len(str(v).encode('utf-8'))} bytes>"
+            if k in _ENCRYPTED_PAYLOAD_KEYS else v)
+        for k, v in rest.items()
+    }
 
 
 def format_block(index: int, block) -> str:
@@ -197,13 +238,30 @@ def format_block(index: int, block) -> str:
     if text_keys:
         for key in text_keys:
             if key in block:
-                rest = {k: v for k, v in block.items() if k not in ("type", key)}
-                out = f"[block {index}] {btype}:\n{block[key]}"
-                # Not decoration: a provider that adds a field to a known block
-                # shape would otherwise vanish from the trace.
-                return out + (f"\n+ extra: {_json(rest)}" if rest else "")
+                return _render_text_block(index, btype, block, key)
+
+    # An unrecognised type that still carries readable prose next to an opaque
+    # payload (a signed block of a shape nobody anticipated). Render the prose
+    # rather than JSON-dumping the base64 in front of it.
+    if any(k in block for k in _ENCRYPTED_PAYLOAD_KEYS):
+        key = _readable_text_key(block)
+        if key is not None:
+            return _render_text_block(index, btype, block, key)
 
     return f"[block {index}] {btype}: {_json(block)}"
+
+
+def _render_text_block(index: int, btype: str, block: dict, key: str) -> str:
+    """A text-bearing block: its body verbatim, then every remaining key.
+
+    The tail is not decoration — a provider that adds a field to a known block
+    shape would otherwise vanish from the trace. Opaque payloads there are sized
+    rather than dumped, so a signature is recorded as present without burying the
+    prose above it.
+    """
+    rest = _size_opaque({k: v for k, v in block.items() if k not in ("type", key)})
+    out = f"[block {index}] {btype}:\n{block[key]}"
+    return out + (f"\n+ extra: {_json(rest)}" if rest else "")
 
 
 def format_content(content, *, indent: str = "") -> str:
@@ -567,7 +625,18 @@ class TraceSink:
         if self.mode in _CONSOLE_MODES:
             # Uncapped deliberately: a cap here would silently hide the thing the
             # operator asked to see, and the terminal is their problem.
-            print(text, file=self.stream, flush=True)
+            #
+            # Guarded for the same reason `_write_file` is (invariant 16):
+            # tracing is never load-bearing. `_open`/`_close` sit OUTSIDE the
+            # middleware's try/except around `handler(request)`, so an escaping
+            # console error kills the model call itself -- `console` piped into
+            # `head` raises BrokenPipeError before the model is ever reached, and
+            # a cp1252 Windows console raises UnicodeEncodeError on any non-ASCII
+            # prompt content. Degrade to one stderr warning, same as the file sink.
+            try:
+                print(text, file=self.stream, flush=True)
+            except (OSError, UnicodeError, ValueError) as exc:
+                self._warn(f"raw-trace console: {exc}")
         if self.mode in _FILE_MODES:
             self._write_file(text + "\n")
 
@@ -598,7 +667,13 @@ class TraceSink:
     def _warn(self, message: str) -> None:
         if not self._warned:
             self._warned = True
-            print(f"[harness] {message}", file=sys.stderr)
+            # Last resort, and itself unable to raise: this is the degradation
+            # path, so a broken stderr must not become the exception that ends
+            # the turn the sink was told never to break.
+            try:
+                print(f"[harness] {message}", file=sys.stderr)
+            except (OSError, UnicodeError, ValueError):
+                pass
 
     # --- the three phases -----------------------------------------------------
 
