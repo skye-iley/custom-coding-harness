@@ -14,32 +14,23 @@ context_window = 32768
 [options]
 num_ctx = 32768
 
-# reasoning = false sends Ollama `think: false`.
+# reasoning = true sends Ollama `think: true`. See gemma4.toml for the full
+# three-way measurement; the short version, because all three states differ:
 #
-# NOT a preference -- a correctness fix, measured 2026-08-17 (milestone7.md §3).
-# This tag thinks by DEFAULT, and langchain-ollama 1.1.0 captures Ollama's
-# `message.thinking` only when `reasoning` is truthy:
+#   unset  -- model reasons, langchain-ollama 1.1.0 DISCARDS `message.thinking`
+#             (its capture is behind a truthy `reasoning` guard). 450 output
+#             tokens produced, content="", additional_kwargs={}, blank REPL turn,
+#             no error. The bug that started the investigation.
+#   false  -- nothing is lost, but agentic TOOL USE BREAKS: measured on the real
+#             11-tool agent, zero structured tool calls and `ls {path: "."}`
+#             emitted as prose instead. The model plans in the thinking channel.
+#   true   -- thinking captured to additional_kwargs, content carries the answer,
+#             and the same prompt returns a correct structured `ls` call.
 #
-#     if reasoning and (thinking_content := stream_resp["message"].get("thinking")):
-#         additional_kwargs["reasoning_content"] = thinking_content
-#
-# The harness passes no `reasoning`, so the client sends `think: null` (the model's
-# own default = think), Ollama returns the reasoning in `message.thinking`, and that
-# falsy guard DISCARDS it. Result: an AIMessage with content="" and
-# additional_kwargs={} for a turn that really produced 450 output tokens -- a blank
-# REPL reply, and no error anywhere. `false` makes the model spend those tokens on
-# content and tool calls instead.
-#
-# `reasoning = true` is the other branch: it captures the thinking rather than
-# dropping it, but leaves `content` empty, so the reply is still blank. Use `false`
-# unless you specifically want the reasoning recorded.
-#
-# Scope is per-tag, not per-provider: whether a tag thinks by default is a property
-# of the tag, and `llama3.1` (measured) emits no thinking field at all, so a
-# provider-wide `reasoning = false` would be suppressing nothing on some models and
-# changing others blind. The shipped `gemma4` was measured separately and carries
-# the same line for the same reason -- see its file.
-reasoning = false
+# Scope is per-tag, not per-provider: whether a tag reasons by default is a
+# property of the tag, and `llama3.1` (measured) emits no thinking field at all,
+# so a provider-wide setting would be changing some models blind.
+reasoning = true
 
 # Local/self-hosted: provider.toml declares pricing = "free", so no [pricing] table.
 

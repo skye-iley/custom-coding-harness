@@ -175,42 +175,58 @@ Three things changed in response, none of which repair the blind spot — they n
   silence. This generalizes past Ollama: any provider parser dropping generated text trips it.
 - `agent._reasoning_text` — a turn whose entire output was reasoning no longer renders as nothing.
   §7's drop is right when there *is* an answer and wrong when the reasoning is all there is.
-- `providers/ollama/models/gemma4-harnesstest1.toml` — `reasoning = false` for the tag, so it spends
-  its tokens on content and tool calls. Per-tag, not per-provider: thinking-by-default is a property
-  of the tag.
+- `providers/ollama/models/gemma4*.toml` — `reasoning = true` for both gemma4 tags, so the thinking
+  is **captured** into `additional_kwargs` instead of discarded. Per-tag, not per-provider:
+  reasoning-by-default is a property of the tag (`llama3.1`, measured, emits no thinking at all).
+  §3.2 records why `false` — the first thing tried — is the wrong branch.
 
-### 3.2 The second finding, which the first was hiding
+### 3.2 `reasoning = false` was the wrong branch — and the "model failure" it caused
 
-With the drop fixed, the same task run through `run-docker` produces a *different* failure, and this
-one is the model's:
+The first fix for §3.1 set `reasoning = false`, reasoning that if the thinking channel is being
+discarded, the cleanest repair is to stop the model using it. That removed the token loss and
+introduced a worse failure, which was then **misdiagnosed as the model's**.
+
+With `false`, the same task through `run-docker` returned:
 
 ```
 --- response (18084 ms) | finish_reason=stop ---
 ls{path:".conda/env"}
 --- tool_calls (0) ---
---- invalid_tool_calls (0) ---
 usage_metadata: {"input_tokens": 7583, "output_tokens": 10, "total_tokens": 7593}
 ```
 
-Ten output tokens, all of them **content**: a made-up textual tool syntax instead of a structured
-call, against a wrong path, with `tool_calls` empty. This is `design_doc.md` §11's motivating case
-verbatim — *hallucinated tool JSON* — and the trace shows it in one screen.
+Made-up textual tool syntax, wrong path, `tool_calls` empty — `design_doc.md` §11's motivating case,
+*hallucinated tool JSON*, apparently reproduced live. It was written up here as a separable
+weak-model limitation. It was not. A/B on the real 11-tool agent, same model, same prompt, only the
+setting varying:
 
-Note it is **load-bearing that the two failures were sequential, not simultaneous.** While the
-parser drop was live, this was unobservable: the turn rendered blank whatever the model did. Fixing
-a silent-drop bug does not fix the thing it was hiding; it makes it appear, and an operator who
-stops at the first green run will conclude the wrong thing.
+| `reasoning` | tool calls | final reply |
+|---|---|---|
+| `false` | **none** | `"What is the absolute path to the workspace directory…"` |
+| `true` | **`ls`** | `"The files in the workspace are: /hello.txt"` |
 
-**Difficulty is contextual, and a small probe will lie about it.** The same tag, same prompt, one
-plainly-specified tool bound, returns `{'name': 'ls', 'args': {'path': '/project/workspace'}}`
-correctly on the first call. It is the *real* request — 11 tools, the full agent system prompt,
-7583 input tokens — that it cannot handle. Both measurements are true; only the second is about the
-harness's actual workload. A probe simple enough to isolate a variable is often simple enough to
-stop reproducing the bug, and this milestone's own output is what makes the difference visible.
+Identical on both gemma4 tags. **The model plans in the thinking channel**; take it away and agentic
+tool use collapses into prose. So the two failure modes pull in opposite directions and only `true`
+satisfies both — thinking captured to `additional_kwargs` rather than dropped, `content` carrying the
+answer, tool calls intact.
 
-Not fixed here, and deliberately: making a weak model emit structured tool calls is a prompt/model
-question (a smaller tool set via `DEEPAGENTS_LEAN_TOOLS`, a different tag, or a tool-call repair
-layer), not a tracing one. M7's job was to make it legible, which it now does.
+Three lessons, and the second is the one that cost the most:
+
+- **A one-tool probe cannot see this.** With a single plainly-specified tool bound, `reasoning=false`
+  returns `{'name': 'ls', 'args': {'path': '/project/workspace'}}` correctly. That probe was used to
+  *retract* an earlier correct suspicion about tool use, on the grounds that the small case worked.
+  A probe simple enough to isolate a variable is often simple enough to stop reproducing the bug.
+- **A fix's own side effects are the first hypothesis for a regression that follows it, not the
+  last.** The failure appeared immediately after `reasoning = false` landed and was attributed to
+  model capability across several exchanges. The operator's *"before, it could handle this fine"* is
+  what reopened it. A trace shows what happened, not what changed — for that you need the A/B.
+- **The blank turn genuinely was hiding something**, so the original instinct was sound; what it was
+  hiding just wasn't a model limitation. Fixing a silent-drop bug makes the next problem appear, and
+  the next problem may still be yours.
+
+Still open and genuinely separable: nothing here establishes how this model behaves at 11 tools once
+`reasoning=true` is on and the prompt is not truncated (§3.3) — it succeeded on `list files in
+workspace`, which is one call. `DEEPAGENTS_LEAN_TOOLS` remains the lever if a harder task stalls.
 
 ### 3.3 The blind spot has a second direction — server-side truncation
 

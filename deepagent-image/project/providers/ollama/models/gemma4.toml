@@ -32,26 +32,36 @@ context_window = 65536
 # `100% GPU`, because exceeding VRAM offloads layers to CPU and throughput falls off
 # a cliff rather than degrading smoothly -- and update `context_window` above to match.
 #
-# reasoning = false sends Ollama `think: false`.
+# reasoning = true sends Ollama `think: true`. Required, and NOT interchangeable
+# with `false` or with leaving it unset -- all three behave differently here.
 #
-# Measured 2026-08-17 (milestone7.md sec 3.1): this tag emits a `thinking` field by
-# default (1389 chars against 995 of content on a plain prompt), and
-# langchain-ollama 1.1.0 captures `message.thinking` ONLY when `reasoning` is
-# truthy -- so with it unset the harness silently discards every reasoning token
-# the model produces. Usually that only loses the reasoning; when the model puts
-# ALL of its output in thinking (observed on the real 7583-token, 11-tool agent
-# request) `content` comes back empty and the turn renders blank with no error.
+# Measured 2026-08-17 (milestone7.md sec 3.1/3.2). This tag reasons by default
+# (1389 chars of `thinking` against 995 of content on a plain prompt), and
+# langchain-ollama 1.1.0 captures Ollama's `message.thinking` ONLY behind a truthy
+# `reasoning` guard:
 #
-# `false` makes the model spend those tokens on content and tool calls. Verified
-# on the sibling tag: with it set, the same prompt returns a correct structured
-# `ls` tool call instead of nothing.
+#     if reasoning and (thinking_content := stream_resp["message"].get("thinking")):
+#         additional_kwargs["reasoning_content"] = thinking_content
 #
-# To keep the reasoning instead of suppressing it, use `reasoning = true` -- it
-# captures thinking into `additional_kwargs` rather than dropping it. Do NOT just
-# delete this line: unset is the broken state, not the neutral one.
+#   unset  -- the model reasons, the client DISCARDS the result. Usually that just
+#            loses the reasoning; when the model puts all of its output in
+#            thinking, `content` is empty and the turn renders blank with no error
+#            anywhere. This is the bug that started the investigation.
+#   false  -- no tokens are lost, but the model loses the channel it plans in, and
+#            AGENTIC TOOL USE BREAKS. Measured on the real 11-tool agent: zero
+#            structured tool calls, and the model either asks the user for an
+#            absolute path or emits pseudo-syntax as prose (`ls {path: "."}`).
+#            A one-tool probe still passes, which is how this hid at first.
+#   true   -- thinking is captured into `additional_kwargs["reasoning_content"]`
+#            rather than dropped, `content` carries the answer, and the same
+#            prompt returns a correct structured `ls` call. This is the setting.
+#
+# So the two failure modes pull in opposite directions and only `true` satisfies
+# both. Do not "simplify" this to false, and do not delete the line -- unset is
+# the silent-drop state, not a neutral default.
 [options]
 num_ctx = 65536
-reasoning = false
+reasoning = true
 
 # Watt-hours per token (optional estimate; tracked even for free models).
 [energy]
