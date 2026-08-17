@@ -169,6 +169,54 @@ def test_final_message_text_non_dict_result():
     assert agent.final_message_text("raw") == "raw"
 
 
+# --- M7: reasoning-only turns (measured 2026-08-17, milestone7.md §3.1) ---------
+#
+# The drop above is right when there IS an answer. When the model's whole output was
+# reasoning, dropping it renders the turn as nothing -- indistinguishable from a
+# crash, a refusal, or silence. These pin the fallback AND that it stays a fallback.
+
+
+class _MsgKw(_Msg):
+    def __init__(self, content, **kwargs):
+        super().__init__(content)
+        self.additional_kwargs = kwargs.pop("additional_kwargs", {})
+
+
+def test_final_message_text_surfaces_reasoning_when_there_is_no_answer():
+    # The measured langchain-ollama shape once `reasoning` is truthy: the thinking
+    # lands in additional_kwargs and `content` is empty. Pre-fix this returned "".
+    msg = _MsgKw("", additional_kwargs={"reasoning_content": "step 1: list the files"})
+    out = agent.final_message_text({"messages": [msg]})
+    assert "step 1: list the files" in out
+    # Marked, never passed off as the model's answer.
+    assert "only reasoning" in out
+
+
+def test_final_message_text_surfaces_reasoning_from_a_content_block():
+    # The other shape: a typed block inside content, with no text part beside it.
+    msg = _Msg([{"type": "thinking", "thinking": "the user wants a listing"}])
+    out = agent.final_message_text({"messages": [msg]})
+    assert "the user wants a listing" in out
+    assert "only reasoning" in out
+
+
+def test_reasoning_fallback_never_fires_when_an_answer_exists():
+    # The regression this must not cause: reasoning leaking into a real reply (and
+    # into the headless JSON). Guards test_final_message_text_drops_thinking_parts
+    # from the other direction -- both sources of reasoning present, answer wins.
+    msg = _MsgKw(
+        [{"type": "thinking", "thinking": "17+25=42"}, {"type": "text", "text": "42"}],
+        additional_kwargs={"reasoning_content": "17+25=42"},
+    )
+    assert agent.final_message_text({"messages": [msg]}) == "42"
+
+
+def test_final_message_text_empty_stays_empty_without_reasoning():
+    # No answer and no reasoning is still the empty string -- the fallback must not
+    # invent a note for a turn that genuinely produced nothing.
+    assert agent.final_message_text({"messages": [_MsgKw("")]}) == ""
+
+
 # --- _WorkspaceShellBackend path nesting fix -------------------------------
 
 def test_backend_strips_real_root_prefix_to_avoid_nesting(workspace_sandbox):

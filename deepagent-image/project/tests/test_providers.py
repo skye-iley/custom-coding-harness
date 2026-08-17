@@ -288,6 +288,72 @@ def test_options_absent_resolves_empty(tmp_path, monkeypatch):
     assert providers.resolve_model_options("acme:m1") == {}
 
 
+# --- `:latest` normalization -------------------------------------------------
+#
+# Regression for a silent, two-sided failure measured 2026-08-17: `ollama list`
+# prints `gemma4:latest`, but the registry entry is named `gemma4`, so that
+# spelling matched nothing, resolved to zero options, and ran at Ollama's default
+# num_ctx of 2048. A ~7583-token agent prompt was truncated to 2051 server-side --
+# left-truncated, so the model kept the tail and saw only the last 3 of its 11
+# tools. Nothing errored, and the raw trace still (correctly) said `tools (11)`.
+
+
+def test_latest_tag_resolves_to_the_registered_stem(tmp_path, monkeypatch):
+    _write_provider(
+        tmp_path, "acme", api_key_env="ACME_API_KEY",
+        models=[("m1", "[options]\nnum_ctx = 32768\n")],
+    )
+    monkeypatch.setattr(providers, "PROVIDERS", providers._load_providers(tmp_path))
+    monkeypatch.delenv(providers.MODEL_OPTIONS_ENV, raising=False)
+    # `m1` and `m1:latest` are the same model; both must carry the same options.
+    assert providers.resolve_model_options("acme:m1:latest") == {"num_ctx": 32768}
+    assert providers.resolve_model_options("acme:m1") == {"num_ctx": 32768}
+
+
+def test_an_explicit_latest_entry_still_wins_over_the_stem(tmp_path, monkeypatch):
+    # The fallback must not shadow a registry that genuinely declares `:latest`.
+    _write_provider(
+        tmp_path, "acme", api_key_env="ACME_API_KEY",
+        models=[("m1", "[options]\nnum_ctx = 1\n"),
+                ("m1-latest", '[options]\nnum_ctx = 2\n')],
+    )
+    # The loader keys on `name`, so rewrite the second file's name to the real tag
+    # (a colon is illegal in a Windows filename -- the same reason the shipped
+    # gemma4 tag file is named by stem and carries `name` explicitly).
+    (tmp_path / "acme" / "models" / "m1-latest.toml").write_text(
+        'name = "m1:latest"\n[options]\nnum_ctx = 2\n', encoding="utf-8"
+    )
+    monkeypatch.setattr(providers, "PROVIDERS", providers._load_providers(tmp_path))
+    monkeypatch.delenv(providers.MODEL_OPTIONS_ENV, raising=False)
+    assert providers.resolve_model_options("acme:m1:latest") == {"num_ctx": 2}
+    assert providers.resolve_model_options("acme:m1") == {"num_ctx": 1}
+
+
+def test_an_unknown_tag_does_not_inherit_a_sibling(tmp_path, monkeypatch):
+    # Only `:latest` is an alias for the stem. A real tag names a different model
+    # and must keep resolving to nothing rather than silently borrowing settings.
+    _write_provider(
+        tmp_path, "acme", api_key_env="ACME_API_KEY",
+        models=[("m1", "[options]\nnum_ctx = 32768\n")],
+    )
+    monkeypatch.setattr(providers, "PROVIDERS", providers._load_providers(tmp_path))
+    monkeypatch.delenv(providers.MODEL_OPTIONS_ENV, raising=False)
+    assert providers.resolve_model_options("acme:m1:custom") == {}
+
+
+def test_latest_normalization_applies_to_rates_too(tmp_path, monkeypatch):
+    # rates_for and options_for share the key, so pricing must not silently
+    # disagree with options about which spelling is which model.
+    _write_provider(
+        tmp_path, "acme", api_key_env="ACME_API_KEY", pricing="rate_table",
+        models=[("m1", "[pricing]\ninput = 1.0\noutput = 2.0\n")],
+    )
+    [provider] = providers._load_providers(tmp_path)
+    monkeypatch.setattr(providers, "PROVIDERS", [provider])
+    assert provider.rates_for("acme:m1:latest") is not None
+    assert provider.rates_for("acme:m1:latest") == provider.rates_for("acme:m1")
+
+
 def test_model_options_override_provider_options(tmp_path, monkeypatch):
     _write_provider(
         tmp_path, "acme", api_key_env="ACME_API_KEY",

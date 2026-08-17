@@ -129,6 +129,133 @@ Three distinct things hide inside "as close as possible to what the model sees":
   `/api/show` and re-implementing Go template semantics in Python — a second copy of someone else's
   renderer, wrong in exactly the cases you were debugging.
 
+### 3.1 L1's blind spot, measured — the case for L2
+
+L2 was deferred on the condition above: *"the natural next slice if L1 turns out to be hiding
+something."* It has. **Measured 2026-08-17**, first real diagnostic use of the shipped trace, on
+`ollama:gemma4:harnesstest1`:
+
+| Field | Value |
+|---|---|
+| `usage_metadata.output_tokens` | 450 |
+| `response_metadata.eval_count` | 450 |
+| `done_reason` | `stop` |
+| `content` | `""` |
+| `tool_calls` / `invalid_tool_calls` | 0 / 0 |
+| `additional_kwargs` | `{}` |
+
+450 tokens generated, billed, counted by M6 — and present in **no field of the message**. The turn
+rendered as a blank REPL reply with no error anywhere.
+
+Cause, confirmed against the installed source: Ollama returns reasoning in `message.thinking`, a
+**sibling** of `message.content`, and `langchain-ollama` 1.1.0 captures it only behind a truthy
+guard (`chat_models.py:1264`) —
+
+```python
+if reasoning and (thinking_content := stream_resp["message"].get("thinking")):
+    additional_kwargs["reasoning_content"] = thinking_content
+```
+
+The harness passes no `reasoning`, so `think: null` goes out, the tag's own default is to think,
+and the returned reasoning is dropped. Its own docstring says so (`reasoning=None` … *"think tags
+… unless you set `reasoning` to `True`"*), which is what makes this a documented default rather
+than a bug in that library.
+
+**The trace was faithful and still could not show the answer.** The drop happens inside the
+provider's response parser, *before* the message object the L1 seam observes exists — invisible at
+L1 by construction, not by an implementation gap. Reaching it took a hand-rolled `/api/chat` probe
+plus reading the parser's source; **L2 would have shown `message.thinking` populated in the first
+minute.** That is the concrete argument for the slice, replacing the hypothetical one.
+
+Three things changed in response, none of which repair the blind spot — they narrow the cost of it:
+
+- `rawtrace._dropped_output_warning` — `output_tokens > 0` with an empty content/tool-calls/
+  `additional_kwargs` triple now prints a warning **above** the content in the record. L1 cannot say
+  *what* was lost; it can say *that something was*, instead of rendering a blank that reads like
+  silence. This generalizes past Ollama: any provider parser dropping generated text trips it.
+- `agent._reasoning_text` — a turn whose entire output was reasoning no longer renders as nothing.
+  §7's drop is right when there *is* an answer and wrong when the reasoning is all there is.
+- `providers/ollama/models/gemma4*.toml` — `reasoning = true` for both gemma4 tags, so the thinking
+  is **captured** into `additional_kwargs` instead of discarded. Per-tag, not per-provider:
+  reasoning-by-default is a property of the tag (`llama3.1`, measured, emits no thinking at all).
+  §3.2 records why `false` — the first thing tried — is the wrong branch.
+
+### 3.2 `reasoning = false` was the wrong branch — and the "model failure" it caused
+
+The first fix for §3.1 set `reasoning = false`, reasoning that if the thinking channel is being
+discarded, the cleanest repair is to stop the model using it. That removed the token loss and
+introduced a worse failure, which was then **misdiagnosed as the model's**.
+
+With `false`, the same task through `run-docker` returned:
+
+```
+--- response (18084 ms) | finish_reason=stop ---
+ls{path:".conda/env"}
+--- tool_calls (0) ---
+usage_metadata: {"input_tokens": 7583, "output_tokens": 10, "total_tokens": 7593}
+```
+
+Made-up textual tool syntax, wrong path, `tool_calls` empty — `design_doc.md` §11's motivating case,
+*hallucinated tool JSON*, apparently reproduced live. It was written up here as a separable
+weak-model limitation. It was not. A/B on the real 11-tool agent, same model, same prompt, only the
+setting varying:
+
+| `reasoning` | tool calls | final reply |
+|---|---|---|
+| `false` | **none** | `"What is the absolute path to the workspace directory…"` |
+| `true` | **`ls`** | `"The files in the workspace are: /hello.txt"` |
+
+Identical on both gemma4 tags. **The model plans in the thinking channel**; take it away and agentic
+tool use collapses into prose. So the two failure modes pull in opposite directions and only `true`
+satisfies both — thinking captured to `additional_kwargs` rather than dropped, `content` carrying the
+answer, tool calls intact.
+
+Three lessons, and the second is the one that cost the most:
+
+- **A one-tool probe cannot see this.** With a single plainly-specified tool bound, `reasoning=false`
+  returns `{'name': 'ls', 'args': {'path': '/project/workspace'}}` correctly. That probe was used to
+  *retract* an earlier correct suspicion about tool use, on the grounds that the small case worked.
+  A probe simple enough to isolate a variable is often simple enough to stop reproducing the bug.
+- **A fix's own side effects are the first hypothesis for a regression that follows it, not the
+  last.** The failure appeared immediately after `reasoning = false` landed and was attributed to
+  model capability across several exchanges. The operator's *"before, it could handle this fine"* is
+  what reopened it. A trace shows what happened, not what changed — for that you need the A/B.
+- **The blank turn genuinely was hiding something**, so the original instinct was sound; what it was
+  hiding just wasn't a model limitation. Fixing a silent-drop bug makes the next problem appear, and
+  the next problem may still be yours.
+
+Still open and genuinely separable: nothing here establishes how this model behaves at 11 tools once
+`reasoning=true` is on and the prompt is not truncated (§3.3) — it succeeded on `list files in
+workspace`, which is one call. `DEEPAGENTS_LEAN_TOOLS` remains the lever if a harder task stalls.
+
+### 3.3 The blind spot has a second direction — server-side truncation
+
+Both cases above lose data on the **response** side. A third, found while building a negative control
+for §3.1's warning, loses it on the **request** side, and L1 cannot see that either.
+
+Running `ollama:gemma4:latest` — the spelling `ollama list` prints — the trace read
+`--- tools (11) ---` and `input_tokens: 2051`, on two consecutive turns. Identical input counts
+across turns whose histories differ by 1694 tokens is the signature of truncation to a fixed
+ceiling, and 2051 ≈ Ollama's default `num_ctx` of 2048. The registry entry is named `gemma4`, so the
+`:latest` spelling matched nothing, resolved to zero options, and never received the registry's
+`num_ctx = 65536`. About 5500 tokens were discarded by the daemon — from the **left**, so the model
+kept the tail and saw only the last 3 of its 11 tool schemas. It then described exactly those three
+when asked what tools it had.
+
+The trace was not wrong: the harness really did send 11 tools, and L1 records what the harness
+emitted. What it cannot record is what the server discarded before the model read it. So the symptom
+— *"the model only knows about the last three tools"* — reads as a model attention problem and is
+actually a config miss two layers away. The fix is `Provider.registry_key` normalizing a trailing
+`:latest` to the registered stem (`providers.py`), since in Ollama `name` and `name:latest` are the
+same model by definition; verified by the same run going 2051 → **7583** input tokens.
+
+Three measured cases now, in three different places: a response-parser drop, a model-behaviour
+failure the first was masking, and a server-side request truncation. Only the middle one is visible
+at L1. That is not an argument that the trace is weak — it caught all three by making the numbers
+disagree in public — but it is a standing argument that **L1's honest scope is "what the harness
+handed over"**, and every question of the form *"what did the model actually read"* needs L2 or the
+server's own logs. §12's done-when already requires saying so; these are the cases that show why.
+
 Raw tags are **ideal, not required**. The requirement is *everything the harness receives or emits*,
 which L1 satisfies completely. §12 requires `design_doc.md` §11 to be corrected so an operator who
 needs L3 is sent to `OLLAMA_DEBUG=1` / `/api/show` by name rather than discovering the gap by

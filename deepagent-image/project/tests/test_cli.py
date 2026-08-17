@@ -2110,3 +2110,34 @@ def test_config_save_persists_an_edited_raw_trace(tmp_path, monkeypatch):
         rebuild_agent=None, edited=edited, raw_trace=trace,
     )
     assert "raw_trace: file" in (tmp_path / cfg.PROFILE_NAME).read_text(encoding="utf-8")
+
+
+def test_the_live_model_rebuild_passes_every_kwarg_the_startup_build_does():
+    """`/config set model` must not silently drop a `build_agent` kwarg.
+
+    Regression: `_rebuild_agent` omitted `raw_trace=`, so a mid-session model
+    switch left the new agent with no `RawTraceMiddleware` while `run_repl` still
+    held the old object — `_suppress_answer` kept returning True in
+    console/both, and every later turn printed neither a trace nor an answer.
+    No error anywhere.
+
+    Asserted against the SOURCE rather than a behavioural stub because the defect
+    is an *omission*: the two call sites drifting is the bug class, and only a
+    comparison of the two can catch the next kwarg someone forgets. `main` builds
+    its `_rebuild_agent` as a closure, so there is no object to introspect.
+    """
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse(Path(cli.__file__).read_text(encoding="utf-8"))
+    calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name) and node.func.id == "build_agent"
+    ]
+    assert len(calls) == 2, f"expected the startup + rebuild call sites, found {len(calls)}"
+    kwargs = [{kw.arg for kw in call.keywords} for call in calls]
+    assert kwargs[0] == kwargs[1], (
+        "build_agent call sites disagree; the rebuild path is missing "
+        f"{kwargs[0] ^ kwargs[1]}"
+    )

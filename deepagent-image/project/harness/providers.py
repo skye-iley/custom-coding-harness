@@ -67,16 +67,47 @@ class Provider:
     options_table: dict = field(default_factory=dict)
     model_options: dict[str, dict] = field(default_factory=dict)
 
+    def registry_key(self, model: str) -> str:
+        """The bare id a full model spec looks up under.
+
+        Normally just the spec minus the prefix. The exception is an explicit
+        `:latest` tag: in Ollama `gemma4` and `gemma4:latest` are the SAME model
+        by definition — `:latest` is the implicit default tag — but they are two
+        different dict keys, so a registry entry named `gemma4` used to match
+        only the first spelling. `ollama list` prints the second, which is the
+        spelling a user is most likely to copy.
+
+        Measured cost of the miss (2026-08-17): `ollama:gemma4:latest` resolved
+        to zero options, so it ran at Ollama's default `num_ctx` of 2048 instead
+        of the registry's 65536. A ~7583-token agent prompt was silently
+        truncated to 2051 — Ollama truncates from the left, so the model kept the
+        tail and received only the last 3 of its 11 tool schemas. No error on
+        either side; the raw trace still says `--- tools (11) ---` because the
+        harness really did send 11.
+
+        The fallback is deliberately conservative: it redirects **only** when the
+        stem is itself a registered model, so a registry that genuinely declares
+        `foo:latest` keeps winning, and an unknown tag still resolves to nothing
+        rather than silently inheriting a sibling's settings.
+        """
+        bare = model[len(self.prefix):]
+        if self.prefix + bare in self.models:
+            return bare
+        stem, sep, tag = bare.rpartition(":")
+        if sep and tag == "latest" and stem and self.prefix + stem in self.models:
+            return stem
+        return bare
+
     def rates_for(self, model: str) -> ModelRates | None:
         """ModelRates for a full model spec, keyed by the bare id after prefix."""
-        return self.model_rates.get(model[len(self.prefix):])
+        return self.model_rates.get(self.registry_key(model))
 
     def options_for(self, model: str) -> dict:
         """Client kwargs for a full model spec: provider [options], then the
         model's own [options] on top. Registry tiers only — the env tier is
         applied by resolve_model_options."""
         merged = dict(self.options_table)
-        merged.update(self.model_options.get(model[len(self.prefix):], {}))
+        merged.update(self.model_options.get(self.registry_key(model), {}))
         return merged
 
 

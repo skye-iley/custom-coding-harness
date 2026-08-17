@@ -725,12 +725,106 @@ way `git-branch` / `git-pr` are instances of the side-effect tier.
 *   **Custom Agents (via `create_deep_agent`)**:
     *   *Nature*: Bespoke agents utilizing custom `HarnessProfile`, specific `middleware`, and tailored system prompts.
     *   *Pros*: Absolute control over tool access, output formatting, and reasoning steps.
-    *   *Cons*: Higher development overhead; requires manual tuning of prompts.
+    *   *Cons*: Higher development overhead; requires manual tuning of prompts. The control is real
+        but not via the obvious parameter — `system_prompt=` cannot replace the SDK base prompt, and
+        profile keys cannot name an Ollama tag. See "Per-agent prompts & profiles" below before
+        designing around this.
     *   *Best For*: Expert Main Orchestrators.
 
 *   **Hybrid Combination (Recommended)**:
     *   **Classifier (Pi-style)** $\rightarrow$ **Orchestrator (Custom)** $\rightarrow$ **Worker (Base)**.
     *   Ensures a "funnel" of efficiency: fast classification, precise planning, and reliable execution.
+
+### Per-agent prompts & profiles — measured constraints
+
+> **Measured 2026-08-17** against the installed `deepagents` (`langchain-ollama` 1.1.0), using the
+> M7 raw trace as the instrument — every claim below is an observed assembled system prompt, not a
+> reading of the docstrings. Probe scripts are disposable; the numbers are reproducible by setting
+> `DEEPAGENTS_RAW_TRACE=file` and diffing the `--- system ---` section.
+>
+> `deepagents.profiles` is flagged **beta** by its own docstring. Everything here is a current-version
+> observation and needs a pinning test if the funnel depends on it.
+
+The "Custom Agents" option above promises *absolute control* over prompts via `HarnessProfile`. It is
+reachable, but not through the obvious parameter, and four constraints shape how a funnel must be
+built. They matter now because they are cheap to design around and expensive to retrofit.
+
+**1. `system_prompt=` cannot replace the SDK base — it only prepends.** Assembly is
+`USER` → (`BASE` or `CUSTOM`) → `SUFFIX`, joined by blank lines. `create_deep_agent(system_prompt=…)`
+is the `USER` slot and always lands in front of `BASE_AGENT_PROMPT`; no value suppresses it. The
+replacement lever is `HarnessProfile.base_system_prompt` (the `CUSTOM` slot). Measured on a real
+turn: assembled system prompt 10271 chars → **8039** with `base_system_prompt` set, SDK base absent,
+harness `USER` text still first.
+
+**2. Neither prompt is where the tokens are.** Of that 10271: harness `BASE_SYSTEM_PROMPT` 306,
+`AGENTS.md` 2227, SDK `BASE_AGENT_PROMPT` 2258 — the remaining **~5500 is middleware-injected**
+(filesystem, todo, subagent). A funnel that shrinks worker context by rewriting prompts is optimizing
+the smaller half; `excluded_tools` / `excluded_middleware` are the bigger lever, and the harness
+already exposes the tool half as `DEEPAGENTS_LEAN_TOOLS` / `DEEPAGENTS_EXCLUDE_TOOLS`.
+
+**3. Profile keys cannot express an Ollama tag, and a two-colon spec disables profiles silently.**
+`validate_profile_key` permits at most one `:`, so `ollama:gemma4:harnesstest1` is unregisterable —
+an Ollama *tag* contains the colon the grammar spends on the provider separator. Worse,
+`resolve_harness_profile` returns `None` on `spec.count(":") > 1` **without consulting the registry**,
+so a two-colon spec matches nothing at all — not even a provider-level registration. What decides
+which path a model takes is unrelated to prompts: `providers.resolve_chat_model` returns a
+constructed client only when the model has `[options]` or a rate limiter, else the bare string.
+
+| what `create_deep_agent` receives | exact key `ollama:gemma4` | provider key `ollama` |
+|---|---|---|
+| string `ollama:gemma4` (one colon) | wins | fallback |
+| string `ollama:gemma4:harnesstest1` (two colons) | ✗ | ✗ **nothing applies** |
+| model object, identifier has no colon | wins | fallback |
+| model object, identifier is a tag | ✗ | wins |
+
+Objects degrade gracefully (provider always resolves, since the provider is read structurally rather
+than parsed); two-colon *strings* fail closed and silently. **A funnel must normalize this at the
+boundary** — either guarantee a model object reaches `create_deep_agent`, or fail loudly — because in
+a multi-agent build the symptom is one worker quietly running an un-profiled prompt while the others
+look correct.
+
+There is no alias seam. `_harness_profile_for_model` accepts a `spec` string only when `model` is
+itself that string, and the same string builds the client — so a normalized key like
+`ollama:llama3.1-8b` would resolve the profile correctly and then 404 at the daemon. Renaming models
+upstream (`ollama cp llama3.1:8b llama3.1-8b`) works but forks local model names from everyone else's
+and costs a step per model.
+
+**4. Profiles bake at build time, which makes per-model keys unnecessary.** The assembled prompt is
+fixed when `create_deep_agent` returns; a later registration does not reach an already-built agent
+(measured: agent one kept its prompt after the registry was rewritten for agent two). So the funnel
+can register the profile it wants **immediately before each agent's build** and get per-agent
+profiles with no key at all — sidestepping constraint 3 entirely.
+
+Two things bound that technique:
+
+- **Registration merges; omitted fields leak.** `_register_harness_profile_impl` merges onto an
+  existing registration ("scalar fields prefer the new value, set and middleware fields union").
+  Measured: a third registration setting only `system_prompt_suffix` silently inherited the second
+  agent's `base_system_prompt`, and the SDK base did **not** come back. Per-agent switching must set
+  every field explicitly on every registration, including passing `BASE_AGENT_PROMPT` when the
+  default is what is wanted. Omission is not reset.
+- **Construction is a critical section; execution is not.** `_HARNESS_PROFILES` is a plain
+  module-level dict — no lock, no `ContextVar`. Register→build must not interleave across agents, or
+  a builder reads a profile another builder wrote (and the merge means both end up with fields
+  neither asked for, with no error). **Running** built agents in parallel is safe, since a compiled
+  graph never consults the registry again.
+
+**Design rule for the funnel.** Split the two axes rather than keying prompts on models:
+
+- *Role* varies per agent (classifier / orchestrator / worker) → author it on the agent, via the
+  subagent spec's own `system_prompt` or the `USER` slot. A plain argument, immune to all of the
+  above. `GeneralPurposeSubagentProfile.system_prompt` covers the auto-added GP subagent and beats
+  `profile.base_system_prompt` for that stack.
+- *Model family* is shared → one `HarnessProfile` (base override, tool exclusions, suffix) registered
+  **once, before any build**. Then the critical section happens exactly once at startup and the
+  concurrency question does not arise.
+
+Note `system_prompt_suffix` is applied to **every** stack it can reach — main agent, declarative
+subagents, and the GP subagent each receive it on top of their own base. It is not a main-agent knob.
+
+Sequential per-agent registration additionally requires each agent be its **own** `create_deep_agent`
+call (a `CompiledSubAgent`), since declarative subagents are assembled inside the parent's single
+call and all resolve against whatever is registered at that moment.
 
 ### Alternative Lightweight Patterns
 *   **Plan-and-Execute**: Decouples the planning phase from the execution phase. Prevents the agent from "forgetting" the goal during long tool-call sequences, reducing redundant tokens.
@@ -1083,7 +1177,8 @@ system_interrupts:                # which harness events raise (vs. log/crash)
 
 ### Framework Enhancements
 *   **Raw prompt/response debug mode** — **BUILT as Milestone 7**
-    (`docs/milestones/complete/milestone7.md`, authoritative where the two disagree).
+    (`docs/milestones/in-progress/milestone7.md` until the branch merges, then
+    `docs/milestones/complete/`; authoritative where the two disagree).
     `DEEPAGENTS_RAW_TRACE` / `--raw-trace` / `/config set raw_trace` is a four-valued knob
     (`off`/`file`/`console`/`both`) that records, **per model call**, the literal payload the
     harness hands the model and the whole object the model hands back — final system prompt, full
