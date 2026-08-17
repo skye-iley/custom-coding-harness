@@ -41,13 +41,15 @@ identity — dependency chain" list; `features/` holds the two named non-milesto
 
 ## In-progress milestones — `milestones/in-progress/`
 
-- **`milestone7.md`** — **Raw Trace Debug Mode** (`design_doc.md` §11): `DEEPAGENTS_RAW_TRACE=1`
+- **`milestone7.md`** — **Raw Trace Debug Mode** (`design_doc.md` §11): `DEEPAGENTS_RAW_TRACE=file`
   writes, per model call, the literal payload the harness hands the model — final system prompt,
   full message history, tool schemas, tool-call/tool-result blocks — so a weak-model failure
   (hallucinated tool JSON, ignored instructions, a tool the model never saw) is diagnosable from the
   harness's own output instead of by switching on the model server's debug logging
-  (`OLLAMA_DEBUG=1`, the workaround this removes). **Spec only — no code yet**, on
-  `feat/raw-trace-debug`. Complements M6 rather than overlapping it: telemetry says the tool-error
+  (`OLLAMA_DEBUG=1`, the workaround this removes). **Built — S1–S5 all landed** on
+  `feat/raw-trace-debug`; §0 is the build status and §0.2 what the build changed about the plan.
+  Moves to `complete/` (invariants folded in) when the branch merges. Complements M6 rather than
+  overlapping it: telemetry says the tool-error
   rate spiked at turn 7 and deliberately carries no text; this says what the model was looking at.
   Two decisions worth knowing before reading: the capture point is the **innermost**
   `wrap_model_call`, *after* `_ExcludeToolsMiddleware`, because a trace taken one layer out logs

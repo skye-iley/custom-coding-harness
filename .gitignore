@@ -53,3 +53,11 @@ deepagent-image/netjail/allowed-domains.txt
 deepagent-image/test-artifacts/
 deepagent-image/.ephemeral/
 deepagent-image/workspace-logs/
+
+# Locally-created Ollama tags (`ollama create gemma4:harnesstest1`). The registry
+# is a shipped table, and a spec for a tag that exists on exactly one machine is
+# personal state in it — inert for everyone else, but noise that reads as a
+# supported model. Keep the file locally so the tag carries its num_ctx/reasoning
+# metadata here; anything that generalizes belongs in the tag's base model TOML
+# (gemma4.toml already carries the reasoning measurement).
+deepagent-image/project/providers/*/models/*-harnesstest*.toml

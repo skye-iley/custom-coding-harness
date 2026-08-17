@@ -140,7 +140,7 @@ secret-safe containers.
   - `docs/milestones/in-progress/` — **being built** milestones (doc + separate invariants doc + code
     on a feature branch).
     - `milestone7.md` (+ `milestone7_invariants.md`) — **Raw Trace Debug Mode**
-      (`design_doc.md` §11). `DEEPAGENTS_RAW_TRACE=1` writes, per model call, the literal payload
+      (`design_doc.md` §11). `DEEPAGENTS_RAW_TRACE=file` writes, per model call, the literal payload
       the harness hands the model — final system prompt, full message history, tool schemas,
       tool-call/tool-result blocks — for diagnosing weak/local-model failures (hallucinated tool
       JSON, ignored instructions, a tool the model never saw) without falling back to the model
