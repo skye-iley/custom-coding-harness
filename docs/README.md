@@ -35,14 +35,45 @@ A milestone moves through three folders. What each stage carries is deliberate:
 
 ## Planned milestones — `milestones/planned/`
 
-*(Empty — nothing is queued. The forward candidates live in `design_doc.md` §11 (the benchmark
-ladder), §13 (file-read middleware), §12.6 (deepagents-native skills/memories), and the "Core
-identity — dependency chain" list; `features/` holds the two named non-milestone plans.)*
+*(Empty — nothing is queued. `milestone8.md` moved to `in-progress/`. Other forward candidates, not
+yet written up: `design_doc.md` §13 (file-read middleware), §12.6 (deepagents-native
+skills/memories), and the "Core identity — dependency chain" list; `features/` holds the two named
+non-milestone plans.)*
 
 ## In-progress milestones — `milestones/in-progress/`
 
-*(Empty — nothing is being built. The last occupant, `milestone7.md`, merged and moved to
-`complete/` with its invariants folded in.)*
+- **`milestone8.md`** — **Benchmark Ladder, Tier 1 (Gold Set)** (`design_doc.md` §11): run the
+  harness over a pinned set of bug-fix tasks, unattended, on the free local model, and have each run
+  emit a scorable `git diff` plus a telemetry row that joins to it. **Plan + invariants written, no
+  code yet.** The case for it is that the three defects before it — `num_ctx` silently 2048,
+  discarded `message.thinking`, `reasoning = false` — each degraded *every run* and none was caught
+  by ~1000 passing tests; one was found by an operator saying "before, it could handle this fine".
+  Three slices: hard stops (B1), `--emit-patch` (B2), a `harness/bench/` driver (B3), then the gold
+  set (B4) and a baseline record (B5). Two traps are called out up front: **`--max-turns` is not the
+  benchmark bound** (§3 — an instance is one headless turn, the runaway is the ReAct loop inside it,
+  and the only thing bounding that is a `recursion_limit` the harness never sets, whose pinned
+  default is **10007**, not the widely-quoted 25 — no bound at all on a free model — and whose
+  `GraphRecursionError` is classified as `error`), and **`git diff` is blind to untracked files**
+  (§5.2 — a fix delivered as a new file emits an empty patch that applies as a no-op and scores 0,
+  with a signature identical to "the model did nothing"). Scoring is a hard non-goal (§9): the
+  contract is the predictions jsonl, and correctness stays with the official evaluation harness. It
+  is also the first real consumer of M6 §5b, which is half its value — telemetry nobody has consumed
+  is telemetry nobody has validated (§6). §12 resolves the four design forks; **§13 records six
+  assumptions checked against the code rather than inferred**, all six closed. One **seam** is
+  declared without being built: a `Runner` protocol with `HolderRunner` as its only implementation,
+  and patch extraction deliberately *off* the protocol so the driver does it uniformly — which is
+  what would let tier 2 point the same dataset at Aider or SWE-agent. Consequence for v1, and the
+  reason it is a seam and not a note: the extractor lives in `harness/bench/patch.py` and the driver
+  calls it directly, so `--emit-patch` is a convenience rather than the mechanism, and the driver —
+  not `EPHEMERAL=1` — owns the scratch workspace.
+- **`milestone8_invariants.md`** — the checkable properties, written before the code: bounds (each
+  bound terminates its own runaway, a stop records `stopped` + `stop_reason` and never `error`, an
+  unset bound is *absent* rather than infinite), patch fidelity (an untracked new file appears; the
+  patch is asserted by **applying** it to a fresh base, never by substring — the M7 §0.2 lesson),
+  sweep integrity (resume, one failure never aborts, empty patches counted loudly), joinability (the
+  key is `run_id` and never `thread_id`; `null` cost stays null), containment/non-interference (no
+  branch, no PR, keyless import profile), and removability. Folds into `milestone8.md` on
+  completion.
 
 ## Complete milestones — `milestones/complete/`
 
