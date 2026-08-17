@@ -180,10 +180,9 @@ secret-safe containers.
       `repr`. It was caught by *reading a real trace*. A substring assertion against a serialised
       blob cannot tell verbatim from escaped.
   - `docs/milestones/in-progress/` — **being built** milestones (doc + separate invariants doc + code
-    on a feature branch). *(Currently empty — M7 merged and moved to `complete/`.)*
-  - `docs/milestones/planned/` — **not-yet-built** milestones (docs only). Wins over `design_doc.md`
-    for "what we build next."
-    - `milestone8.md` — **Benchmark Ladder, Tier 1 (Gold Set)** (`design_doc.md` §11). Make the
+    on a feature branch).
+    - `milestone8.md` (+ `milestone8_invariants.md`) — **Benchmark Ladder, Tier 1 (Gold Set)**
+      (`design_doc.md` §11). **Plan + invariants written, no code yet.** Make the
       harness runnable over a pinned set of coding tasks, unattended, on the free local model, and
       make each run emit a scorable patch plus a joinable telemetry row. Three slices: **hard
       stops** (B1), **`--emit-patch`** (B2), and the **`harness/bench/` batch driver** (B3), plus
@@ -204,7 +203,19 @@ secret-safe containers.
       contract is the predictions jsonl, correctness stays with the official evaluation harness.
       The milestone is also **the first real consumer of M6 §5b** — the wall-clock decomposition,
       `run_id`/`topic`/`usage_log`, the never-`0.0` `cost_usd` — so a join that does not work is the
-      milestone finding something, not a blocker (§6).
+      milestone finding something, not a blocker (§6). **§12 resolves the four design forks**
+      (bounds unset by default but the driver always passes them; a stdlib-only `harness/limits.py`
+      + its own `DeadlineMiddleware` rather than folding into `TelemetryMiddleware`; `harness/bench/`
+      over `scripts/bench.py`; cross-platform via launcher selection), and **§13 records six
+      assumptions checked against the code rather than inferred** — the load-bearing one being that
+      the ephemeral copy keeps `.git` (`run-docker.sh:198–208` skips only `.conda`), without which
+      the whole patch design would have been unbuildable. `milestone8_invariants.md` is the
+      test-facing companion; its patch-fidelity group carries the M7 §0.2 lesson directly — **assert
+      a patch by applying it (`git apply --check`) against a fresh base, never by substring.**
+  - `docs/milestones/planned/` — **not-yet-built** milestones (docs only). Wins over `design_doc.md`
+    for "what we build next." *(Currently empty — M8 moved to `in-progress/`. Remaining forward
+    candidates live in `design_doc.md` §12.6, §13, and its "Core identity — dependency chain"
+    list.)*
   - `docs/features/workspace_visibility.md` — **named feature plan** (not a numbered milestone): restrict
     which workspace paths an agent can see (`.agentignore` policy, designated-secret floor, docker-mask
     → bwrap fs-tool jail → optional overlayfs). **Planned** — summarized in `design_doc.md` §2.

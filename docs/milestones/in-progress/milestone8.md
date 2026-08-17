@@ -1,8 +1,13 @@
 # Milestone 8 — Benchmark Ladder, Tier 1 (Gold Set)
 
-> **Status:** 📋 Planned — docs only, no code. `design_doc.md` §11 "Automated Benchmarking Suite"
-> is the parent entry; this doc is the concrete tier-1 slice and wins over it for *what we build
-> next*.
+> **Status:** 🚧 In progress — plan + `milestone8_invariants.md` written, **no code yet**.
+> `design_doc.md` §11 "Automated Benchmarking Suite" is the parent entry; this doc is the concrete
+> tier-1 slice and wins over it for *what we build next*.
+>
+> §12 records the four design forks as **resolved**, and §13 the six assumptions checked against the
+> code rather than inferred — one of which (`.git` surviving the ephemeral copy) the whole B2/B3
+> design would have been unbuildable without. One sub-check is still owed and is called out there:
+> whether PowerShell's parser passes `--`-prefixed flags through to `$TaskParts`.
 >
 > **Scope in one line:** make the harness runnable over a pinned set of coding tasks, unattended,
 > on a free local model, and make each run emit a scorable patch plus a joinable telemetry row —
@@ -180,6 +185,14 @@ Raises `DeadlineExceeded`.
 the same place `BudgetExceeded` already ends a session, so it inherits the deterministic-exit
 behaviour M1 established.
 
+**Where the code lives.** New stdlib-only `harness/limits.py`: `DeadlineExceeded`,
+`TurnLimitExceeded`, and the pure clock/counter logic (host tier, no langchain). The
+`DeadlineMiddleware` that calls it sits with the other middleware classes, since it needs the
+langchain base — the same split `telemetry.py`/`TelemetryMiddleware` and
+`rawtrace.py`/`RawTraceMiddleware` already use, for the same reason. §12 fork 2 records why this is
+not folded into `TelemetryMiddleware` and why `cost.py` is the wrong home despite owning
+`BudgetExceeded`.
+
 **The classifier.** `telemetry.OUTCOMES` gains **`OUTCOME_STOPPED = "stopped"`**, and
 `cli._turn_outcome` gains three lines mapping `GraphRecursionError` / `DeadlineExceeded` /
 `TurnLimitExceeded` to it. The record gains **`stop_reason`** (`"steps"` / `"seconds"` / `"turns"` /
@@ -273,10 +286,15 @@ present now so the format does not change under tier 2/3.
 
 **Per-instance loop:**
 
+0. **Refuse to start** unless a step bound and a time bound both resolved (§12 fork 1). A sweep with
+   no bound is the failure mode this milestone exists to remove; it must not be reachable by
+   forgetting a flag.
 1. Skip if `instance_id` is already in `predictions.jsonl` (resume; the file is append-only).
-2. Launch `run-docker` with `EPHEMERAL=1` (throwaway copy of the instance dir — already shipped,
-   already excludes `.conda`), `--headless`, `--emit-patch`, `--topic <instance_id>`, the §5.1
-   bounds, and `DEEPAGENTS_WORKFLOWS_DIR` pointed at an empty dir.
+2. Launch `run-docker` — `.ps1` on `win32`, `.sh` elsewhere (§12 fork 4) — with `EPHEMERAL=1`
+   (throwaway copy of the instance dir; already shipped, excludes `.conda` and **keeps `.git`**,
+   §13 item 2), `--headless`, `--emit-patch`, `--topic <instance_id>`, the §5.1 bounds, and
+   `DEEPAGENTS_WORKFLOWS_DIR` pointed at a **nonexistent** path — the loader returns early on a
+   missing directory (§13 item 3), so no empty directory has to be created or managed.
 3. Read the single JSON line from stdout. Anything on stderr is stage markers and stays there.
 4. Append one line to `predictions.jsonl` and one to `runs.jsonl`. **Flush both after every
    instance** — a sweep that dies at instance 40 of 50 must not lose 39.
@@ -296,18 +314,37 @@ also why `run_turn` already threads `telemetry` as a parameter rather than a mod
 
 ### 5.4 B4 — the gold set
 
-≥5 instances, committed under `benchmarks/gold/`. Each is a small self-contained project with a
-seeded bug, a failing test that pins it, and a passing test suite around it. Criteria:
+Five instances, committed under `benchmarks/gold/`. Each is a small self-contained Python project
+with a seeded bug, a failing test that pins it, and a passing suite around it.
 
-- **Deterministic.** No network, no clock, no randomness. The check is a `pytest` exit code.
-- **Small.** A tier-1 instance should be solvable in well under the step bound, or it is measuring
-  the bound rather than the harness.
-- **Varied in failure mode**, not in domain — the point is to exercise the *loop*: one that needs
-  reading a file it was not pointed at, one that needs running the tests to see the failure, one
-  that needs editing two files, one whose obvious fix breaks `pass_to_pass`, one that needs creating
-  a new file (which is also done-when #3's live case).
+**Hard requirements, each for a reason found in §13:**
 
-The instances are fixtures, not tests: `pytest tests/` must not run them.
+- **Each instance is an initialised git repo with at least one commit** (§13 item 6). No base
+  commit ⇒ nothing to diff against ⇒ no patch. The seeded bug is *in* that commit; the working tree
+  is clean at handoff.
+- **Deterministic.** No network, no clock, no randomness, no filesystem outside the instance. The
+  check is a `pytest` exit code.
+- **Small.** Solvable in well under the step bound, or the instance measures the bound rather than
+  the harness.
+- **Fixtures, not tests.** `pytest tests/` must not collect them — they live outside `tests/` and
+  their own `pytest.ini`/`conftest.py` never reaches the harness suite.
+
+**The five, chosen to vary the *loop shape*, not the domain.** Each column is a distinct way the
+agent can fail that a single instance would not distinguish:
+
+| # | id | Seeded bug | What it forces the agent to do | Why this one exists |
+|---|---|---|---|---|
+| 1 | `gold-001-off-by-one` | Paginator returns one row too many on the last page | Read one file, make a one-line edit | The floor. If this fails, the loop is broken, not the model. Fastest signal, first to run. |
+| 2 | `gold-002-hidden-caller` | A helper's contract changed; the bug surfaces in a *different* module that the prompt does not name | Search the repo for callers it was not pointed at | Exercises exploration. A model that only edits what it was handed fails here. |
+| 3 | `gold-003-read-the-failure` | Error is a `TypeError` deep in a stack; the prompt gives only "the CLI crashes on empty input" | **Run the tests** and read the traceback before editing | Exercises the shell tool + the edit→run→re-read cycle. The instance most sensitive to a tool-schema regression (this is the `num_ctx` class of defect). |
+| 4 | `gold-004-regression-trap` | The obvious fix (widen a guard) makes `fail_to_pass` pass and **breaks two `pass_to_pass` tests** | Run the whole suite, not just the named test | The only instance that catches "passes the target test by breaking the module". Scores 0 if the agent stops at the first green. |
+| 5 | `gold-005-new-module` | Fix requires **creating a new file** (extracting a validator the two callers need) | Add a file that git has never seen | **Done-when #3's live case.** Fails silently to an empty patch without `git add -A -N` (§5.2) — the instance that would have caught that bug. |
+
+Instance 5 is load-bearing twice over: it is a real task shape *and* it is the regression test for
+the milestone's own most likely silent defect. Build it early, not last.
+
+`fail_to_pass` / `pass_to_pass` are literal pytest node-id commands, so the same fields carry
+straight into tiers 2 and 3 without a format change.
 
 ### 5.5 B5 — the baseline record
 
@@ -405,6 +442,9 @@ harness is byte-for-byte Milestone 7. Specifically:
 
 ## 11. Test plan
 
+- **`tests/test_limits.py` (host tier, stdlib only)** — the deadline arithmetic and the turn counter
+  as pure functions: a deadline not yet reached, one just crossed, one with no deadline set (the
+  pass-through), and the counter's off-by-one at exactly `max_turns`.
 - **`tests/test_bench.py` (host tier, stdlib only)** — dataset parsing incl. malformed lines,
   resume-skip logic against an existing `predictions.jsonl`, the predictions record carrying exactly
   three keys, the join from a synthetic headless payload + a synthetic `usage.jsonl` to a
@@ -433,18 +473,81 @@ harness is byte-for-byte Milestone 7. Specifically:
 
 ---
 
-## 12. Open questions to pin at build start
+## 12. Forks (resolved)
 
-1. **`--max-steps` default.** Explicit number, or leave LangGraph's 25 as the default and only set
-   it when the flag is passed? Leaning: leave unset by default (removable contract, §10) but have
-   the driver always pass one, so a benchmark run is never on an inherited default nobody chose.
-2. **Where the deadline check lives.** `before_model` on a new tiny middleware, or folded into
-   `TelemetryMiddleware`? Folding is cheaper; a separate middleware keeps M6 removable
-   independently. Leaning separate.
-3. **Whether `bench` belongs in `harness/` at all**, given it drives `docker` from the host and
-   every other `harness` subcommand reads local state. The alternative is `scripts/bench.py`.
-   Leaning `harness/bench/`: it wants the same argv grammar, the same keyless guarantee, and the
-   same test tier — and `scripts/` would need a `.ps1`/`.sh` pair under the parity rule, for a thing
-   that is pure Python.
-4. **Windows.** `run-docker.ps1` and `run-docker.sh` both exist; the driver picks one. Whether the
-   driver is cross-platform in v1 or Linux/WSL-first is a scope call, not a design one.
+1. **`--max-steps` default: unset.** The harness sets `recursion_limit` only when the knob is
+   passed — absence is the removable contract (§10), and picking a number for every interactive run
+   is a behaviour change this milestone has no business making. **The driver always passes one**,
+   and `harness bench run` **refuses to start** without a step bound and a time bound resolved from
+   somewhere. A benchmark run is never on an inherited default nobody chose; an interactive run is
+   never silently re-bounded.
+
+2. **The deadline is its own middleware, and it splits like M6/M7 do.** A new stdlib-only
+   `harness/limits.py` holds `DeadlineExceeded`, `TurnLimitExceeded` and the pure clock/counter
+   logic; `DeadlineMiddleware` (which needs the langchain base) lives beside the other middleware
+   classes. Two reasons over folding it into `TelemetryMiddleware`: telemetry must stay removable on
+   its own (M6 §10), and the split keeps the arithmetic in the host test tier, which is the same
+   reason `rawtrace.py`/`RawTraceMiddleware` and `telemetry.py`/`TelemetryMiddleware` are already
+   split that way.
+
+   Exception placement follows the existing convention — exceptions live with their subsystem, not
+   in a shared errors module (`BudgetExceeded` in `cost.py:283`, `HaltTurn`/`InterruptAborted` in
+   `hitl.py:146,163`, `PathGuardDenied` in `pathguard.py:24`). `limits.py` is that subsystem.
+   **`cost.py` is the wrong home** despite owning `BudgetExceeded`: a step or clock bound is not
+   cost, and `cost.py` is under an acyclic import guard that a new concern should not be pushed
+   through.
+
+3. **`harness/bench/`, not `scripts/bench.py`.** It wants the same argv grammar, the same keyless
+   guarantee, and the same host test tier as every other admin command — and `scripts/` would oblige
+   a `.ps1`/`.sh` pair under the parity rule for something that is pure Python. Routed through
+   `entry.dispatch` with a function-local import, like `telemetry` / `doctor` / `config`.
+
+4. **Cross-platform in v1, by launcher selection.** The primary development host for this repo is
+   Windows/PowerShell, so a Linux-first driver is one the author cannot run. The driver picks
+   `scripts/run-docker.ps1` on `sys.platform == "win32"` and `scripts/run-docker.sh` elsewhere; both
+   already accept trailing passthrough (§13). One build-time check is owed here: PowerShell's
+   argument parser and `--`-prefixed flags (§13, item 1).
+
+---
+
+## 13. Verified against the code (2026-08-17)
+
+Six assumptions this plan rests on, checked rather than inferred. Recorded because the M7 lesson
+generalises — a plan that reads plausible and a plan that is true are different things, and the
+difference only shows up when someone reads the actual seam.
+
+1. **Both launchers pass trailing arguments through to the container command.** ✅
+   `run-docker.sh:642` — `AGENT_RUN+=(python3 main.py "$@")`. `run-docker.ps1:15–16,658–660` — a
+   `ValueFromRemainingArguments` positional `[string[]]$TaskParts`, appended after `python3 main.py`.
+   So `--emit-patch` / `--max-steps N` reach `parse_args` with no launcher change.
+   **Open sub-check at build time:** PowerShell's own parser and `--`-prefixed tokens. Confirm
+   `--emit-patch` survives binding into `$TaskParts` rather than being eaten as a parameter; if not,
+   the driver uses the `--%` stop-parsing token. This is the one thing in this list that was checked
+   structurally rather than executed.
+
+2. **`.git` survives the ephemeral copy.** ✅ `run-docker.sh:198–208` — the copy uses `dotglob` and
+   skips exactly one entry, `.conda`. The comment at line 199 says dotfiles including `.git` are
+   copied deliberately. So `EPHEMERAL=1` composes with `--emit-patch`: the throwaway workspace is
+   still a git repo with the instance's history, which is what the diff needs. Had `.git` been
+   excluded, the whole B2/B3 design would have been unbuildable as written.
+
+3. **The workflows loader tolerates a missing directory.** ✅ `workflows.py:127` —
+   `if not workflows_dir.is_dir(): return`. So the driver points `DEEPAGENTS_WORKFLOWS_DIR` at a
+   **nonexistent** path and no workflow is discovered; it does not have to create and manage an
+   empty directory. (Both `git-branch` and `git-pr` are folder-discovered, so this disables the pair
+   together, which is what §5.2 requires.)
+
+4. **`headless` and `telemetry` are the precedent for a non-persisted knob.** ✅ `config.py:456,481`
+   — both are `FieldSpec(tier="prespinup", env_var=..., profile_key=None)`. So `--emit-patch` is a
+   real `FieldSpec` (it gets validation and `harness doctor` display for free) that is deliberately
+   **not** written to the profile: it is a per-sweep mode, not a preference. `max_turns` /
+   `max_steps` / `max_seconds` are `tier="live"` alongside `max_cost` / `max_tokens`, and persist.
+
+5. **`max_steps` can be live.** ✅ The graph `config` dict is built once in `cli.main` and passed
+   into every `run_turn` call (`cli.py:951–954`), so an applier mutating `config["recursion_limit"]`
+   takes effect on the next turn with no agent rebuild — the same shape as M7's raw-trace applier.
+
+6. **`git-branch`'s gate is `trigger.sh`, and gates on being a git repo.** ✅ So a gold-set instance
+   **must be an initialised git repo with at least one commit** — otherwise there is no base to diff
+   against and `git diff <base>` has nothing to say. B4 states this as a requirement rather than
+   leaving it implicit.

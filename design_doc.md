@@ -1198,8 +1198,9 @@ system_interrupts:                # which harness events raise (vs. log/crash)
     model server's own debug logging — `OLLAMA_DEBUG=1` with a foreground `ollama serve`, or the
     template from `/api/show` — and the record header names its own level so an operator cannot
     mistake one for the other.
-*   **Automated Benchmarking Suite** — **tier 1 is now a planned milestone**
-    (`docs/milestones/planned/milestone8.md`, which wins over this entry for scope and detail).
+*   **Automated Benchmarking Suite** — **tier 1 is now an in-progress milestone (M8)**
+    (`docs/milestones/in-progress/milestone8.md` + `milestone8_invariants.md`, which win over this
+    entry for scope and detail; they move to `docs/milestones/complete/` when the branch merges).
     Quantitatively measure the harness (routing, compression, memory) against known-correct coding tasks. Budget is tight — full SWE-bench (2294 instances) is out of reach — so the plan is a cost-tiered ladder, cheapest signal first, built on a shared batch driver.
 
     **Correction to the "harness gaps" list below, from M8 §3:** *per-instance hard stop
