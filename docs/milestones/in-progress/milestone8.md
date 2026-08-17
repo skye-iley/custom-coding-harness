@@ -6,8 +6,9 @@
 >
 > §12 records the four design forks as **resolved**, and §13 the six assumptions checked against the
 > code rather than inferred — one of which (`.git` surviving the ephemeral copy) the whole B2/B3
-> design would have been unbuildable without. One sub-check is still owed and is called out there:
-> whether PowerShell's parser passes `--`-prefixed flags through to `$TaskParts`.
+> design would have been unbuildable without. **All six are closed**, the last by measurement rather
+> than reading (§13 item 1: PowerShell binds `--`-prefixed flags into `$TaskParts` cleanly, and the
+> `--%` fallback an earlier draft named would itself have been the bug).
 >
 > **Scope in one line:** make the harness runnable over a pinned set of coding tasks, unattended,
 > on a free local model, and make each run emit a scorable patch plus a joinable telemetry row —
@@ -505,8 +506,9 @@ harness is byte-for-byte Milestone 7. Specifically:
 4. **Cross-platform in v1, by launcher selection.** The primary development host for this repo is
    Windows/PowerShell, so a Linux-first driver is one the author cannot run. The driver picks
    `scripts/run-docker.ps1` on `sys.platform == "win32"` and `scripts/run-docker.sh` elsewhere; both
-   already accept trailing passthrough (§13). One build-time check is owed here: PowerShell's
-   argument parser and `--`-prefixed flags (§13, item 1).
+   already accept trailing passthrough, measured on both (§13 item 1). The driver must spell every
+   forwarded flag with a **double dash** — a single-dash `-model` binds to the PowerShell launcher's
+   own parameter instead of reaching `main.py`.
 
 ---
 
@@ -520,10 +522,25 @@ difference only shows up when someone reads the actual seam.
    `run-docker.sh:642` — `AGENT_RUN+=(python3 main.py "$@")`. `run-docker.ps1:15–16,658–660` — a
    `ValueFromRemainingArguments` positional `[string[]]$TaskParts`, appended after `python3 main.py`.
    So `--emit-patch` / `--max-steps N` reach `parse_args` with no launcher change.
-   **Open sub-check at build time:** PowerShell's own parser and `--`-prefixed tokens. Confirm
-   `--emit-patch` survives binding into `$TaskParts` rather than being eaten as a parameter; if not,
-   the driver uses the `--%` stop-parsing token. This is the one thing in this list that was checked
-   structurally rather than executed.
+
+   **Measured, not inferred (Windows PowerShell 5.1.26100.9168, Desktop edition).** A faithful
+   mini-repro of the `param()` block was driven with `--`-prefixed flags. All five cases bind into
+   `$TaskParts` in order, values kept as separate elements:
+
+   | Case | Result |
+   |---|---|
+   | `--headless --emit-patch --max-steps 40 "fix the bug"` | 5 elements, in order |
+   | `-Cpus 4 --headless --max-steps 40 "task"` | 4 elements; the declared param binds, the rest pass through |
+   | `--model ollama:gemma4 --headless "task"` | 4 elements — **`--model` does not collide with the declared `-Model`** |
+   | `--max-cost 1.5 --workspace /project/workspace "task"` | 5 elements |
+   | `--% --headless --emit-patch …` | **2 elements — broken.** `--%` lands as a literal argument and collapses the rest into one string |
+
+   Two conclusions. **No stop-parsing token is needed**, and **`--%` must not be used** — the
+   fallback an earlier draft of this section named would have been the bug rather than the fix. A
+   token like `--model` is read as the parameter name `-model`, which matches no declared parameter,
+   so `ValueFromRemainingArguments` collects it; the declared `-Model` is only reachable with a
+   single dash. The one standing rule this leaves for the driver: **always double-dash.** A
+   single-dash `-model` *would* bind to the launcher's own parameter and never reach `main.py`.
 
 2. **`.git` survives the ephemeral copy.** ✅ `run-docker.sh:198–208` — the copy uses `dotglob` and
    skips exactly one entry, `.conda`. The comment at line 199 says dotfiles including `.git` are
