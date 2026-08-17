@@ -34,9 +34,11 @@ num_ctx = 32768
 # dropping it, but leaves `content` empty, so the reply is still blank. Use `false`
 # unless you specifically want the reasoning recorded.
 #
-# Scope is deliberately this tag, not the ollama provider: whether a given tag thinks
-# by default is a property of the tag, and changing the shipped `gemma4` default
-# without measuring it would trade one silent behaviour change for another.
+# Scope is per-tag, not per-provider: whether a tag thinks by default is a property
+# of the tag, and `llama3.1` (measured) emits no thinking field at all, so a
+# provider-wide `reasoning = false` would be suppressing nothing on some models and
+# changing others blind. The shipped `gemma4` was measured separately and carries
+# the same line for the same reason -- see its file.
 reasoning = false
 
 # Local/self-hosted: provider.toml declares pricing = "free", so no [pricing] table.

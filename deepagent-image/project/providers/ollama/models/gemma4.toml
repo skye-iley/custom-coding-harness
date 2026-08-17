@@ -31,8 +31,27 @@ context_window = 65536
 # a ~4.3 GB base. Raise it if you have the VRAM -- but check `ollama ps` still says
 # `100% GPU`, because exceeding VRAM offloads layers to CPU and throughput falls off
 # a cliff rather than degrading smoothly -- and update `context_window` above to match.
+#
+# reasoning = false sends Ollama `think: false`.
+#
+# Measured 2026-08-17 (milestone7.md sec 3.1): this tag emits a `thinking` field by
+# default (1389 chars against 995 of content on a plain prompt), and
+# langchain-ollama 1.1.0 captures `message.thinking` ONLY when `reasoning` is
+# truthy -- so with it unset the harness silently discards every reasoning token
+# the model produces. Usually that only loses the reasoning; when the model puts
+# ALL of its output in thinking (observed on the real 7583-token, 11-tool agent
+# request) `content` comes back empty and the turn renders blank with no error.
+#
+# `false` makes the model spend those tokens on content and tool calls. Verified
+# on the sibling tag: with it set, the same prompt returns a correct structured
+# `ls` tool call instead of nothing.
+#
+# To keep the reasoning instead of suppressing it, use `reasoning = true` -- it
+# captures thinking into `additional_kwargs` rather than dropping it. Do NOT just
+# delete this line: unset is the broken state, not the neutral one.
 [options]
 num_ctx = 65536
+reasoning = false
 
 # Watt-hours per token (optional estimate; tracked even for free models).
 [energy]
