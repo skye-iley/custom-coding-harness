@@ -212,6 +212,16 @@ secret-safe containers.
       the whole patch design would have been unbuildable. `milestone8_invariants.md` is the
       test-facing companion; its patch-fidelity group carries the M7 §0.2 lesson directly — **assert
       a patch by applying it (`git apply --check`) against a fresh base, never by substring.**
+      One **seam is declared without being built**: a `Runner` protocol whose only implementation is
+      `HolderRunner`, so tier 2 can point the same dataset at Aider/SWE-agent/Claude Code without a
+      redesign. Patch extraction is deliberately **not** on that protocol — it lives once in
+      `harness/bench/patch.py` and the *driver* calls it, which is why `--emit-patch` is a
+      convenience rather than the mechanism and why the driver, not `EPHEMERAL=1`, owns the scratch
+      workspace. A foreign harness has no `--emit-patch` and never will; a sweep that depended on
+      one could never compare anything. Cross-harness adapters themselves are a §9 non-goal, along
+      with the two things that tier must face and this one does not — confounds (a different model
+      or context size makes the number measure the model) and the fact that a self-authored gold set
+      is a sanity check, not a leaderboard.
   - `docs/milestones/planned/` — **not-yet-built** milestones (docs only). Wins over `design_doc.md`
     for "what we build next." *(Currently empty — M8 moved to `in-progress/`. Remaining forward
     candidates live in `design_doc.md` §12.6, §13, and its "Core identity — dependency chain"

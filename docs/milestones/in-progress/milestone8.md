@@ -211,10 +211,20 @@ declared as an enum that could grow, and `stop_reason` is additive and nullable.
 
 ### 5.2 B2 — `--emit-patch`
 
-**Where it lives.** The harness emits the patch into the headless JSON; the *driver* maps that to
-the predictions schema. The harness is the only thing that knows the state dir, the exclusions and
-the workspace root; the driver is the only thing that knows `instance_id` and the run's identity.
-Splitting there keeps one machine contract (the headless JSON) rather than two.
+**Where it lives — one implementation, called from two places.** The extraction logic (intent-to-add,
+pathspec exclusions, diff-against-base) lives in **`harness/bench/patch.py`**, stdlib + `git`
+subprocess only. `--emit-patch` calls it from inside the container and puts the result on the
+headless JSON; **the driver calls the same function** against the workspace it prepared.
+
+That is not redundancy, it is the seam that makes §9's cross-harness runners possible later. A
+foreign harness (Aider, SWE-agent, Claude Code) has no `--emit-patch` flag and never will, so the
+driver has to be able to produce the patch itself from a workspace it owns. Two implementations of
+`git add -A -N` + pathspec exclusion is two chances to get invariant 8 wrong, and the one that gets
+it wrong is the one nobody is looking at.
+
+Consequence for our own runs: `--emit-patch` becomes a **convenience, not the mechanism**. It is
+still worth having — the in-container path is the one an operator can use by hand, without the
+driver — but a sweep does not depend on it.
 
 **Payload.** `_batch_payload` gains `model_patch`, **present as `null` when `--emit-patch` is off**
 — the same convention M6 used for `run_id`/`topic`/`usage_log`, and for the same reason: a driver
@@ -291,16 +301,40 @@ present now so the format does not change under tier 2/3.
    no bound is the failure mode this milestone exists to remove; it must not be reachable by
    forgetting a flag.
 1. Skip if `instance_id` is already in `predictions.jsonl` (resume; the file is append-only).
-2. Launch `run-docker` — `.ps1` on `win32`, `.sh` elsewhere (§12 fork 4) — with `EPHEMERAL=1`
-   (throwaway copy of the instance dir; already shipped, excludes `.conda` and **keeps `.git`**,
-   §13 item 2), `--headless`, `--emit-patch`, `--topic <instance_id>`, the §5.1 bounds, and
-   `DEEPAGENTS_WORKFLOWS_DIR` pointed at a **nonexistent** path — the loader returns early on a
-   missing directory (§13 item 3), so no empty directory has to be created or managed.
-3. Read the single JSON line from stdout. Anything on stderr is stage markers and stays there.
-4. Append one line to `predictions.jsonl` and one to `runs.jsonl`. **Flush both after every
+2. **Copy the instance to a scratch workspace the driver owns**, `.git` included, `.conda`
+   excluded. The driver — not `EPHEMERAL=1` — owns preparation and disposal.
+3. Launch `run-docker` — `.ps1` on `win32`, `.sh` elsewhere (§12 fork 4) — with `--headless`,
+   `--topic <instance_id>`, the §5.1 bounds, and `DEEPAGENTS_WORKFLOWS_DIR` pointed at a
+   **nonexistent** path — the loader returns early on a missing directory (§13 item 3), so no empty
+   directory has to be created or managed.
+4. Read the single JSON line from stdout. Anything on stderr is stage markers and stays there.
+5. **Extract the patch from the scratch workspace** via `bench/patch.py` (§5.2), then delete it.
+6. Append one line to `predictions.jsonl` and one to `runs.jsonl`. **Flush both after every
    instance** — a sweep that dies at instance 40 of 50 must not lose 39.
-5. Continue on failure. An instance that crashes gets a prediction with an empty `model_patch` and a
+7. Continue on failure. An instance that crashes gets a prediction with an empty `model_patch` and a
    ledger row carrying the outcome; it never aborts the sweep.
+
+**Why the driver owns the copy instead of `EPHEMERAL=1`.** Ephemeral mode reverts the workspace *on
+container close*, which means the patch must be taken from inside, before close — i.e. only our
+harness can produce one. With the driver owning a scratch tree, the workspace still exists after the
+process exits and **anything** can be diffed the same way, which is the §9 seam. Ephemeral mode is
+not being deprecated; it is simply not what a sweep is built on. (§13 item 2's finding still
+applies, only to a different copier: whatever makes the scratch copy must keep `.git`.)
+
+**The runner seam.** The launch step above is the only harness-specific part of the loop, so it goes
+behind a one-method protocol:
+
+```python
+class Runner(Protocol):
+    def invoke(self, workspace: Path, prompt: str, limits: Limits) -> RunResult: ...
+    def capabilities(self) -> frozenset[str]: ...   # {"tokens","cost","tool_calls","run_id"}
+```
+
+`HolderRunner` is the only implementation in this milestone. Patch extraction is deliberately **not**
+on the protocol — the driver does it uniformly for every runner, which is what would make a
+comparison fair rather than a comparison of whose extractor is better. `capabilities()` exists so a
+runner reports what it can measure and the ledger writes **`null`** for the rest, never an estimate
+(M6's `null` ≠ `0.0` rule; §9).
 
 **Outputs.** `predictions.jsonl` is exactly the three official keys and nothing else — anything
 extra risks a scorer rejecting it. Everything the harness knows goes in `runs.jsonl`:
@@ -417,6 +451,22 @@ have. Mostly. Do not write that down as a guarantee.
   the network posture are *their* open questions (`design_doc.md` §11 — including the unpinned
   detail of whether `/opt/venv` can ride inside a SWE-bench instance image without colliding with
   its interpreter).
+- **Cross-harness runners — the seam exists, the adapters do not.** `Runner` is declared and
+  `HolderRunner` implements it (§5.3); no `AiderRunner` / `SweAgentRunner` / `ClaudeCodeRunner`
+  ships here. Deferred to **tier 2**, where the dataset is somebody else's and the comparison means
+  something. Three things are already settled so that tier does not have to re-litigate them: patch
+  extraction is driver-side and uniform (§5.2); unsupported metrics are `null`, never estimated; and
+  only **patch, exit code and wall clock** are universal — tokens/cost/tool-calls depend on what a
+  given harness exposes (Aider's analytics, Claude Code's headless JSON, SWE-agent/OpenHands
+  trajectory files), and step bounds have no cross-harness equivalent at all, so the universal floor
+  is a wall-clock bound plus a process kill.
+
+  Two things that tier must confront and this one does not: **confounds** (a different model,
+  context size or tool set makes the number measure the model, not the harness — pin the model
+  across runners and record it per row), and the fact that **a self-authored gold set is not a
+  leaderboard**. Tier 1 tuned to our own harness is a sanity check across runners at best; a
+  publishable cross-harness number needs a set nobody here wrote, which is exactly what tiers 2 and
+  3 are.
 - **Parallel instances** (`--jobs`). §5.3.
 - **A CI gate on the sweep.** Tier 1 is a regression signal a human runs; wiring it into CI needs a
   runner with a model on it, which is a separate problem. Do not gate CI on something that can be
@@ -450,6 +500,13 @@ harness is byte-for-byte Milestone 7. Specifically:
   resume-skip logic against an existing `predictions.jsonl`, the predictions record carrying exactly
   three keys, the join from a synthetic headless payload + a synthetic `usage.jsonl` to a
   `runs.jsonl` row, and the empty-patch counter. The subprocess launch is injected, not run.
+- **`tests/test_bench_patch.py` (host tier, `git` required — skip if absent)** — the extractor
+  itself, driven **directly** rather than through the headless JSON: intent-to-add surfaces an
+  untracked file, every excluded path stays out on a workspace where all of them are dirty, the
+  diff is taken against the recorded base rather than `HEAD` (asserted with a commit sitting on
+  top), and the result passes `git apply --check` against a fresh copy of the base. This is
+  invariant 12a's file: a sweep must not depend on `--emit-patch`, so the extractor is tested
+  where the driver calls it.
 - **`tests/test_cli.py` (image tier)** — each bound fires and produces `stopped` with the right
   `stop_reason`; the headless JSON carries `model_patch: null` without the flag; `--max-steps`
   reaches `config["recursion_limit"]`.
@@ -545,8 +602,14 @@ difference only shows up when someone reads the actual seam.
 2. **`.git` survives the ephemeral copy.** ✅ `run-docker.sh:198–208` — the copy uses `dotglob` and
    skips exactly one entry, `.conda`. The comment at line 199 says dotfiles including `.git` are
    copied deliberately. So `EPHEMERAL=1` composes with `--emit-patch`: the throwaway workspace is
-   still a git repo with the instance's history, which is what the diff needs. Had `.git` been
-   excluded, the whole B2/B3 design would have been unbuildable as written.
+   still a git repo with the instance's history, which is what the diff needs.
+
+   **Now a requirement rather than a dependency.** §5.3 moved copy-and-dispose to the driver, so a
+   sweep no longer rides on ephemeral mode — but the finding is unchanged and it transfers: whatever
+   makes the scratch copy must keep `.git`, or the diff has no base. `run-docker.sh:198–208` is the
+   reference implementation to copy the *rule* from, not the code path the driver uses. (The
+   original phrasing of this item, "had `.git` been excluded the whole B2/B3 design would have been
+   unbuildable", was true of the ephemeral-based design and is what prompted looking at it.)
 
 3. **The workflows loader tolerates a missing directory.** ✅ `workflows.py:127` —
    `if not workflows_dir.is_dir(): return`. So the driver points `DEEPAGENTS_WORKFLOWS_DIR` at a

@@ -83,6 +83,19 @@ looks like paranoia about empty patches or misclassified outcomes is that rule a
     which it did not. *(The failure mode is a `git-pr` commit emptying `git diff HEAD` — silent, and
     indistinguishable from an agent that changed nothing.)*
 
+12a. **There is exactly one patch extractor, and the driver calls it directly.** The intent-to-add +
+    pathspec + diff-against-base logic lives once, in `harness/bench/patch.py`; `--emit-patch` is a
+    caller of it, not a second implementation. Asserted by driving invariants 8–12 **through the
+    driver's path**, not only through the headless JSON — a sweep must not depend on the flag.
+    *(Two implementations of `git add -A -N` is two chances to get invariant 8 wrong, and the one
+    that gets it wrong is the one nobody is looking at. It is also the seam `milestone8.md` §9's
+    cross-harness runners need: a foreign harness has no `--emit-patch` and never will.)*
+
+12b. **The scratch workspace keeps `.git`.** Whatever the driver copies an instance with preserves
+    the repo and its history, so there is a base to diff against. Asserted on a copy, not on the
+    source. *(§13 item 2: true of `run-docker`'s ephemeral copier, and it transfers to the driver's
+    own — the requirement outlived the code path that first satisfied it.)*
+
 13. **`predictions.jsonl` carries exactly three keys** — `instance_id`, `model_name_or_path`,
     `model_patch` — and nothing else. Extra keys risk a scorer rejecting the file; everything else
     the harness knows belongs in `runs.jsonl`.
@@ -166,3 +179,9 @@ looks like paranoia about empty patches or misclassified outcomes is that rule a
 - **Parallel-safety.** `--jobs` is a non-goal (§9) and nothing asserts the driver is safe to run
   concurrently. The `run_turn`-threads-`telemetry`-as-a-parameter seam (`cli.py:972–975`) keeps it
   possible; it does not make it true.
+- **Anything about a runner other than `HolderRunner`.** The `Runner` protocol is declared and one
+  implementation satisfies it; no invariant constrains an adapter that does not exist. Invariant 12a
+  is the only thing carrying weight for the future case, and it does so by holding *today* — the
+  driver's own path must work without `--emit-patch`, which is exactly what a foreign runner would
+  need. A protocol asserted with one implementation asserts nothing about the second; tier 2 writes
+  its own invariants.

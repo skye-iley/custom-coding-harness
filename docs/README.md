@@ -59,8 +59,13 @@ non-milestone plans.)*
   contract is the predictions jsonl, and correctness stays with the official evaluation harness. It
   is also the first real consumer of M6 §5b, which is half its value — telemetry nobody has consumed
   is telemetry nobody has validated (§6). §12 resolves the four design forks; **§13 records six
-  assumptions checked against the code rather than inferred**, one of which (`.git` surviving the
-  ephemeral copy) the B2/B3 design would have been unbuildable without.
+  assumptions checked against the code rather than inferred**, all six closed. One **seam** is
+  declared without being built: a `Runner` protocol with `HolderRunner` as its only implementation,
+  and patch extraction deliberately *off* the protocol so the driver does it uniformly — which is
+  what would let tier 2 point the same dataset at Aider or SWE-agent. Consequence for v1, and the
+  reason it is a seam and not a note: the extractor lives in `harness/bench/patch.py` and the driver
+  calls it directly, so `--emit-patch` is a convenience rather than the mechanism, and the driver —
+  not `EPHEMERAL=1` — owns the scratch workspace.
 - **`milestone8_invariants.md`** — the checkable properties, written before the code: bounds (each
   bound terminates its own runaway, a stop records `stopped` + `stop_reason` and never `error`, an
   unset bound is *absent* rather than infinite), patch fidelity (an untracked new file appears; the
