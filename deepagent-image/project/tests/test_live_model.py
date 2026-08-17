@@ -169,6 +169,40 @@ def test_a_real_turn_produces_a_decomposable_record(live_model, tmp_path):
     assert summary["time"]["residual_ms"] >= 0
 
 
+@pytest.mark.live_model
+def test_a_real_turn_does_not_silently_discard_generated_tokens(live_model, tmp_path):
+    """The regression for milestone7.md §3.1, and a stub cannot hold it.
+
+    Measured 2026-08-17: `langchain-ollama` 1.1.0 captures Ollama's
+    `message.thinking` only when `reasoning` is truthy, so a thinking-by-default
+    tag produced 450 output tokens and an `AIMessage` with `content=""` and
+    `additional_kwargs={}`. The turn rendered blank, no error anywhere, and every
+    stubbed test stayed green — a stub populates `usage_metadata` and `content`
+    from the same fixture, so the two can never disagree. Only a real call can.
+
+    Asserts the invariant, not the fix: tokens the model reports generating must
+    be reachable in SOME field. A future client version, a new default, or a
+    deleted registry entry all break that the same way.
+    """
+    reply = live_model.invoke("Reply with the single word: pineapple")
+
+    produced = (reply.usage_metadata or {}).get("output_tokens") or 0
+    if produced <= 0:
+        pytest.skip("this provider reports no output_tokens; nothing to reconcile")
+
+    reachable = bool(
+        (reply.content if isinstance(reply.content, str) else reply.content)
+        or getattr(reply, "tool_calls", None)
+        or getattr(reply, "invalid_tool_calls", None)
+        or getattr(reply, "additional_kwargs", None)
+    )
+    assert reachable, (
+        f"the model reports {produced} output tokens but every field of the message "
+        "is empty -- the provider's parser dropped generated text before the harness "
+        "could see it (milestone7.md §3.1). Check the tag's `reasoning` option."
+    )
+
+
 def test_a_real_turn_leaves_a_faithful_raw_trace(live_model, tmp_path):
     """The one thing a stub cannot check: that the trace describes something real.
 
@@ -224,11 +258,16 @@ def test_a_real_turn_leaves_a_faithful_raw_trace(live_model, tmp_path):
         first_line = answer.strip().splitlines()[0][:40]
         assert first_line in text, "the recorded response is not the one the turn returned"
 
-    # Reasoning, if this model emits any, is in the trace and not in the answer.
+    # Reasoning, if this model emits any, is in the trace and not in the answer --
+    # UNLESS reasoning was the entire output, the one case where showing it beats
+    # rendering the turn as nothing (milestone7.md §3.1). That case announces itself
+    # with the marker, so it is distinguishable rather than an exception that
+    # swallows the leak this asserts against.
     if "] reasoning:" in text or "] thinking:" in text:
         marker = "] reasoning:" if "] reasoning:" in text else "] thinking:"
         body = text.split(marker, 1)[1].splitlines()[1].strip()
-        if body and answer:
+        reasoning_only = agent_mod._REASONING_ONLY_NOTE in (answer or "")
+        if body and answer and not reasoning_only:
             assert body not in answer, (
                 "final_message_text leaked a reasoning block into the answer -- "
                 "it is supposed to drop them, which is why the raw trace exists"

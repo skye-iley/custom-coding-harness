@@ -1,0 +1,47 @@
+# A locally-tagged gemma4 variant (`ollama create gemma4:harnesstest1`). The file
+# stem is free-form because a tag contains a colon and Windows forbids that in a
+# filename; `name` below carries the real tag and the loader prefers it over the
+# stem (see gemma4.toml).
+name = "gemma4:harnesstest1"
+
+# Matches this tag's Modelfile `PARAMETER num_ctx 32768`. The harness cannot read a
+# Modelfile -- it knows only this registry -- so without this file the tag carried no
+# metadata at all and `context_window` was simply unknown. num_ctx is restated in
+# [options] below so the two can't drift: metadata that disagrees with the request is
+# a lie, and the request is what the daemon obeys.
+context_window = 32768
+
+[options]
+num_ctx = 32768
+
+# reasoning = false sends Ollama `think: false`.
+#
+# NOT a preference -- a correctness fix, measured 2026-08-17 (milestone7.md §3).
+# This tag thinks by DEFAULT, and langchain-ollama 1.1.0 captures Ollama's
+# `message.thinking` only when `reasoning` is truthy:
+#
+#     if reasoning and (thinking_content := stream_resp["message"].get("thinking")):
+#         additional_kwargs["reasoning_content"] = thinking_content
+#
+# The harness passes no `reasoning`, so the client sends `think: null` (the model's
+# own default = think), Ollama returns the reasoning in `message.thinking`, and that
+# falsy guard DISCARDS it. Result: an AIMessage with content="" and
+# additional_kwargs={} for a turn that really produced 450 output tokens -- a blank
+# REPL reply, and no error anywhere. `false` makes the model spend those tokens on
+# content and tool calls instead.
+#
+# `reasoning = true` is the other branch: it captures the thinking rather than
+# dropping it, but leaves `content` empty, so the reply is still blank. Use `false`
+# unless you specifically want the reasoning recorded.
+#
+# Scope is deliberately this tag, not the ollama provider: whether a given tag thinks
+# by default is a property of the tag, and changing the shipped `gemma4` default
+# without measuring it would trade one silent behaviour change for another.
+reasoning = false
+
+# Local/self-hosted: provider.toml declares pricing = "free", so no [pricing] table.
+
+[energy]
+# per_input_token =
+# per_output_token =
+# source =

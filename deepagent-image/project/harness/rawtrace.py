@@ -361,6 +361,59 @@ def _tool_schema(tool):
     return tool
 
 
+_NO_OUTPUT_WARNING = (
+    "!! output_tokens={n} but this message carries no content, no tool calls and no "
+    "additional_kwargs -- generated tokens were dropped before the message object "
+    "existed (a provider-parser drop). L1 cannot show WHAT was lost; see the wire body."
+)
+
+# Neither None nor "" nor [] is "the model said something". A dict/object content
+# is left alone -- an unknown container is not evidence of emptiness.
+def _is_blank_content(content) -> bool:
+    if content is None:
+        return True
+    if isinstance(content, str):
+        return not content.strip()
+    if isinstance(content, (list, tuple)):
+        return not content
+    return False
+
+
+def _dropped_output_warning(message) -> str:
+    """Flag output tokens that landed in no field of the message.
+
+    A message reporting ``output_tokens > 0`` while its content, tool calls and
+    ``additional_kwargs`` are all empty generated text that the provider's own
+    parser then discarded: the tokens are billed, counted by M6, and unreadable
+    by anyone. The drop happens *before* the message object exists, so it is
+    invisible at L1 by construction — the trace cannot show what was lost, but it
+    can and must say that something was, rather than rendering a blank section
+    that reads like the model stayed silent.
+
+    Measured case (2026-08-17, `milestone7.md` §3): ``langchain-ollama`` 1.1.0
+    captures Ollama's ``message.thinking`` only when ``reasoning`` is truthy and
+    drops it otherwise, so a thinking-by-default tag produced 450 output tokens,
+    an empty ``AIMessage``, and a blank REPL turn with nothing anywhere to say so.
+    """
+    usage = _get(message, "usage_metadata")
+    if not isinstance(usage, dict):
+        return ""
+    try:
+        produced = int(usage.get("output_tokens") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if produced <= 0:
+        return ""
+    if not _is_blank_content(_get(message, "content")):
+        return ""
+    for key in ("tool_calls", "invalid_tool_calls"):
+        if list(_get(message, key) or []):
+            return ""
+    if _get(message, "additional_kwargs"):
+        return ""
+    return _NO_OUTPUT_WARNING.format(n=produced)
+
+
 def format_response(response, *, elapsed_ms: float) -> str:
     """The reply half — **the whole returned message**, nothing dropped.
 
@@ -383,6 +436,11 @@ def format_response(response, *, elapsed_ms: float) -> str:
     for i, message in enumerate(messages):
         if len(messages) > 1:
             out.append(f"[message {i}] {_message_role(message)}")
+        # Before the content, not after: a reader scanning for "what did the model
+        # say" stops at the blank and never reaches the metadata that contradicts it.
+        warning = _dropped_output_warning(message)
+        if warning:
+            out.append(warning)
         out.append(format_content(_get(message, "content")))
 
         for label, key in (

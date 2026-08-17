@@ -157,6 +157,54 @@ def test_response_records_the_metadata_bags_and_raw_tool_call_args():
         assert f"{key}:" in out
 
 
+# --- tokens that landed nowhere (milestone7.md §3.1, measured 2026-08-17) ------
+#
+# L1 cannot see a drop that happens inside the provider's response parser, before
+# the message object exists. It can refuse to render that as a blank section which
+# reads like the model stayed silent.
+
+
+def _dropped_output_message(**overrides):
+    """The measured shape: langchain-ollama 1.1.0 discarding Ollama's
+    `message.thinking` because `reasoning` was falsy. 450 tokens billed, counted by
+    M6, and present in no field."""
+    fields = dict(
+        content="",
+        tool_calls=[],
+        invalid_tool_calls=[],
+        response_metadata={"finish_reason": "stop", "eval_count": 450},
+        usage_metadata={"input_tokens": 7585, "output_tokens": 450},
+        additional_kwargs={},
+    )
+    fields.update(overrides)
+    return _Obj(**fields)
+
+
+def test_output_tokens_that_landed_in_no_field_are_flagged():
+    out = rt.format_response(_Obj(result=[_dropped_output_message()]), elapsed_ms=24166)
+    assert "output_tokens=450" in out
+    # Above the content, not after it: a reader scanning for "what did the model
+    # say" stops at the blank and never reaches the metadata that contradicts it.
+    assert out.index("output_tokens=450") < out.index("--- tool_calls")
+
+
+def test_the_flag_does_not_fire_when_the_tokens_are_accounted_for():
+    # Each of these is somewhere the output legitimately went. A warning here would
+    # fire on every ordinary tool-calling turn and be trained away within a day.
+    for override in (
+        {"content": "here is the answer"},
+        {"content": [{"type": "text", "text": "answer"}]},
+        {"tool_calls": [{"name": "ls", "args": {}, "id": "c1"}]},
+        {"invalid_tool_calls": [{"name": "ls", "args": "{", "error": "bad"}]},
+        {"additional_kwargs": {"reasoning_content": "thinking..."}},
+        {"usage_metadata": {"input_tokens": 10, "output_tokens": 0}},
+        {"usage_metadata": None},
+    ):
+        message = _dropped_output_message(**override)
+        out = rt.format_response(_Obj(result=[message]), elapsed_ms=1)
+        assert "output_tokens=450" not in out, override
+
+
 def test_unknown_block_types_are_dumped_never_skipped():
     # Invariant 5b: a block type nobody anticipated is the most interesting thing
     # that can appear in a trace; silence about it is the one unrecoverable

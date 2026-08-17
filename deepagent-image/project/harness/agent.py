@@ -530,6 +530,65 @@ def final_message_text(result: Any) -> str:
     if content is None and isinstance(last, dict):
         content = last.get("content")
 
+    text = _content_text(content)
+    if text.strip():
+        return text
+
+    # M7: a turn whose ENTIRE output was reasoning otherwise renders as nothing --
+    # indistinguishable from a crash, a refusal, or a model that stayed silent. The
+    # drop above is right when there IS an answer (reasoning is not the answer, and
+    # leaking it corrupts the reply and the headless JSON); it is wrong when the
+    # reasoning is all there is. Surfaced marked, never silently merged into a reply.
+    reasoning = _reasoning_text(last, content)
+    if reasoning:
+        return f"{_REASONING_ONLY_NOTE}\n{reasoning}"
+    return text
+
+
+_REASONING_ONLY_NOTE = (
+    "[harness] the model produced only reasoning and no answer -- "
+    "showing the reasoning instead of an empty reply:"
+)
+
+_REASONING_TYPES = frozenset({"thinking", "reasoning", "reasoning_content"})
+
+
+def _reasoning_text(message: Any, content: Any) -> str:
+    """Reasoning the model emitted, from either place a provider puts it.
+
+    `additional_kwargs["reasoning_content"]` is langchain's normalized slot (what
+    `ChatOllama` fills when `reasoning` is truthy, and the Anthropic/OpenAI
+    reasoning models use); a typed block inside `content` is the other shape. Both
+    are checked because which one you get is a provider/version detail, and this
+    fallback exists precisely for the case where nobody noticed the difference.
+    """
+    kwargs = getattr(message, "additional_kwargs", None)
+    if kwargs is None and isinstance(message, dict):
+        kwargs = message.get("additional_kwargs")
+    if isinstance(kwargs, dict):
+        value = kwargs.get("reasoning_content")
+        if isinstance(value, str) and value.strip():
+            return value
+
+    if isinstance(content, list):
+        found: list[str] = []
+        for item in content:
+            if not isinstance(item, dict) or item.get("type") not in _REASONING_TYPES:
+                continue
+            for key in ("thinking", "reasoning", "reasoning_content", "text"):
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    found.append(value)
+                    break
+        if found:
+            return "\n".join(found)
+    return ""
+
+
+def _content_text(content: Any) -> str:
+    """The human-facing text of a message's content -- the pre-M7 extraction, moved
+    out of `final_message_text` unchanged so the reasoning fallback can ask whether
+    it produced anything before deciding."""
     if isinstance(content, str):
         return content
 
