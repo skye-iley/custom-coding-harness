@@ -35,9 +35,24 @@ A milestone moves through three folders. What each stage carries is deliberate:
 
 ## Planned milestones — `milestones/planned/`
 
-*(Empty — nothing is queued. The forward candidates live in `design_doc.md` §11 (the benchmark
-ladder), §13 (file-read middleware), §12.6 (deepagents-native skills/memories), and the "Core
-identity — dependency chain" list; `features/` holds the two named non-milestone plans.)*
+- **`milestone8.md`** — **Benchmark Ladder, Tier 1 (Gold Set)** (`design_doc.md` §11): run the
+  harness over a pinned set of bug-fix tasks, unattended, on the free local model, and have each run
+  emit a scorable `git diff` plus a telemetry row that joins to it. The case for it is that the three
+  defects before it — `num_ctx` silently 2048, discarded `message.thinking`, `reasoning = false` —
+  each degraded *every run* and none was caught by ~1000 passing tests; one was found by an operator
+  saying "before, it could handle this fine". Three slices: hard stops, `--emit-patch`, and a
+  `harness/bench/` driver, then the gold set and a baseline record. Two traps are called out up
+  front: **`--max-turns` is not the benchmark bound** (§3 — an instance is one headless turn, the
+  runaway is inside it, and LangGraph's unset `recursion_limit` currently truncates solves and
+  records them as errors), and **`git diff` is blind to untracked files** (§5.2 — a fix delivered as
+  a new file emits an empty patch, silently). Scoring is a hard non-goal (§9): the contract is the
+  predictions jsonl, and correctness stays with the official evaluation harness. It is also the
+  first real consumer of M6 §5b, which is half its value — telemetry nobody has consumed is
+  telemetry nobody has validated (§6).
+
+*(Other forward candidates, not yet written up: `design_doc.md` §13 (file-read middleware), §12.6
+(deepagents-native skills/memories), and the "Core identity — dependency chain" list; `features/`
+holds the two named non-milestone plans.)*
 
 ## In-progress milestones — `milestones/in-progress/`
 

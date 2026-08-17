@@ -1198,7 +1198,21 @@ system_interrupts:                # which harness events raise (vs. log/crash)
     model server's own debug logging — `OLLAMA_DEBUG=1` with a foreground `ollama serve`, or the
     template from `/api/show` — and the record header names its own level so an operator cannot
     mistake one for the other.
-*   **Automated Benchmarking Suite**: Quantitatively measure the harness (routing, compression, memory) against known-correct coding tasks. Budget is tight — full SWE-bench (2294 instances) is out of reach — so the plan is a cost-tiered ladder, cheapest signal first, built on a shared batch driver.
+*   **Automated Benchmarking Suite** — **tier 1 is now a planned milestone**
+    (`docs/milestones/planned/milestone8.md`, which wins over this entry for scope and detail).
+    Quantitatively measure the harness (routing, compression, memory) against known-correct coding tasks. Budget is tight — full SWE-bench (2294 instances) is out of reach — so the plan is a cost-tiered ladder, cheapest signal first, built on a shared batch driver.
+
+    **Correction to the "harness gaps" list below, from M8 §3:** *per-instance hard stop
+    (`--max-turns` + session wall-clock)* names the wrong primary bound. A benchmark instance is
+    **one headless turn**, so a turn-count cap is never reached; the runaway is the ReAct loop
+    *inside* that turn. That loop is bounded today only by LangGraph's `recursion_limit`, which the
+    harness never sets — so every run takes the installed default, which on the pinned version is
+    **10007** super-steps (`langgraph/_internal/_config.py:32`), not the widely-quoted 25. On a free
+    local model, where no cost accrues and nothing else is watching, that is no bound at all. And
+    the resulting `GraphRecursionError` is classified as `error`, so a truncated instance is
+    indistinguishable from a crashed one. M8 ships `--max-steps` and
+    `--max-seconds` alongside `--max-turns`, plus a distinct `stopped` outcome. `--max-turns` is
+    kept because it is useful outside benchmarking, not because it bounds an instance.
 
     **Benchmark tiers (cheapest first):**
     1.  *Gold set (free, CI regression).* A small pinned set (5–20) of bug-fix tasks — each `{id, repo/dir, base_commit, task_prompt, fail_to_pass[]}` — run against **local/free models** (ollama/lmstudio, already in the provider registry) for **$0**. This is the primary regression signal for "did a harness change break the loop." Built first.

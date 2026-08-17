@@ -182,8 +182,29 @@ secret-safe containers.
   - `docs/milestones/in-progress/` — **being built** milestones (doc + separate invariants doc + code
     on a feature branch). *(Currently empty — M7 merged and moved to `complete/`.)*
   - `docs/milestones/planned/` — **not-yet-built** milestones (docs only). Wins over `design_doc.md`
-    for "what we build next." *(Currently empty — the forward candidates live in `design_doc.md`
-    §11 (the benchmark ladder), §12.6, §13, and its "Core identity — dependency chain" list.)*
+    for "what we build next."
+    - `milestone8.md` — **Benchmark Ladder, Tier 1 (Gold Set)** (`design_doc.md` §11). Make the
+      harness runnable over a pinned set of coding tasks, unattended, on the free local model, and
+      make each run emit a scorable patch plus a joinable telemetry row. Three slices: **hard
+      stops** (B1), **`--emit-patch`** (B2), and the **`harness/bench/` batch driver** (B3), plus
+      the gold set itself and a baseline record. Two things to know before building. **The bound
+      `design_doc.md` §11 names is half wrong** (§3): a benchmark instance is *one* headless turn,
+      so `--max-turns` bounds nothing — the runaway is the ReAct loop *inside* that turn, bounded
+      today only by LangGraph's `recursion_limit`, which the harness **never sets** — and the pinned
+      version's inherited default is `10007`, not the widely-quoted 25
+      (`langgraph/_internal/_config.py:32`), i.e. no bound at all on a free model where no cost
+      accrues. Its `GraphRecursionError` also falls through `cli._turn_outcome` to `error`, so a
+      truncated instance would be recorded identically to a crashed one. Hence `--max-steps` +
+      `--max-seconds` alongside `--max-turns`, and a new
+      `OUTCOME_STOPPED` + `stop_reason` so a sweep can tell "did not converge" from "the harness
+      broke" from "a cost cap fired". And **`git diff` shows nothing for an untracked file** (§5.2),
+      so a fix delivered as a new module emits an empty patch and scores zero, silently — the
+      `git add -A -N` intent-to-add step is load-bearing, and the git-branch/git-pr lifecycle must
+      be off during a bench run or its commit swallows the diff. Scoring is a hard non-goal: the
+      contract is the predictions jsonl, correctness stays with the official evaluation harness.
+      The milestone is also **the first real consumer of M6 §5b** — the wall-clock decomposition,
+      `run_id`/`topic`/`usage_log`, the never-`0.0` `cost_usd` — so a join that does not work is the
+      milestone finding something, not a blocker (§6).
   - `docs/features/workspace_visibility.md` — **named feature plan** (not a numbered milestone): restrict
     which workspace paths an agent can see (`.agentignore` policy, designated-secret floor, docker-mask
     → bwrap fs-tool jail → optional overlayfs). **Planned** — summarized in `design_doc.md` §2.
