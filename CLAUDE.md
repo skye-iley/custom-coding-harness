@@ -182,7 +182,11 @@ secret-safe containers.
   - `docs/milestones/in-progress/` — **being built** milestones (doc + separate invariants doc + code
     on a feature branch).
     - `milestone8.md` (+ `milestone8_invariants.md`) — **Benchmark Ladder, Tier 1 (Gold Set)**
-      (`design_doc.md` §11). **Plan + invariants written, no code yet.** Make the
+      (`design_doc.md` §11). **Slice B1 (hard stops) is built**; B2–B5 not started — see the
+      milestone's §0.1 for what the build changed about the plan (the load-bearing surprise:
+      a step bound was *silently retryable*, because `resilience.is_retryable` scans an
+      error message for an embedded status code and `--max-steps 500` makes LangGraph say
+      "Recursion limit of 500 reached"). Make the
       harness runnable over a pinned set of coding tasks, unattended, on the free local model, and
       make each run emit a scorable patch plus a joinable telemetry row. Three slices: **hard
       stops** (B1), **`--emit-patch`** (B2), and the **`harness/bench/` batch driver** (B3), plus

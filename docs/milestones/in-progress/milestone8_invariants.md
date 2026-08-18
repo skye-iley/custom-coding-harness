@@ -25,6 +25,13 @@ looks like paranoia about empty patches or misclassified outcomes is that rule a
 
 ## Bounds (nothing runs forever, and a stop says which bound stopped it)
 
+> **Built (B1).** 1–6 are pinned by `tests/test_limits.py` (the arithmetic, host tier,
+> injected clock), the M8 block in `tests/test_cli.py` (the classifier, the middleware, the
+> exit code, and invariant 6 asserted as the *absence* of the config key), the `stopped`
+> cases in `tests/test_telemetry.py`, and two `tests/test_live_model.py` cases — the tier
+> that catches a bound the harness believes in and LangGraph does not honour. **7 is not
+> built**: it belongs to `harness bench run` (B3).
+
 1. **Each bound actually terminates its own runaway.** With `--max-steps N`, a graph that would loop
    forever ends after at most `N` super-steps. With `--max-seconds T`, a run whose model calls
    exceed `T` ends at the next step boundary. With `--max-turns K`, a session ends after `K` turns.

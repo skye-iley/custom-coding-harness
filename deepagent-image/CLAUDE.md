@@ -488,6 +488,89 @@ catches a trace which is internally consistent and describes nothing real. It al
 earned itself: a stub passed while the real `system_message` (a `SystemMessage` object,
 not a string) was being rendered as a `repr` with the whole prompt escaped inside it.
 
+## Hard stops (Milestone 8, slice B1)
+
+Three bounds an operator can put on a run, and one outcome that says a bound
+fired. **All three default to unset**, and unset means *absent*, not infinite.
+
+| Knob | Bounds | Env | Seam |
+|---|---|---|---|
+| `--max-steps` | the ReAct loop **inside one turn** | `DEEPAGENTS_MAX_STEPS` | `config["recursion_limit"]`, set in `cli.main` |
+| `--max-seconds` | wall clock for the whole session | `DEEPAGENTS_MAX_SECONDS` | `DeadlineMiddleware.before_model` |
+| `--max-turns` | turns in a session | `DEEPAGENTS_MAX_TURNS` | a counter checked at the top of `run_turn` |
+
+All three are **live** (`/config set max_steps 40`) and persist to
+`.harness-profile.yaml`.
+
+**`--max-steps` is the one that matters, and `--max-turns` is not a substitute.**
+A headless run is *one* turn — `run_batch` iterates tasks, and a benchmark sweep
+passes one task per instance — so a runaway is not many turns, it is one turn
+whose ReAct loop does not terminate. A turn counter is checked between turns and
+is therefore never reached. The only thing bounding that loop before M8 was
+LangGraph's `recursion_limit`, which the harness never set, and whose inherited
+default on the pinned version is **`10007`** (`langgraph/_internal/_config.py`),
+not the widely-quoted 25. On a free local model, where no cost accrues to stop
+anything, that is not a bound. Re-read the constant rather than trusting either
+number, including this one.
+
+**A stop is an outcome, not a failure.** `telemetry.OUTCOME_STOPPED` joins
+`ok`/`denied`/`budget`/`cancelled`/`aborted`/`error`, and the record carries
+**`stop_reason`** (`"steps"` / `"seconds"` / `"turns"`, `null` otherwise) so one
+outcome can answer *which* ceiling was measured. Three consequences worth
+holding onto:
+
+- `GraphRecursionError` used to fall through `cli._turn_outcome` to `error`, so a
+  **truncated** instance was recorded identically to a **crashed** one. A sweep's
+  failure count mixed "the harness broke" with "the harness ran out of rope" —
+  the M6 invariant 2a conflation, one level down. `_turn_outcome` + `_stop_reason`
+  are the one classifier; a new bound is a line there, not a new flag.
+- It is **not** folded into `budget`. A `--max-cost` cap firing and an agent
+  failing to converge lead to opposite actions (raise the cap vs. fix the loop),
+  and the M1 caps still record `budget`.
+- The process exit code for a stopped headless run is **`limits.EXIT_STOPPED`
+  (43)**, distinct from 0 and from 1, so a driver reading only the process status
+  can make the same distinction the ledger does.
+
+Session vs. turn is a real split: `--max-seconds` and `--max-turns` end the
+**session** (same deterministic close `BudgetExceeded` already gets), while
+`--max-steps` bounds **one turn** and an interactive REPL drops back to the
+prompt. All three are `stopped` in the ledger either way; only the session's fate
+differs.
+
+Layout mirrors telemetry's and raw trace's: **`harness/limits.py`** is stdlib-only
+(the exceptions, `Deadline`, `TurnCounter`, `stop_reason_for`), so the arithmetic
+lives in the host test tier; **`cli.DeadlineMiddleware`** sits with the other
+middleware because it needs the langchain base. `limits.py` matches
+`GraphRecursionError` **by name** rather than importing langgraph — that is what
+keeps it stdlib-only, and the name is also the more stable half, so
+`test_live_model` pins it against a real graph.
+
+Two non-obvious placements, both load-bearing:
+
+- **`DeadlineMiddleware` is appended BEFORE telemetry**, so langchain's
+  first-is-outermost composition makes it the outer `before_model`. Inner, it
+  would raise *after* telemetry opened a model span, and every deadline stop
+  would report a phantom model call that never reached a provider.
+- **Both bound checks live inside `run_turn`'s `try`**, not in the callers' loops,
+  so a stop is classified by `_turn_outcome` and written by the same `finally` as
+  every other turn. A bound that ended a session with no record would be a stop
+  nothing in the ledger can see.
+
+One repair this slice made along the way: `resilience.retry_call` now takes an
+optional `retryable=` predicate, and `_invoke_resilient` passes one that refuses
+to retry a bound stop. `is_retryable` falls back to scanning the message for an
+embedded status code, so `--max-steps 500` produced "Recursion limit of 500
+reached", which read as an HTTP 500 — and the harness retried a graph guaranteed
+to hit the same wall, turning one stop into four.
+
+Tests: `tests/test_limits.py` (host — the arithmetic, with an injected clock, so
+nothing sleeps), the M8 block in `tests/test_cli.py` (image — the classifier, the
+middleware, the exit code, the removable contract asserted as the *absence* of
+the config key), `tests/test_telemetry.py` (the outcome and the `stop_reasons`
+roll-up), `tests/test_config.py` (four-tier resolution), and
+`tests/test_live_model.py` — the tier that catches a bound the harness believes in
+and LangGraph does not honour.
+
 ## Present / past memory (Milestone 2)
 
 The harness keeps **two** stores in the harness **state dir** (`archive.state_dir`),
@@ -1392,6 +1475,7 @@ When a session is running, type these at the `you>` prompt:
 | `/refresh [subpath]` | Pull live host edits into ephemeral workspace copy (ephemeral mode only). Omit subpath to refresh root. | `/refresh src/` |
 | `/config` | Show resolved config (source-tagged); `set <field> <value>` edits one live field; `save` persists session edits to the profile | `/config set model openai:gpt-5.5` |
 | `/config set raw_trace` | Raw prompt/response trace (`off`/`file`/`console`/`both`). Bare (no value) opens the picker. `console`/`both` print the record **instead of** the answer. | `/config set raw_trace file` |
+| `/config set max_steps` | Hard stops (M8): also `max_seconds` / `max_turns`. `max_steps` bounds the ReAct loop inside one turn and takes effect on the NEXT turn, not the running one. | `/config set max_steps 40` |
 
 ## Admin Commands (keyless, outside container)
 
@@ -1449,6 +1533,7 @@ how to disable them, and what behavior they enable/disable:
 | Unified Config profile | M5 | n/a (`.harness-profile.yaml`) | off (no file) | Never; hand-edit `.env`/flags for a one-off | No `.harness-profile.yaml` present ⇒ every knob resolves exactly as it did pre-M5 (env var → default) |
 | Telemetry | M6 | `DEEPAGENTS_TELEMETRY` | 1 | Rarely — the run you want telemetry for is the one you did not expect to go wrong | No `usage.jsonl`, no `session.json`, no PR block, no middleware appended, no new stderr line |
 | Raw trace | M7 | `DEEPAGENTS_RAW_TRACE` | `off` | n/a — off IS the default; turn it **on** (`file`/`console`/`both`) to debug a model, then back off | Middleware installed but a pure pass-through: no file, no directory, no output, no formatting performed |
+| Hard stops | M8 | `DEEPAGENTS_MAX_STEPS` / `_MAX_SECONDS` / `_MAX_TURNS` | unset | n/a — unset IS the default; set one to bound a run | No `recursion_limit` in the graph config, no deadline computed, no turn counter compared. Absent, not infinite |
 
 **Removable contract:** Each "off" state is byte-for-byte identical to the prior milestone 
 (see [Glossary](../docs/README.md#glossary)). E.g., `DEEPAGENTS_MASK=0` ⇒ M3 parity.

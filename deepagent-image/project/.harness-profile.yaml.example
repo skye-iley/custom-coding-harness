@@ -20,6 +20,13 @@ model:                 # e.g. openai:gpt-5.5 -- same spec as DEEPAGENTS_MODEL / 
 topic:
 max_cost:
 max_tokens:
+max_steps:             # Milestone 8: bound the ReAct loop INSIDE one turn (LangGraph
+                       # super-steps). This is the benchmark bound -- a headless run is
+                       # ONE turn, so max_turns cannot catch a runaway loop. Leave blank
+                       # and the graph takes LangGraph's own default, which on the pinned
+                       # version is 10007 -- effectively no bound on a free local model.
+max_seconds:           # session wall clock, checked at the next model-call boundary
+max_turns:             # end the session after this many turns
 raw_trace: off         # off | file | console | both -- Milestone 7 raw prompt/response
                        # trace. `console`/`both` print the record INSTEAD of the rendered
                        # answer. The file sink (<state-dir>/raw-trace/<run_id>.log) is a

@@ -29,6 +29,7 @@ from harness import (
     hitl,
     interrupt,
     jail,
+    limits as limits_mod,
     ratelimit,
     rawtrace,
     refresh,
@@ -91,7 +92,7 @@ from harness.workflows import (
 
 def parse_args() -> argparse.Namespace:
     """Parse CLI args, then route the Settings-covered fields (model, thread_id,
-    topic, headless, max_cost, max_tokens) through ``resolve_settings()``
+    topic, headless, the budgets and the M8 hard stops) through ``resolve_settings()``
     instead of a bespoke env-default dict, so CLI/env/profile precedence lives in
     one place (Milestone 5, C2). Behavior is unchanged for anyone not using a
     profile file: unset flags still fall through to the same env vars they did
@@ -146,6 +147,28 @@ def parse_args() -> argparse.Namespace:
         help="End the session once cumulative tokens cross this (also DEEPAGENTS_MAX_TOKENS).",
     )
     parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Bound the ReAct loop INSIDE one turn (LangGraph super-steps). This "
+        "is the benchmark bound: a headless instance is one turn, so --max-turns "
+        "cannot catch a runaway loop. Unset => LangGraph's own default (also "
+        "DEEPAGENTS_MAX_STEPS).",
+    )
+    parser.add_argument(
+        "--max-seconds",
+        type=float,
+        default=None,
+        help="End the session once this much wall clock has elapsed, checked at "
+        "the next model-call boundary (also DEEPAGENTS_MAX_SECONDS).",
+    )
+    parser.add_argument(
+        "--max-turns",
+        type=int,
+        default=None,
+        help="End the session after this many turns (also DEEPAGENTS_MAX_TURNS).",
+    )
+    parser.add_argument(
         "--raw-trace",
         default=None,
         choices=RAW_TRACE_MODES,
@@ -163,6 +186,9 @@ def parse_args() -> argparse.Namespace:
     args.headless = settings.headless
     args.max_cost = settings.max_cost
     args.max_tokens = settings.max_tokens
+    args.max_steps = settings.max_steps
+    args.max_seconds = settings.max_seconds
+    args.max_turns = settings.max_turns
     args.raw_trace = settings.raw_trace
     args.settings = settings
     args.settings_sources = sources
@@ -588,11 +614,19 @@ def _turn_outcome(exc: BaseException) -> str:
     * ``KeyboardInterrupt`` — the operator cancelled the turn.
     * ``InterruptAborted`` — the headless interrupt policy fail-closed (S5,
       ``EXIT_INTERRUPT_ABORT``). A policy decision, not a break.
+    * a **bound** — ``GraphRecursionError`` (``--max-steps``),
+      ``DeadlineExceeded`` (``--max-seconds``) or ``TurnLimitExceeded``
+      (``--max-turns``). Milestone 8 B1: the agent ran out of the rope the
+      operator gave it. ``GraphRecursionError`` used to fall through to ``error``
+      here, so a truncated instance was recorded identically to a crashed one
+      (``milestone8.md`` §3) — a sweep's failure count then mixed "the harness
+      broke" with "the harness ran out of rope". *Which* bound fired is
+      ``_stop_reason``, not a third outcome.
 
     This is invariant 2a's reasoning — an operator deny is an outcome, not a
-    failure — applied to the other three events that arrive the same way. Keeping
-    it here rather than at each raise site means one classifier to change when a
-    fourth governance exception appears, and one place a test can pin.
+    failure — applied to the other events that arrive the same way. Keeping it
+    here rather than at each raise site means one classifier to change when a new
+    governance exception appears, and one place a test can pin.
     """
     if isinstance(exc, BudgetExceeded):
         return telemetry_mod.OUTCOME_BUDGET
@@ -600,7 +634,35 @@ def _turn_outcome(exc: BaseException) -> str:
         return telemetry_mod.OUTCOME_CANCELLED
     if isinstance(exc, hitl.InterruptAborted):
         return telemetry_mod.OUTCOME_ABORTED
+    if limits_mod.is_stop(exc):
+        return telemetry_mod.OUTCOME_STOPPED
     return telemetry_mod.OUTCOME_ERROR
+
+
+def _stop_reason(exc: BaseException) -> str | None:
+    """``"steps"`` / ``"seconds"`` / ``"turns"``, or ``None`` when no bound fired.
+
+    A separate function from ``_turn_outcome`` rather than a widened return type:
+    the two answer different questions (*was this a failure* vs. *which ceiling*),
+    every existing caller wants only the first, and ``limits.stop_reason_for``
+    already owns the mapping so this is a rename at the seam, not logic.
+    """
+    return limits_mod.stop_reason_for(exc)
+
+
+def _turn_failure_line(exc: BaseException) -> str:
+    """The stage line for a turn that raised out of the generic handlers.
+
+    A `--max-steps` stop arrives as `GraphRecursionError` through the same clause
+    a provider 500 does, and reporting it as "turn failed" is the stderr half of
+    the defect `milestone8.md` §3 describes: the operator reads a crash where the
+    harness did exactly what it was told. The ledger already tells them apart
+    (`stopped` vs. `error`); this makes the console agree.
+    """
+    reason = _stop_reason(exc)
+    if reason is not None:
+        return f"turn stopped ({reason}): {_err_detail(exc)}"
+    return f"turn failed: {_err_detail(exc)}"
 
 
 @dataclasses.dataclass
@@ -686,6 +748,30 @@ class _TurnAccumulator:
 
     def paced_ms(self) -> int:
         return max(ratelimit.blocked_ms() - self.paced_at_start, 0)
+
+
+class DeadlineMiddleware(_AgentMiddleware):
+    """Ends the session at the first step boundary past ``--max-seconds`` (M8 B1).
+
+    ``before_model`` is the cheapest correct seam: it fires once per model call,
+    it is a hook the harness already owns, and it cannot leave a tool call
+    half-executed the way a check inside ``wrap_tool_call`` could. The overshoot is
+    at most one model call, which is the right trade for a benchmark bound (see
+    ``limits`` on why not a signal or a watchdog thread).
+
+    Its own middleware rather than a branch inside ``TelemetryMiddleware``:
+    telemetry must stay removable on its own (M6 §10), and a run bounded by a
+    clock must still be bounded with ``DEEPAGENTS_TELEMETRY=0``. Appended only
+    when the knob is set, so an unbounded run has no deadline object at all
+    (``milestone8.md`` §10 — absent, not infinite).
+    """
+
+    def __init__(self, deadline: "limits_mod.Deadline"):
+        super().__init__()
+        self.deadline = deadline
+
+    def before_model(self, state, runtime):
+        self.deadline.check()
 
 
 class TelemetryMiddleware(_AgentMiddleware):
@@ -786,7 +872,8 @@ class TelemetryMiddleware(_AgentMiddleware):
 
     # --- the write -----------------------------------------------------------
 
-    def build_record(self, *, duration_ms: float, outcome: str) -> "telemetry_mod.TurnRecord":
+    def build_record(self, *, duration_ms: float, outcome: str,
+                     stop_reason: str | None = None) -> "telemetry_mod.TurnRecord":
         acc = self.acc
         acc.close_model_span()  # a turn that died mid-model still reports its time
         delta = _session_delta(self.tracker, self._cost_at_start)
@@ -817,17 +904,19 @@ class TelemetryMiddleware(_AgentMiddleware):
             tool_calls=dict(acc.tool_calls),
             tool_errors=acc.tool_errors,
             outcome=outcome,
+            stop_reason=stop_reason,
             retry_count=acc.retry_count,
             context_trimmed=acc.context_trimmed,
             interrupts=acc.interrupts,
         )
 
-    def write(self, *, duration_ms: float, outcome: str) -> None:
+    def write(self, *, duration_ms: float, outcome: str,
+              stop_reason: str | None = None) -> None:
         """Append this turn's record. Never raises into the turn path (invariant 3):
         an unwritable sink degrades to one stderr line per run, then silence."""
         try:
             telemetry_mod.record_turn(self.sink, self.build_record(
-                duration_ms=duration_ms, outcome=outcome
+                duration_ms=duration_ms, outcome=outcome, stop_reason=stop_reason
             ))
         except Exception as exc:  # noqa: BLE001
             if not self._warned:
@@ -957,6 +1046,8 @@ def run_turn(
     hitl_ctx: "hitl.HitlContext | None" = None,
     telemetry: "TelemetryMiddleware | None" = None,
     raw_trace: "RawTraceMiddleware | None" = None,
+    turns: "limits_mod.TurnCounter | None" = None,
+    deadline: "limits_mod.Deadline | None" = None,
 ) -> str | None:
     """One invoke on the given thread. Returns the answer text, or None when
     --stream already printed raw events instead of a final message.
@@ -983,6 +1074,14 @@ def run_turn(
     exactly the record an operator most wants (invariant 2); and `duration_ms`
     must bracket the HITL resume loop below, which runs *after* the middleware's
     `after_agent` has already fired.
+
+    `turns`/`deadline` (Milestone 8 B1) are the two bounds checked *here* rather
+    than in the callers' loops, and the placement is the point: both checks sit
+    **inside** the try, so a bound that fires is classified by `_turn_outcome` and
+    written by the same `finally` as every other turn. A bound that ended the
+    session with no record would be a stop nothing in the ledger can see, which is
+    the failure mode M8 exists to remove. Both default to None, and None means the
+    bound is absent — not set to infinity (`milestone8.md` §10).
     """
     messages = list(extra_messages or []) + [{"role": "user", "content": text}]
     inputs = {"messages": messages}
@@ -999,8 +1098,17 @@ def run_turn(
         raw_trace.begin_turn()
     started = time.perf_counter()
     outcome = telemetry_mod.OUTCOME_OK
+    stop_reason = None
     try:
         try:
+            # Both bounds are checked before the invoke, so the refusal itself is
+            # the recorded event. `--max-turns K` lets K turns run and refuses the
+            # K+1th; marking a turn that completed as `stopped` would claim the
+            # harness cut it off when it did not.
+            if turns is not None:
+                turns.begin()
+            if deadline is not None:
+                deadline.check()
             if stream:
                 # --stream is the raw-event debug path: no resilience layer, no
                 # HITL loop. It IS still a completed turn, so it gets a record --
@@ -1035,12 +1143,15 @@ def run_turn(
             return None
         except BaseException as exc:
             outcome = _turn_outcome(exc)
+            stop_reason = _stop_reason(exc)
             raise
         return final_message_text(result)
     finally:
         if telemetry is not None:
             telemetry.write(
-                duration_ms=(time.perf_counter() - started) * 1000, outcome=outcome
+                duration_ms=(time.perf_counter() - started) * 1000,
+                outcome=outcome,
+                stop_reason=stop_reason,
             )
 
 
@@ -1096,6 +1207,14 @@ def _invoke_resilient(agent, inputs: dict, config: dict, telemetry=None):
             base=resilience.retry_base_from_env(),
             sleep=_sleep,
             on_retry=_note,
+            # M8 B1: a bound the operator set is never a transient provider
+            # failure. Without this, `--max-steps 500` produces "Recursion limit
+            # of 500 reached", `is_retryable`'s embedded-status scan reads the
+            # 500 as a server error, and the harness retries a graph guaranteed
+            # to hit the same wall -- turning one stop into four.
+            retryable=lambda exc: (
+                not limits_mod.is_stop(exc) and resilience.is_retryable(exc)
+            ),
         )
     except Exception as exc:  # noqa: BLE001
         msgs = inputs.get("messages", []) if isinstance(inputs, dict) else []
@@ -1240,6 +1359,9 @@ def _config_display_lines(
     hitl_conf,
     edited: set[str],
     raw_trace_mode: str | None = None,
+    max_steps: int | None = None,
+    max_seconds: float | None = None,
+    max_turns: int | None = None,
 ) -> list[str]:
     """The lines a bare `/config` prints: live fields first (source-tagged --
     "session" once `/config set` has touched a field this run, else whatever
@@ -1265,6 +1387,12 @@ def _config_display_lines(
             "topic": topic,
             "max_cost": max_cost,
             "max_tokens": max_tokens,
+            # None here means "no bound object this run", which for these three is
+            # a real value to report (unset), not a missing reading -- unlike
+            # `raw_trace` below, whose middleware always exists.
+            "max_steps": max_steps,
+            "max_seconds": max_seconds,
+            "max_turns": max_turns,
             "hitl": hitl_conf,
             # None => no middleware in this (bare host-test) call, so fall back
             # to whatever `resolve_settings` saw rather than reporting "off".
@@ -1317,6 +1445,8 @@ class LiveContext:
     archive_conn: object = None
     run_id: str | None = None
     raw_trace: object = None
+    turns: object = None
+    deadline: object = None
     new_agent: object = None
 
 
@@ -1386,6 +1516,75 @@ def _apply_budget(ctx: LiveContext, spec, value) -> None:
     _stage(f"config: {spec.name} -> {parsed} (this session only; /config save to persist)")
 
 
+def _apply_max_steps(ctx: LiveContext, spec, value) -> None:
+    """Set the step bound on the live graph config.
+
+    One dict write, no agent rebuild: `config` is built once in `main` and passed
+    into every `run_turn`, so the new limit binds on the *next* turn (§13 item 5).
+    It cannot bind mid-turn, and saying so is the point -- an operator who sets
+    this to stop a turn that is currently running will not see it take effect.
+    """
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        _stage(f"config: max_steps must be a whole number, got {value!r}")
+        return
+    if parsed < 1:
+        _stage(f"config: max_steps must be at least 1, got {parsed}")
+        return
+    old = ctx.config.get("recursion_limit")
+    ctx.config["recursion_limit"] = parsed
+    ctx.edited.add("max_steps")
+    _stage(
+        f"config: max_steps {old if old is not None else '(unset)'} -> {parsed} "
+        "(takes effect on the next turn, not this one)"
+    )
+
+
+def _apply_max_seconds(ctx: LiveContext, spec, value) -> None:
+    """Re-point the session deadline.
+
+    Measured from session *start*, not from now: it is a session bound, and
+    re-basing it on every edit would let a bound be extended indefinitely one
+    `/config set` at a time. A value already behind the elapsed clock therefore
+    stops the session at the next model call, which is the honest reading of
+    "the session may run for N seconds".
+    """
+    if ctx.deadline is None:
+        _stage("config: no session deadline this run -- relaunch with --max-seconds to set one")
+        return
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        _stage(f"config: max_seconds must be a number, got {value!r}")
+        return
+    old = ctx.deadline.seconds
+    ctx.deadline.seconds = parsed
+    ctx.edited.add("max_seconds")
+    _stage(
+        f"config: max_seconds {old} -> {parsed} "
+        f"({ctx.deadline.elapsed():.0f}s already elapsed this session)"
+    )
+
+
+def _apply_max_turns(ctx: LiveContext, spec, value) -> None:
+    """Re-point the session turn limit, against the turns already taken."""
+    if ctx.turns is None:
+        _stage("config: no turn limit this run -- relaunch with --max-turns to set one")
+        return
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        _stage(f"config: max_turns must be a whole number, got {value!r}")
+        return
+    old = ctx.turns.limit
+    ctx.turns.limit = parsed
+    ctx.edited.add("max_turns")
+    _stage(
+        f"config: max_turns {old} -> {parsed} ({ctx.turns.count} turns taken)"
+    )
+
+
 def _apply_hitl(ctx: LiveContext, spec, value) -> None:
     # Mutate the live (frozen) HitlSection PauseMiddleware already holds a
     # reference to, so it applies to the next gated call, no rebuild.
@@ -1439,6 +1638,9 @@ _LIVE_APPLIERS = {
     "topic": _apply_topic,
     "max_cost": _apply_budget,
     "max_tokens": _apply_budget,
+    "max_steps": _apply_max_steps,
+    "max_seconds": _apply_max_seconds,
+    "max_turns": _apply_max_turns,
     "raw_trace": _apply_raw_trace,
     "hitl.autonomy_level": _apply_hitl,
     "hitl.on_deny": _apply_hitl,
@@ -1461,6 +1663,8 @@ def _handle_config(
     archive_conn=None,
     run_id: str | None = None,
     raw_trace=None,
+    turns=None,
+    deadline=None,
 ) -> tuple[str, object | None, str | None]:
     """Handle one `/config`, `/config set <field> <value>`, or `/config save`
     line. Returns `(current_model, new_agent_or_None, current_topic)` --
@@ -1498,6 +1702,9 @@ def _handle_config(
             hitl_conf=hitl_conf,
             edited=edited,
             raw_trace_mode=(raw_trace.sink.mode if raw_trace is not None else None),
+            max_steps=config.get("recursion_limit"),
+            max_seconds=(deadline.seconds if deadline is not None else None),
+            max_turns=(turns.limit if turns is not None else None),
         ):
             print(out, file=sys.stderr)
         return current_model, None, topic
@@ -1512,6 +1719,12 @@ def _handle_config(
             values["max_cost"] = tracker._max_cost
         if "max_tokens" in edited and tracker is not None:
             values["max_tokens"] = tracker._max_tokens
+        if "max_steps" in edited:
+            values["max_steps"] = config.get("recursion_limit")
+        if "max_seconds" in edited and deadline is not None:
+            values["max_seconds"] = deadline.seconds
+        if "max_turns" in edited and turns is not None:
+            values["max_turns"] = turns.limit
         if "raw_trace" in edited and raw_trace is not None:
             values["raw_trace"] = raw_trace.sink.mode
         if not values:
@@ -1585,6 +1798,8 @@ def _handle_config(
         archive_conn=archive_conn,
         run_id=run_id,
         raw_trace=raw_trace,
+        turns=turns,
+        deadline=deadline,
     )
     _LIVE_APPLIERS[field](ctx, spec, value)
     return ctx.current_model, ctx.new_agent, ctx.topic
@@ -1692,7 +1907,7 @@ def _print_session_total(tracker: CostTrackerMiddleware | None) -> None:
 
 
 def _run_turn_hitl(agent, text, config, *, stream, extra_messages, hitl_ctx, telemetry=None,
-                   raw_trace=None):
+                   raw_trace=None, turns=None, deadline=None):
     """`run_turn` plus the S4 *provider-error* system interrupt.
 
     When the resilience layer (P1) has exhausted its retries and re-raised a
@@ -1714,8 +1929,15 @@ def _run_turn_hitl(agent, text, config, *, stream, extra_messages, hitl_ctx, tel
                 agent, text, config,
                 stream=stream, extra_messages=extra_messages, hitl_ctx=hitl_ctx,
                 telemetry=telemetry, raw_trace=raw_trace,
+                turns=turns, deadline=deadline,
             )
         except BudgetExceeded:
+            raise
+        except (limits_mod.DeadlineExceeded, limits_mod.TurnLimitExceeded):
+            # A bound the operator set is never a provider error, so it must not
+            # reach the retry offer below. `is_retryable` already says no, but a
+            # bound stop reaching a "retry?" prompt at all would be wrong enough
+            # to pin explicitly rather than rely on a classifier elsewhere.
             raise
         except Exception as exc:  # noqa: BLE001
             offerable = (
@@ -1812,6 +2034,8 @@ def run_repl(
     settings_sources=None,
     telemetry: "TelemetryMiddleware | None" = None,
     raw_trace: "RawTraceMiddleware | None" = None,
+    turns: "limits_mod.TurnCounter | None" = None,
+    deadline: "limits_mod.Deadline | None" = None,
 ) -> int:
     """Container-lifetime loop: build once (by the caller), then prompt -> invoke
     -> answer until /exit, /quit, or EOF. A non-TTY stdin collapses to the single
@@ -1837,6 +2061,12 @@ def run_repl(
     `current_model`/`rebuild_agent` are the pieces `main()` already has that
     `_handle_config` needs; both optional so this stays host-testable with a
     bare-minimum call (matching the rest of run_repl).
+
+    Milestone 8 B1: `turns`/`deadline` end the session the same deterministic way
+    `BudgetExceeded` already does -- the bound raises out of `run_turn` (which
+    recorded it first), and the clause here closes the session rather than
+    dropping back to the prompt. Both None => the clauses are inert and the loop
+    is byte-for-byte its pre-M8 self.
     """
     interactive = sys.stdin.isatty()
     current_topic = topic
@@ -1860,6 +2090,7 @@ def run_repl(
             answer = _run_turn_hitl(
                 agent, initial_task, config, stream=stream, extra_messages=None,
                 hitl_ctx=hitl_ctx, telemetry=telemetry, raw_trace=raw_trace,
+                turns=turns, deadline=deadline,
             )
         except KeyboardInterrupt:
             # Ctrl-C during a turn cancels that turn only; the session survives.
@@ -1870,13 +2101,24 @@ def run_repl(
             _print_session_total(tracker)
             _stage("session closed")
             return 0
+        except (limits_mod.DeadlineExceeded, limits_mod.TurnLimitExceeded) as exc:
+            # SESSION bounds: the clock and the turn counter are properties of the
+            # whole run, so crossing one ends it, like `/exit`. `--max-steps` is
+            # deliberately NOT here -- it bounds one turn's ReAct loop, so an
+            # interactive session drops back to the prompt and the operator
+            # decides. Both are still `stopped` in the ledger; only the session's
+            # fate differs.
+            _stage(f"stopped: {exc}")
+            _print_session_total(tracker)
+            _stage("session closed")
+            return 0
         except Exception as exc:  # noqa: BLE001
             # A turn failure (e.g. a transient provider 5xx surfaced by the model
             # client) must not crash the container or bypass session finalization.
             # Report it and fall through: an interactive session drops to the
             # prompt for a retry; a non-interactive run closes cleanly below so the
             # archive row is still finalized by main().
-            _stage(f"turn failed: {_err_detail(exc)}")
+            _stage(_turn_failure_line(exc))
             _dump_error(exc)
             _dump_partial(agent, config)
             answer = None
@@ -1941,6 +2183,8 @@ def run_repl(
                     archive_conn=archive_conn,
                     run_id=run_id,
                     raw_trace=raw_trace,
+                    turns=turns,
+                    deadline=deadline,
                 )
             except Exception as exc:  # noqa: BLE001
                 _stage(f"config: command failed: {_err_detail(exc)}")
@@ -1959,6 +2203,7 @@ def run_repl(
             answer = _run_turn_hitl(
                 agent, line, config, stream=stream, extra_messages=pending,
                 hitl_ctx=hitl_ctx, telemetry=telemetry, raw_trace=raw_trace,
+                turns=turns, deadline=deadline,
             )
             pending = []
         except KeyboardInterrupt:
@@ -1974,12 +2219,16 @@ def run_repl(
             # Budget crossed mid-turn: end the session like /exit (§2.5).
             _stage(f"budget exceeded: {exc}")
             break
+        except (limits_mod.DeadlineExceeded, limits_mod.TurnLimitExceeded) as exc:
+            # Session bound crossed: same deterministic exit as a budget.
+            _stage(f"stopped: {exc}")
+            break
         except Exception as exc:  # noqa: BLE001
             # One failed turn (transient provider error, etc.) shouldn't end the
             # persistent session: report it and keep the loop alive so the user can
             # retry. The staged recall slice is dropped so a poison injection can't
             # fail the same turn forever; re-issue /recall to stage it again.
-            _stage(f"turn failed: {_err_detail(exc)}")
+            _stage(_turn_failure_line(exc))
             _dump_error(exc)
             _dump_partial(agent, config)
             pending = []
@@ -2128,6 +2377,8 @@ def run_batch(
     workspace: Path | None = None,
     telemetry: "TelemetryMiddleware | None" = None,
     raw_trace: "RawTraceMiddleware | None" = None,
+    turns: "limits_mod.TurnCounter | None" = None,
+    deadline: "limits_mod.Deadline | None" = None,
 ) -> int:
     """Headless one-shot mode (P2 / design_doc.md §12.3).
 
@@ -2154,6 +2405,7 @@ def run_batch(
             final_message = run_turn(
                 agent, task, config, stream=stream, hitl_ctx=hitl_ctx,
                 telemetry=telemetry, raw_trace=raw_trace,
+                turns=turns, deadline=deadline,
             )
     except hitl.InterruptAborted as exc:
         _stage(f"headless abort: {exc}")
@@ -2161,10 +2413,22 @@ def run_batch(
     except BudgetExceeded as exc:
         _stage(f"budget exceeded: {exc}")
     except Exception as exc:  # noqa: BLE001
-        _stage(f"turn failed: {_err_detail(exc)}")
+        # `is_stop` rather than an exception tuple: `--max-steps` surfaces as
+        # langgraph's `GraphRecursionError`, which this module must not import to
+        # classify (`limits` matches it by name so the arithmetic stays in the
+        # host tier). All three bounds land here in headless mode, since one
+        # instance is one turn and a session bound therefore ends the run too.
+        if limits_mod.is_stop(exc):
+            _stage(f"stopped ({_stop_reason(exc)}): {_err_detail(exc)}")
+            # A DISTINCT exit code, not 1: a driver reading only the process
+            # status must be able to tell "did not converge" from "the harness
+            # broke" -- the same split `OUTCOME_STOPPED` makes in the ledger.
+            exit_code = limits_mod.EXIT_STOPPED
+        else:
+            _stage(f"turn failed: {_err_detail(exc)}")
+            exit_code = 1
         _dump_error(exc)
         _dump_partial(agent, config)
-        exit_code = 1
 
     _print_session_total(tracker)
     print(json.dumps(
@@ -2244,6 +2508,30 @@ def main() -> int:
     checkpoint_db.parent.mkdir(parents=True, exist_ok=True)
 
     config = {"configurable": {"thread_id": args.thread_id}}
+    # M8 B1: the step bound is one key in the graph config -- LangGraph already
+    # counts super-steps and raises GraphRecursionError. Set ONLY when the operator
+    # passed a number: with the flag unset the key is absent, so the graph takes
+    # LangGraph's own default and the pass-through is structural rather than a
+    # very large number that merely behaves like one (`milestone8.md` §10).
+    #
+    # Worth knowing what that default is before deciding not to set it: on the
+    # pinned version it is `int(getenv("LANGGRAPH_DEFAULT_RECURSION_LIMIT", "10007"))`
+    # (`langgraph/_internal/_config.py`), NOT the widely-quoted 25. Ten thousand
+    # super-steps against a free local model is unbounded in every sense that
+    # matters, which is why `harness bench` refuses to start without a bound even
+    # though the harness itself defaults to none.
+    if args.max_steps is not None:
+        config["recursion_limit"] = args.max_steps
+    # The other two bounds, as objects rather than numbers so the arithmetic is
+    # host-testable. None when unset => `run_turn` compares nothing and appends no
+    # middleware. The deadline starts here, beside `session_started_perf`, because
+    # it bounds the *session* -- not the first turn.
+    deadline = (
+        limits_mod.Deadline(args.max_seconds) if args.max_seconds is not None else None
+    )
+    turn_counter = (
+        limits_mod.TurnCounter(args.max_turns) if args.max_turns is not None else None
+    )
 
     # Past archive (Milestone 2, §2.2): a SEPARATE sqlite store beside the
     # checkpointer, never opened by LangGraph, so it is structurally impossible to
@@ -2288,6 +2576,13 @@ def main() -> int:
             # something to track (§2.5). None => append nothing => MVP behavior.
             tracker = build_cost_tracker(model, args.max_cost, args.max_tokens)
             middleware = build_workflow_middleware(by_hook, workspace)
+            # M8 B1: appended BEFORE telemetry, so langchain's first-is-outermost
+            # composition makes the deadline the outer `before_model`. Inner, it
+            # would raise *after* telemetry opened a model span, and the record
+            # would carry a phantom model call that never reached a provider.
+            # Not appended at all when unset -- the removable contract.
+            if deadline is not None:
+                middleware.append(DeadlineMiddleware(deadline))
             # Telemetry goes in BEFORE the tracker so it observes the whole turn
             # including anything the later middlewares add. langchain composes
             # first-is-outermost, so this also makes it the outer wrap_tool_call
@@ -2420,6 +2715,8 @@ def main() -> int:
                     workspace=workspace,
                     telemetry=telemetry,
                     raw_trace=raw_trace,
+                    turns=turn_counter,
+                    deadline=deadline,
                 )
             else:
                 rc = run_repl(
@@ -2440,6 +2737,8 @@ def main() -> int:
                     settings_sources=args.settings_sources,
                     telemetry=telemetry,
                     raw_trace=raw_trace,
+                    turns=turn_counter,
+                    deadline=deadline,
                 )
             if archive_conn is not None:
                 # After the M1 session-total line printed (inside run_repl), so the

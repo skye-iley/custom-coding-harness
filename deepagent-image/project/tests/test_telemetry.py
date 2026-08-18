@@ -215,7 +215,7 @@ def test_failed_is_derived_from_outcome_and_only_error_counts():
     """
     assert _record(outcome=tm.OUTCOME_ERROR).failed is True
     for good in (tm.OUTCOME_OK, tm.OUTCOME_DENIED, tm.OUTCOME_BUDGET,
-                 tm.OUTCOME_CANCELLED, tm.OUTCOME_ABORTED):
+                 tm.OUTCOME_CANCELLED, tm.OUTCOME_ABORTED, tm.OUTCOME_STOPPED):
         record = _record(outcome=good)
         assert record.failed is False, good
         assert record.to_dict()["failed"] is False, good
@@ -477,3 +477,97 @@ def test_telemetry_imports_no_sibling_but_scrub():
     assert loaded == {"harness.scrub", "harness.telemetry"}, (
         f"harness.telemetry pulled in siblings beyond harness.scrub: {loaded}"
     )
+
+
+# --- Milestone 8 B1: the `stopped` outcome and `stop_reason` -------------------
+#
+# The distinction these pin: a bound the operator set firing is NOT the harness
+# breaking, and *which* bound fired is the actionable half. Before M8,
+# `GraphRecursionError` fell through to `error`, so a truncated instance and a
+# crashed one were the same row in a sweep (`milestone8.md` §3).
+
+
+def test_a_stopped_turn_round_trips_and_is_not_a_failure(tmp_path):
+    sink = tmp_path / "usage.jsonl"
+    tm.record_turn(
+        sink, _record(turn=1, outcome=tm.OUTCOME_STOPPED, stop_reason="steps"), env={}
+    )
+    (row,) = tm.read_records(sink)
+    assert row["outcome"] == tm.OUTCOME_STOPPED
+    assert row["stop_reason"] == "steps"
+    assert row["failed"] is False
+    s = tm.derive_session([row])
+    assert s["turns_failed"] == 0
+    assert s["outcomes"] == {"stopped": 1}
+
+
+def test_stop_reason_is_null_on_a_turn_no_bound_stopped(tmp_path):
+    # Present-and-null, never absent: a reader must be able to tell "no bound
+    # fired" from "the field is gone", the same convention M6 used for the join
+    # keys on the headless payload.
+    sink = tmp_path / "usage.jsonl"
+    tm.record_turn(sink, _record(turn=1), env={})
+    (row,) = tm.read_records(sink)
+    assert "stop_reason" in row
+    assert row["stop_reason"] is None
+
+
+def test_summary_counts_which_bound_stopped_each_turn(tmp_path):
+    sink = tmp_path / "usage.jsonl"
+    for i, reason in enumerate(("steps", "seconds", "steps"), start=1):
+        tm.record_turn(
+            sink,
+            _record(turn=i, outcome=tm.OUTCOME_STOPPED, stop_reason=reason),
+            env={},
+        )
+    tm.record_turn(sink, _record(turn=4, outcome=tm.OUTCOME_OK), env={})
+    s = tm.derive_session(tm.read_records(sink))
+    assert s["stop_reasons"] == {"steps": 2, "seconds": 1}
+    # Derived from the same records as `outcomes`, so the two agree by
+    # construction rather than by a second accumulator (invariant 6).
+    assert sum(s["stop_reasons"].values()) == s["outcomes"][tm.OUTCOME_STOPPED]
+
+
+def test_stop_reasons_is_empty_when_nothing_was_stopped(tmp_path):
+    sink = tmp_path / "usage.jsonl"
+    tm.record_turn(sink, _record(turn=1), env={})
+    s = tm.derive_session(tm.read_records(sink))
+    assert s["stop_reasons"] == {}
+    # And `show` says nothing about bounds on a run where none fired.
+    assert "[" not in "\n".join(
+        line for line in tm.format_show(s, "records").splitlines() if "outcomes" in line
+    )
+
+
+def test_show_names_the_bound_that_fired(tmp_path):
+    s = tm.derive_session(
+        [_record(turn=1, outcome=tm.OUTCOME_STOPPED, stop_reason="seconds").to_dict()]
+    )
+    line = next(l for l in tm.format_show(s, "records").splitlines() if "outcomes" in l)
+    assert "stopped=1" in line and "seconds=1" in line
+
+
+def test_a_stopped_run_is_named_in_the_pr_block(tmp_path):
+    # The PR body already names every non-`ok` outcome, so `stopped` rides in for
+    # free -- pinned because a reviewer reading "(1 stopped)" and "(1 failed)"
+    # takes different actions, and the generic rendering is what keeps that true
+    # without a per-outcome branch.
+    s = tm.derive_session(
+        [_record(turn=1, outcome=tm.OUTCOME_STOPPED, stop_reason="turns").to_dict()]
+    )
+    assert "1 stopped" in tm.render_pr_block(s)
+
+
+def test_an_unknown_outcome_still_degrades_to_error():
+    # Unchanged by M8, and re-pinned because the milestone added a member to the
+    # enum: an OLD reader meeting a NEWER record must fail safe, which is why
+    # `schema` did not have to bump for either addition.
+    assert _record(outcome="teleported").to_dict()["outcome"] == tm.OUTCOME_ERROR
+
+
+def test_stopped_is_in_the_declared_outcome_enum():
+    # `_outcome_counts` orders by OUTCOMES, and `to_dict` degrades anything
+    # outside it -- so a constant that exists but was never added to the tuple
+    # would write every stopped turn to disk as `error`, which is precisely the
+    # defect this milestone removes.
+    assert tm.OUTCOME_STOPPED in tm.OUTCOMES

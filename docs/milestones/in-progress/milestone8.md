@@ -1,6 +1,7 @@
 # Milestone 8 — Benchmark Ladder, Tier 1 (Gold Set)
 
-> **Status:** 🚧 In progress — plan + `milestone8_invariants.md` written, **no code yet**.
+> **Status:** 🚧 In progress — **B1 (hard stops) is built** on `feat/milestone8-bench-ladder`;
+> B2–B5 not started. §0.1 records what the build changed about the plan.
 > `design_doc.md` §11 "Automated Benchmarking Suite" is the parent entry; this doc is the concrete
 > tier-1 slice and wins over it for *what we build next*.
 >
@@ -44,6 +45,76 @@ wall clock, a `run_id` that does not actually join — all read green today.
 Chosen now because it is **free** (local Ollama is already the default provider, `pricing = "free"`,
 no key, no quota), **host-runnable**, and **independent of the trust-boundary chain**, so it cannot
 stall on an unmeasured LSM the way anything touching the jail can.
+
+---
+
+## 0.1 Build status — what shipped, and what the build changed
+
+| Slice | State |
+|---|---|
+| **B1** hard stops (`--max-steps` / `--max-seconds` / `--max-turns`, `OUTCOME_STOPPED` + `stop_reason`) | ✅ **built** |
+| **B2** `--emit-patch` | not started |
+| **B3** `harness/bench/` driver | not started |
+| **B4** the gold set | not started |
+| **B5** baseline record | not started |
+
+Suite after B1: **1059 passed / 4 platform skips** on the host dev venv with the live-model
+tier on (the 4 are the standing Windows symlink/posix-path skips).
+
+### What B1 changed about the plan
+
+1. **A fourth artefact the plan did not name: `resilience.retry_call` gained an
+   injectable `retryable=` predicate, because the step bound was silently
+   retryable.** `is_retryable` falls back to scanning an error's message for an
+   embedded status code (`Error code: 503`), which is right for a provider error
+   and wrong for an exception that merely *contains* a 4xx/5xx-shaped number. A
+   perfectly ordinary `--max-steps 500` makes LangGraph say *"Recursion limit of
+   500 reached"*, the scan reads the 500 as a server error, and the harness
+   retries a graph guaranteed to hit the same wall — one stop becomes four, each
+   burning a full loop. `_invoke_resilient` now passes a predicate that refuses
+   to retry a bound stop. The knowledge stays at the seam that has it;
+   `resilience.py` still imports no sibling. Reachable by any operator who picks
+   a round number between 400 and 599 for a bound, which is most of them.
+
+2. **`--max-steps` bounds a *turn*; the other two bound the *session*.** §5.1
+   treated the three as one family. They are not: a clock and a turn counter are
+   properties of the whole run, so crossing one ends the session (the same
+   deterministic close `BudgetExceeded` already gets), while a step bound is per
+   invoke and an interactive REPL should drop back to the prompt and let the
+   operator decide. All three are still `stopped` in the ledger — only the
+   session's fate differs.
+
+3. **A stopped headless run needed its own exit code**, which §5.1 did not call
+   for. The plan gave a sweep `outcome`/`stop_reason` in the ledger and left
+   `exit_code` at 1, i.e. exactly the "truncated looks like crashed" conflation
+   §3 exists to remove, moved from the ledger to the process status.
+   `limits.EXIT_STOPPED = 43`, next to `interrupt.EXIT_INTERRUPT_ABORT = 42`.
+
+4. **`DeadlineMiddleware` must be appended *before* telemetry, not after.**
+   langchain composes first-is-outermost, so an inner deadline raises after
+   `TelemetryMiddleware.before_model` has already opened a model span — and
+   `build_record` closes any open span, so every deadline stop would report a
+   phantom `model_calls: 1` that never reached a provider. The same
+   position-is-load-bearing lesson M7 §5 learned one layer out.
+
+5. **Both bound checks live inside `run_turn`'s `try`**, so a stop is classified
+   by `_turn_outcome` and written by the same `finally` as every other turn.
+   §5.1's "checked the same place `BudgetExceeded` already ends a session" read
+   naturally as the callers' loops, which would have produced a stop that ends a
+   session and leaves nothing in the ledger. Consequence worth stating: with
+   `--max-turns K` the ledger holds `K` real turns plus one zero-work `stopped`
+   record — the refusal of the `K+1`th — because the refusal is the event.
+
+6. **§3's re-read-the-constant instruction paid off, in the boring direction.** Measured on the pinned version: `DEFAULT_RECURSION_LIMIT` is
+   `10007`, as §3 says, and `GraphRecursionError` subclasses
+   `RecursionError`/`RuntimeError` (so it reaches the generic `except Exception`
+   handlers rather than needing a `BaseException` clause). The live-model tier
+   pins the class *name*, since `limits.py` is stdlib-only and matches by name.
+
+7. **`stop_reasons` was added to the derived session summary**, unplanned but
+   free: it is a fold over the records like every other summary field
+   (M6 invariant 6), and without it `harness telemetry show` could say a run was
+   `stopped` without saying by what.
 
 ---
 

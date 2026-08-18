@@ -310,3 +310,46 @@ def test_trim_messages_keeps_last_n():
     assert res.trim_messages(msgs, 3) == [7, 8, 9]
     assert res.trim_messages(msgs, 0) == []
     assert res.trim_messages(msgs, 100) == msgs
+
+
+# --- Milestone 8 B1: an injectable classifier ---------------------------------
+
+
+def test_retry_call_honours_an_injected_retryable_predicate():
+    """The seam M8 needed, and the bug it exists for.
+
+    `is_retryable` falls back to scanning the message for an embedded status
+    (`Error code: 503`). That is right for a provider error and wrong for an
+    exception that merely *contains* a 4xx/5xx-shaped number -- `--max-steps 500`
+    makes LangGraph say "Recursion limit of 500 reached", which the scan reads as
+    a server error. Retrying it re-runs a graph guaranteed to hit the same wall,
+    turning one stop into four.
+    """
+    boom = RuntimeError("Recursion limit of 500 reached without hitting a stop condition")
+    # The default classifier is fooled -- this is the defect, pinned.
+    assert res.is_retryable(boom) is True
+
+    calls = []
+
+    def fn():
+        calls.append(1)
+        raise boom
+
+    with pytest.raises(RuntimeError):
+        res.retry_call(
+            fn, max_retries=3, base=0.01, sleep=lambda s: None,
+            retryable=lambda exc: False,
+        )
+    assert len(calls) == 1  # no retry at all
+
+
+def test_retry_call_without_the_predicate_is_unchanged():
+    calls = []
+
+    def fn():
+        calls.append(1)
+        raise RuntimeError("Error code: 503 service unavailable")
+
+    with pytest.raises(RuntimeError):
+        res.retry_call(fn, max_retries=2, base=0.01, sleep=lambda s: None)
+    assert len(calls) == 3  # one initial + two retries, as before M8

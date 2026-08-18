@@ -204,3 +204,28 @@ def test_package_getattr_does_not_shadow_submodule_imports():
         "    raise SystemExit('missing attribute did not raise AttributeError')\n"
     )
     assert "harness.config" in loaded
+
+
+def test_limits_imports_without_the_runtime_stack():
+    """Milestone 8 B1: `harness/limits.py` is stdlib-only by contract.
+
+    That is what keeps the bound arithmetic in the host test tier — the same
+    split `telemetry.py`/`TelemetryMiddleware` and `rawtrace.py`/
+    `RawTraceMiddleware` already use. The one class that needs the langchain base
+    (`cli.DeadlineMiddleware`) deliberately lives in `cli.py` instead, so a
+    langchain import creeping in here would silently move the whole module out of
+    the tier that can test it without Docker.
+    """
+    _assert_no_runtime_stack(_modules_after("import harness.limits"), "harness.limits")
+
+
+def test_limits_imports_no_sibling_harness_module():
+    # It must also stay free of *harness* siblings: `cli` imports it, so a
+    # back-edge would be a cycle, and `stop_reason_for` deliberately matches
+    # langgraph's GraphRecursionError by NAME rather than importing it.
+    loaded = _modules_after("import harness.limits")
+    siblings = {
+        m for m in loaded
+        if m.startswith("harness.") and m not in ("harness.limits",)
+    }
+    assert not siblings, f"harness.limits pulled in siblings: {sorted(siblings)}"

@@ -64,18 +64,29 @@ SESSION_FILE = "session.json"
 #   budget    a --max-cost / --max-tokens cap stopped the turn
 #   cancelled the operator pressed Ctrl-C mid-turn
 #   aborted   the headless interrupt policy fail-closed (EXIT_INTERRUPT_ABORT)
+#   stopped   a --max-steps / --max-seconds / --max-turns bound fired (M8 B1)
 #   error     a provider error outlasted the retries, or the harness raised
 #
-# The first five are *outcomes* — the harness did what it was configured to do.
+# The first six are *outcomes* — the harness did what it was configured to do.
 # Counting them as failures puts a governance signal in the reliability column,
 # which a benchmark sweep then reads as harness unreliability (invariant 2a). The
 # original code excluded `denied` on exactly that reasoning and then included the
 # other three, which is the inconsistency this field removes.
+#
+# `stopped` is Milestone 8's addition and is deliberately NOT folded into either
+# neighbour. Folding a clock or step stop into `budget` says "the operator's cap
+# fired" about an event closer to "the agent did not converge", and the two lead
+# to opposite actions (raise the cap vs. fix the loop). Folding it into `error` is
+# the defect `milestone8.md` §3 documents: `GraphRecursionError` falls through to
+# OUTCOME_ERROR today, so a truncated instance is recorded identically to a
+# crashed one, and a sweep's failure count mixes the two. Which of the three
+# bounds fired is `stop_reason`, not a third outcome.
 OUTCOME_OK = "ok"
 OUTCOME_DENIED = "denied"
 OUTCOME_BUDGET = "budget"
 OUTCOME_CANCELLED = "cancelled"
 OUTCOME_ABORTED = "aborted"
+OUTCOME_STOPPED = "stopped"
 OUTCOME_ERROR = "error"
 OUTCOMES = (
     OUTCOME_OK,
@@ -83,6 +94,7 @@ OUTCOMES = (
     OUTCOME_BUDGET,
     OUTCOME_CANCELLED,
     OUTCOME_ABORTED,
+    OUTCOME_STOPPED,
     OUTCOME_ERROR,
 )
 
@@ -165,6 +177,7 @@ class TurnRecord:
     tool_errors: int = 0
 
     outcome: str = OUTCOME_OK
+    stop_reason: str | None = None
     retry_count: int = 0
     context_trimmed: bool = False
     interrupts: int = 0
@@ -208,6 +221,11 @@ class TurnRecord:
             "tool_calls": {str(k): int(v) for k, v in (self.tool_calls or {}).items()},
             "tool_errors": int(self.tool_errors),
             "outcome": (self.outcome if self.outcome in OUTCOMES else OUTCOME_ERROR),
+            # Null on every turn that was not stopped, so a reader can tell "no
+            # bound fired" from "a bound fired and we lost which one". Additive
+            # and nullable, so no schema bump: `outcome` was always declared as an
+            # enum that could grow (§2's own rule).
+            "stop_reason": self.stop_reason,
             "failed": bool(self.failed),
             "retry_count": int(self.retry_count),
             "context_trimmed": bool(self.context_trimmed),
@@ -340,6 +358,24 @@ def _outcome_counts(records: list[dict]) -> dict[str, int]:
     return {**known, **extra}
 
 
+def _stop_reason_counts(records: list[dict]) -> dict[str, int]:
+    """``{stop_reason: n}`` over the stopped turns, zeroes omitted.
+
+    Which bound fired is the actionable half of a ``stopped`` outcome: a sweep
+    that is mostly ``stopped``/``steps`` is reporting the bound the operator set,
+    not the harness (``milestone8.md`` §8). Unrecognised values are counted under
+    their own key for the same reason ``_outcome_counts`` does it — a tally that
+    silently drops a turn is worse than one with an odd key in it.
+    """
+    counts: dict[str, int] = {}
+    for r in records:
+        reason = r.get("stop_reason")
+        if not reason:
+            continue
+        counts[str(reason)] = counts.get(str(reason), 0) + 1
+    return counts
+
+
 def derive_session(
     records: list[dict],
     *,
@@ -438,6 +474,11 @@ def derive_session(
             if (r["outcome"] == OUTCOME_ERROR if r.get("outcome") else r.get("failed"))
         ),
         "outcomes": _outcome_counts(records),
+        # Sparse, same convention as `outcomes`: `{}` on a run where nothing was
+        # stopped. Derived from the records like everything else here (invariant
+        # 6), so `outcomes["stopped"]` and the sum of this map agree by
+        # construction rather than by a second accumulator.
+        "stop_reasons": _stop_reason_counts(records),
         "tokens": tokens,
         "cost_usd": (round(cost, 6) if cost is not None else None),
         "cost_provenance": provenance,
@@ -513,6 +554,14 @@ def format_cost(cost_usd, provenance: str | None = None) -> str:
     return text
 
 
+def _stop_reason_suffix(summary: dict) -> str:
+    """`` [steps=1, seconds=2]`` when a bound fired, ``""`` otherwise."""
+    reasons = summary.get("stop_reasons") or {}
+    if not reasons:
+        return ""
+    return " [" + ", ".join(f"{k}={v}" for k, v in reasons.items()) + "]"
+
+
 def render_pr_block(summary: dict | None) -> str:
     """The markdown block appended to the PR body (§10). ``""`` when there is no
     summary, so the caller's fallback is "append nothing" rather than a branch.
@@ -586,7 +635,11 @@ def format_show(summary: dict, source: str) -> str:
         ("turns", f"{summary.get('turns', 0)} ({summary.get('turns_failed', 0)} failed)"),
         (
             "outcomes",
-            ", ".join(f"{k}={v}" for k, v in (summary.get("outcomes") or {}).items()) or "-",
+            (", ".join(f"{k}={v}" for k, v in (summary.get("outcomes") or {}).items()) or "-")
+            # Which bound fired, inline rather than as its own row: it is
+            # meaningless without the `stopped` count beside it, and a row that is
+            # "-" on every unstopped run is a row nobody reads.
+            + _stop_reason_suffix(summary),
         ),
         (
             "tokens",
