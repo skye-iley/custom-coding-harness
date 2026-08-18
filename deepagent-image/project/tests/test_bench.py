@@ -997,6 +997,7 @@ def test_bench_main_creates_a_new_run_dir_each_completed_invocation(tmp_path, mo
     ds = _dataset(bench, _instance(instance_id="a", workspace="001"))
     out = tmp_path / "out"
 
+    monkeypatch.setattr(driver, "find_repo_root", lambda: tmp_path)
     monkeypatch.setattr(driver, "HolderRunner", lambda **kw: FakeRunner([_result()]))
     assert driver.bench_main([
         "run", str(ds), "--out", str(out), "--max-steps", "5", "--max-seconds", "5",
@@ -1027,6 +1028,7 @@ def test_bench_main_continues_an_interrupted_run_in_the_same_dir(tmp_path, monke
     # First invocation: "a" succeeds, then a RunnerError (launcher missing,
     # docker daemon down, ...) stops the sweep before "b" is ever attempted --
     # exactly a kill mid-sweep, not a per-instance failure.
+    monkeypatch.setattr(driver, "find_repo_root", lambda: tmp_path)
     monkeypatch.setattr(
         driver, "HolderRunner",
         lambda **kw: FakeRunner([_result(), runner_mod.RunnerError("docker is down")]),
@@ -1065,6 +1067,7 @@ def test_raw_trace_alongside_output_lands_under_the_run_dir(tmp_path, monkeypatc
         captured.update(kwargs)
         return FakeRunner([_result()])
 
+    monkeypatch.setattr(driver, "find_repo_root", lambda: tmp_path)
     monkeypatch.setattr(driver, "HolderRunner", _fake_holder_runner)
     assert driver.bench_main([
         "run", str(ds), "--out", str(out), "--max-steps", "5", "--max-seconds", "5",
@@ -1133,6 +1136,7 @@ def test_relative_out_resolves_before_the_runner_is_built(tmp_path, monkeypatch)
     _seeded_repo(bench, "001")
     ds = _dataset(bench, _instance(instance_id="a", workspace="001"))
 
+    monkeypatch.setattr(driver, "find_repo_root", lambda: tmp_path)
     monkeypatch.setattr(driver, "HolderRunner", _CapturingRunner)
     monkeypatch.chdir(tmp_path)
 
