@@ -121,6 +121,10 @@ looks like paranoia about empty patches or misclassified outcomes is that rule a
 
 ## Sweep integrity (never silently partial)
 
+> **Built (B3).** 15–18 are pinned by `tests/test_bench.py` (host tier, subprocess injected):
+> a killed sweep resumed with no duplicate row, one instance's failure not aborting the rest,
+> the empty-patch counter, and every instance appearing in both files exactly once.
+
 15. **A sweep resumes.** Killed at instance *k* of *n* and re-run, it skips the first *k* and
     completes the rest. Both output files are append-only and flushed per instance; nothing is
     buffered to the end.
@@ -137,6 +141,12 @@ looks like paranoia about empty patches or misclassified outcomes is that rule a
     duplicates on resume.
 
 ## Joinability (the M6 contract, actually exercised)
+
+> **Built (B3), and exercised for real.** 19–22 are pinned by `tests/test_bench.py` — including
+> the fixture where two instances share a `thread_id` — and were then run against five real
+> instances: `milestone8_baseline.md` §3 records a 0.3% residual, a `cost_usd` that stayed
+> `null` end to end, and the one number that had to be split in two (container launch vs.
+> harness time).
 
 19. **The join key is `run_id`, never `thread_id`.** `thread_id` repeats across resumes and is
     explicitly not the `past.sqlite` key (`cli.py:2092–2097`). A driver written against it merges
@@ -155,6 +165,11 @@ looks like paranoia about empty patches or misclassified outcomes is that rule a
 
 ## Containment & non-interference
 
+> **Built.** 23 is in `tests/test_import_isolation.py`; 25 and the gold-set collection guard
+> (26) are in `tests/test_bench.py` / `tests/test_gold_set.py`. 24 is unchanged from B2 — the
+> flag is a diff of the workspace the agent already owns, on the existing headless-JSON
+> channel, and adds no new path out of the container.
+
 23. **The driver is keyless in the strong sense.** `harness.bench` imports without pulling `cli`,
     `agent`, deepagents, or dotenv — pinned in `tests/test_import_isolation.py` alongside `entry` /
     `doctor` / `telemetry` / `config_cli`.
@@ -171,6 +186,9 @@ looks like paranoia about empty patches or misclassified outcomes is that rule a
     anything under `benchmarks/`.
 
 ## Removability
+
+> **Built.** 28 is pinned by `tests/test_gold_set.py` over the parsed AST (a docstring example
+> naming the directory is not a dependency; the first draft's substring scan said otherwise).
 
 27. **Deleting the feature reverts to M7.** Removing `harness/bench/`, `harness/limits.py`, the
     `DeadlineMiddleware`, the four `FieldSpec` entries, the `entry.dispatch` route,

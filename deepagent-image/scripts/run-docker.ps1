@@ -120,13 +120,27 @@ $sha256 = [System.Security.Cryptography.SHA256]::Create()
 $WsKey = [System.BitConverter]::ToString(
     $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($WorkspacePath))
 ).Replace("-", "").Substring(0, 12).ToLower()
-$StateHostDir = Join-Path $Root "project\state\$WsKey"
+# STATE_HOST_DIR overrides the derived location. The benchmark driver (M8 B3)
+# sets it per instance so a sweep's telemetry is that instance's and nobody
+# else's, and so the driver can read <state-dir>/usage.jsonl back without
+# re-deriving a hash the launcher owns. Mirror in run-docker.sh.
+$StateHostDir = $env:STATE_HOST_DIR
+if (-not $StateHostDir) {
+    $StateHostDir = Join-Path $Root "project\state\$WsKey"
+}
 if (-not (Test-Path $StateHostDir)) {
     New-Item -ItemType Directory -Force -Path $StateHostDir | Out-Null
 }
 
+# SEED_WORKSPACE=0 turns this off. A benchmark instance (M8 B3) must be exactly
+# what its dataset says it is: measured, the seeded environment.yml / .gitignore /
+# scripts/run-in-env.sh landed in the extracted patch of every instance, so a
+# scorer would have been handed three harness files alongside the fix. An
+# instance that needs a conda env ships its own environment.yml in its commit.
+# Mirror in run-docker.sh.
 function Seed-Workspace {
     param([string]$Target, [string]$SeedSource)
+    if ($env:SEED_WORKSPACE -eq "0") { return }
     if (-not (Test-Path $SeedSource)) { return }
     foreach ($file in @("environment.yml", ".gitignore")) {
         $dest = Join-Path $Target $file
@@ -666,9 +680,17 @@ if ($TaskParts.Count -gt 0) {
     Write-Host "Task: $($TaskParts -join ' ')"
 }
 
+# $LASTEXITCODE is captured as the FIRST statement in `finally`, before any
+# cleanup can overwrite it, and re-raised after the block. Without this the
+# script always exited 0 and the container's own exit code was lost -- measured
+# on the first M8 gold-set sweep, where every instance the step bound stopped
+# (harness exit 43) was reported to the benchmark driver as a clean 0. run-docker.sh
+# has always done this with `exit $?`; the two must agree.
+$dockerExit = 1
 try {
     & docker @dockerArgs
 } finally {
+    $dockerExit = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 1 }
     if ($NetJail) { Netjail-Down }
     if ($Ephemeral) {
         if ($SaveWorkspace) {
@@ -689,3 +711,5 @@ try {
         Remove-Item -Recurse -Force $emptyDir.FullName -ErrorAction SilentlyContinue
     }
 }
+
+exit $dockerExit

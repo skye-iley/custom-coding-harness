@@ -2344,7 +2344,7 @@ def _pr_approval(hitl_conf, workspace: Path | None, headless: bool) -> bool:
 
 
 def _batch_payload(final_message, config, tracker, workspace, exit_code,
-                   telemetry=None, model_patch=None) -> dict:
+                   telemetry=None, model_patch=None, model=None) -> dict:
     """The one JSON object a headless run emits on stdout (P2). PR URL is not yet
     captured here — git-pr runs at session.end (after this) and logs its URL to
     stderr; wiring it into the payload is a follow-up.
@@ -2378,6 +2378,11 @@ def _batch_payload(final_message, config, tracker, workspace, exit_code,
         "usage_log": (str(telemetry.sink) if telemetry is not None else None),
         "tokens": tokens,
         "cost_usd": cost,
+        # The resolved `provider:model` spec, so a sweep's predictions file can
+        # carry an honest `model_name_or_path` without depending on telemetry
+        # being on. Passed in rather than read off the telemetry middleware for
+        # exactly that reason.
+        "model": model,
         "branch": _read_session_branch(workspace),
         "pr_url": None,
         "model_patch": model_patch,
@@ -2451,6 +2456,7 @@ def run_batch(
     turns: "limits_mod.TurnCounter | None" = None,
     deadline: "limits_mod.Deadline | None" = None,
     patch_base: str | None = None,
+    model: str | None = None,
 ) -> int:
     """Headless one-shot mode (P2 / design_doc.md §12.3).
 
@@ -2507,6 +2513,7 @@ def run_batch(
         _batch_payload(
             final_message, config, tracker, workspace, exit_code, telemetry,
             model_patch=_emit_patch(workspace, patch_base),
+            model=model,
         )
     ))
     _stage("session closed")
@@ -2800,6 +2807,7 @@ def main() -> int:
                     turns=turn_counter,
                     deadline=deadline,
                     patch_base=patch_base,
+                    model=model,
                 )
             else:
                 rc = run_repl(

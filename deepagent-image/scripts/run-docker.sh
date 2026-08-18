@@ -224,9 +224,16 @@ ephemeral_cleanup() {
   echo "Ephemeral: workspace changes discarded."
 }
 
+# SEED_WORKSPACE=0 turns this off. A benchmark instance (M8 B3) must be exactly
+# what its dataset says it is: measured, the seeded environment.yml / .gitignore /
+# scripts/run-in-env.sh landed in the extracted patch of every instance, so a
+# scorer would have been handed three harness files alongside the fix. An
+# instance that needs a conda env ships its own environment.yml in its commit.
+# Mirror in run-docker.ps1.
 seed_workspace() {
   local target="$1"
   local seed="$2"
+  [[ "${SEED_WORKSPACE:-1}" != "0" ]] || return 0
   [[ -d "$seed" ]] || return 0
   for file in environment.yml .gitignore; do
     if [[ ! -f "$target/$file" && -f "$seed/$file" ]]; then
@@ -280,8 +287,12 @@ seed_workspace "$MOUNT_WORKSPACE" "$SEED_SOURCE"
 # by a host dir under the harness repo, keyed per-workspace so distinct repos keep
 # separate archives (mirrors the old per-workspace <workspace>/.deepagents split).
 # The Python side reads DEEPAGENTS_STATE_DIR via archive.state_dir. Mirror in run-docker.ps1.
+# STATE_HOST_DIR overrides the derived location. The benchmark driver (M8 B3)
+# sets it per instance so a sweep's telemetry is that instance's and nobody
+# else's, and so the driver can read <state-dir>/usage.jsonl back without
+# re-deriving a hash the launcher owns. Mirror in run-docker.ps1.
 WS_KEY="$(printf '%s' "$WORKSPACE" | sha256sum | cut -c1-12)"
-STATE_HOST_DIR="$ROOT/project/state/$WS_KEY"
+STATE_HOST_DIR="${STATE_HOST_DIR:-$ROOT/project/state/$WS_KEY}"
 mkdir -p "$STATE_HOST_DIR"
 
 # Git identity: mount host .gitconfig read-only into the agent user's home (uid 10001 -> /home/agent),

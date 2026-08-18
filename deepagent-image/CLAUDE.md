@@ -106,6 +106,8 @@ See [ENV_VARS.md](./ENV_VARS.md#not-in-env--launcher-environment-host-side) for 
 | `EPHEMERAL` | `-Ephemeral` | off | Mount a throwaway copy of the workspace; revert on close. |
 | `SAVE_WORKSPACE` | `-SaveWorkspace` | off | Snapshot the ephemeral copy before discard; implies ephemeral. |
 | `NET_JAIL` | `-NetJail` | off | Deny-all-egress network jail (see `netjail/`). |
+| `STATE_HOST_DIR` | — | unset → derived | Where `/project/state` is backed on the host. Unset derives `project/state/<sha256(workspace)[:12]>`. The M8 benchmark driver pins it per instance so a sweep's telemetry is that instance's, and so it can read `usage.jsonl` back without re-deriving a hash the launcher owns. |
+| `SEED_WORKSPACE` | — | unset → on | Seed a workspace missing `environment.yml` / `.gitignore` / `scripts/run-in-env.sh`. `0` turns it off — a benchmark instance must be exactly what its dataset says it is, and all three seeded files came out in every prediction of the first M8 sweep. |
 | `DEEPAGENTS_JAIL_SYSTEMPATHS` | `-JailSystempaths` | unset → `unconfined` | Docker's `/proc` masks under the jail — the **third** gate (M4.1 §13.7). Default passes `--security-opt systempaths=unconfined`, without which the kernel refuses bwrap's fresh `--proc`. `default` keeps the masks; the jail then won't start on most Linux hosts, which is how the LSM-only control is reproduced. Only consulted when `DEEPAGENTS_JAIL` is on; read from the host env, `.env`, or the profile like its AppArmor twin. |
 | `DEEPAGENTS_JAIL_APPARMOR` | — | unset → auto | AppArmor stance for the bwrap jail. Read from the host env **or `.env`**, same as `DEEPAGENTS_JAIL`, but it only affects `docker run` flags — nothing reads it inside the container. Unset → **auto**: pass nothing where no LSM is in force, select slice J's `deepagent-userns` where it is loaded, and **abort pre-flight** where an LSM is in force but the profile is not loaded. `unconfined` → `--security-opt apparmor=unconfined` (works everywhere; drops the whole profile). Any other value is passed through as a host-loaded profile name. See "AppArmor: the second gate" below. |
 
@@ -626,6 +628,101 @@ is the one a stub cannot substitute for. Every patch assertion is made by
 **applying the patch** (`git apply --check`) against a *fresh* copy of the base —
 never by substring, which is M7 §0.2's lesson: a substring assertion against a
 serialised blob cannot tell a correct artifact from a plausible-looking one.
+
+## Benchmark sweeps — `harness bench` (Milestone 8, slices B3–B5)
+
+Run a pinned dataset of coding tasks through the harness, unattended, and get two
+files an *official* scorer and a human can each read.
+
+```bash
+cd deepagent-image/project
+python -m harness bench run ../../benchmarks/gold/gold.jsonl \
+    --out /tmp/gold-run --max-steps 120 --max-seconds 900
+python -m harness bench show --out /tmp/gold-run
+```
+
+| File | Contents |
+|---|---|
+| `predictions.jsonl` | **exactly** `instance_id`, `model_name_or_path`, `model_patch` |
+| `runs.jsonl` | everything else: outcome, `stop_reason`, both exit codes, the wall-clock decomposition, per-tool counts, tokens, cost |
+
+`predictions.jsonl` carries three keys and nothing else because anything extra
+risks a scorer rejecting the file. **Scoring is a hard non-goal** — correctness
+comes from the benchmark's own evaluation harness, and a scorer written here
+would be a number nobody else could compare against.
+
+**`harness bench run` refuses to start without `--max-steps` and `--max-seconds`.**
+The harness itself still defaults to no bound (that is a choice about interactive
+runs), so the driver is where the requirement lives: a sweep on an inherited
+`recursion_limit` of 10007 is unbounded, and that must not be reachable by
+forgetting a flag.
+
+**It runs on the host, one container per instance**, driving `run-docker.ps1` /
+`run-docker.sh`. Three reasons: a clean container per instance *is* the isolation;
+the whole security posture (mask, state dir, netjail, caps) comes along for free;
+and the driver stays keyless and stdlib-only, routed through `entry.dispatch` like
+`telemetry` / `doctor` / `config`. Serial on purpose — one local Ollama daemon and
+one GPU, so parallel instances would contend for the same weights and make
+`model_ms` meaningless.
+
+Four launch decisions are the **driver's**, not the harness's, and each closes a
+silent failure:
+
+- **`DEEPAGENTS_WORKFLOWS_DIR` points at a path that does not exist**, so
+  `git-branch` and `git-pr` never run (the loader returns early on a missing
+  directory). Their commit would empty `git diff <base>` and lose the patch — and
+  a 50-instance sweep would otherwise open 50 pull requests.
+- **`SEED_WORKSPACE=0`.** `run-docker` writes `environment.yml`, `.gitignore` and
+  `scripts/run-in-env.sh` into a workspace missing them — right for an interactive
+  session, wrong for a benchmark instance, which must be exactly what its dataset
+  says. Measured: all three came out in every prediction of the first sweep.
+- **`STATE_HOST_DIR` per instance**, so the telemetry the driver joins is that
+  instance's, and so the driver can find `usage.jsonl` without re-deriving a path
+  hash the launcher owns.
+- **The driver owns the scratch copy, not `EPHEMERAL=1`.** Ephemeral mode reverts
+  the tree *on container close*, so a patch could only be taken from inside — i.e.
+  only our own harness could produce one. A driver-owned tree can be diffed after
+  the process exits, which is what a cross-harness tier needs.
+
+**The `Runner` seam is declared, with one implementation.** `HolderRunner` is the
+only runner here; tier 2 adds Aider/SWE-agent/Claude Code adapters. Patch
+extraction is deliberately **not** on the protocol — the driver does it uniformly
+for every runner, which is what makes a comparison fair rather than a comparison
+of whose extractor is better. `capabilities()` lets a runner say what it can
+measure, and the ledger writes **`null`** for the rest, never an estimate.
+
+**Resume is real:** both files are append-only and flushed per instance, and a
+re-run skips ids already in `predictions.jsonl`. A sweep killed at instance 40 of
+50 keeps 39. One instance failing never aborts the sweep — it gets a prediction
+with an empty patch and a ledger row carrying its outcome.
+
+**Read `bench show`'s two clocks separately.** `wall clock` is the container
+lifetime the driver timed; `harness` is what the harness measured inside it. The
+difference is container start-up (~18s each), real time a sweep spends that the
+harness structurally cannot see, so it is its own column rather than a mysterious
+gap in the decomposition.
+
+### The gold set (`benchmarks/gold/`)
+
+Five small self-contained Python projects, each an initialised git repo with one
+commit, a seeded bug, a failing test that pins it, and a passing suite around it.
+They vary the **loop shape**, not the domain — each is a distinct way the agent
+can fail that a single instance could not distinguish: a one-line edit, a bug in a
+module the prompt does not name, a symptom that must be reproduced before it can
+be fixed, a regression trap where the tempting fix breaks two other tests, and a
+fix that requires creating a **new file** (the case that silently produces an
+empty patch without `git add -A -N`).
+
+`tests/test_gold_set.py` keeps the set honest: every instance is a repo with a
+clean tree, every `fail_to_pass` command really fails on the seeded state, every
+`pass_to_pass` command really passes. A rotted fixture otherwise reads exactly
+like a weak model. It **skips** when `benchmarks/` is absent, because deleting
+that directory must break nothing.
+
+`docs/milestones/in-progress/milestone8_baseline.md` is the B5 record: what a
+green sweep looked like, on what host, against which model tag, under which
+bounds — plus the three defects the first sweeps found. Re-baseline whenever any
+of those change; a model upgrade is a re-baseline, not a regression.
 
 ## Present / past memory (Milestone 2)
 
@@ -1561,6 +1658,13 @@ harness config security                     # security-only wizard + .agentignor
 harness telemetry show [--run <run-id>] [--state-dir <path>]
 harness telemetry list [--topic LABEL] [--limit N]
 harness telemetry pr-block [--run <run-id>]  # the markdown block open-pr.sh appends
+
+# Benchmark sweeps (Milestone 8) -- runs the harness over a pinned dataset,
+# one container per instance, and writes predictions.jsonl + runs.jsonl.
+# Both bounds are REQUIRED: an unbounded sweep is the failure mode M8 removes.
+harness bench run <dataset.jsonl> --max-steps N --max-seconds T \
+    [--out DIR] [--limit N] [--only ID,ID] [--dry-run] [--model SPEC] [--net-jail]
+harness bench show [--out DIR]               # summarize a completed sweep
 ```
 
 "Keyless" here means no API key, no network and no model — **and, since M5 §0.1 F6

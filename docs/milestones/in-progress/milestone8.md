@@ -1,8 +1,8 @@
 # Milestone 8 — Benchmark Ladder, Tier 1 (Gold Set)
 
-> **Status:** 🚧 In progress — **B1 (hard stops) and B2 (`--emit-patch` + the patch extractor)
-> are built** on `feat/milestone8-bench-ladder`; B3–B5 not started. §0.1 records what the build
-> changed about the plan.
+> **Status:** 🚧 In progress — **B1–B5 all built** on `feat/milestone8-bench-ladder`. §0.1 records
+> what the build changed about the plan; `milestone8_baseline.md` beside this file is the B5
+> evidence record (4/5 resolved, and the three defects the first sweeps found).
 > `design_doc.md` §11 "Automated Benchmarking Suite" is the parent entry; this doc is the concrete
 > tier-1 slice and wins over it for *what we build next*.
 >
@@ -55,13 +55,12 @@ stall on an unmeasured LSM the way anything touching the jail can.
 |---|---|
 | **B1** hard stops (`--max-steps` / `--max-seconds` / `--max-turns`, `OUTCOME_STOPPED` + `stop_reason`) | ✅ **built** |
 | **B2** `--emit-patch` + `harness/bench/patch.py` | ✅ **built** |
-| **B3** `harness/bench/` driver | not started |
-| **B4** the gold set | not started |
-| **B5** baseline record | not started |
+| **B3** `harness/bench/` driver, `predictions.jsonl` + `runs.jsonl`, resume | ✅ **built** |
+| **B4** the gold set (5 instances, self-checking) | ✅ **built** |
+| **B5** baseline record | ✅ **built** — `milestone8_baseline.md` |
 
-Suite after B2: **1079 passed / 13 skips** hermetic, and green with the live-model tier on
-(the standing skips are Windows symlink/posix-path cases plus the image-only tiers when run
-without the dev venv).
+Suite after B5: **1159 passed / 14 skips**, live-model tier included. The gold set is exercised
+end to end by a real sweep, not only by the suite — see `milestone8_baseline.md`.
 
 ### What B1 changed about the plan
 
@@ -153,6 +152,63 @@ without the dev venv).
     same reason it fakes `harness` itself: running a real `__init__.py` is what
     would pull whatever it imports. Bare names (`_load("seccomp")`) still work.
 
+
+### What B3–B5 changed about the plan
+
+13. **Two defects came out of *running* it, neither visible to review.** They are
+    the milestone doing its job on its first day, and both are recorded in
+    `milestone8_baseline.md` §4:
+
+    * **`run-docker.ps1` swallowed every container exit code.** It ended with
+      `& docker @dockerArgs` inside a `try/finally` and never re-raised
+      `$LASTEXITCODE`, so the script always exited 0. On the first sweep, four
+      instances the step bound had stopped — harness exit 43 — reached the driver
+      as a clean 0. `run-docker.sh` has always ended `exit $?`; the pair had
+      drifted and nothing caught it, because until B3 no consumer had ever read
+      the exit code. `runs.jsonl` now records **both** `exit_code` (the process)
+      and `harness_exit_code` (the payload), which is what made the drift visible
+      and is what keeps it visible.
+    * **Three harness files were in every prediction.** `run-docker`'s
+      `seed_workspace` writes `environment.yml`, `.gitignore` and
+      `scripts/run-in-env.sh` into any workspace missing them — correct
+      interactively, wrong for a benchmark instance. Closed with a
+      `SEED_WORKSPACE=0` knob in both launchers, parity-guarded.
+
+14. **`bench show` needs TWO clocks, which §5.3 did not anticipate.** The driver
+    times the whole container lifetime; the harness measures only what happens
+    inside it. On the baseline sweep that is 345.5s vs. 257.1s — 88s of container
+    start-up the harness structurally cannot see. Folding it into the residual
+    would have made M6's one inferred number look broken; it is reported as its
+    own column instead.
+
+15. **The driver pins `STATE_HOST_DIR` rather than re-deriving it.** The launcher
+    keys the host state dir on `sha256(workspace)[:12]`, and a Python copy of that
+    would have been a *third* mirror of launcher logic. Both launchers gained an
+    override instead (parity-guarded), so the derivation stays in one place and
+    each instance's telemetry is its own.
+
+16. **`Instance.workspace` resolves relative to the dataset file**, not the
+    process CWD, so a dataset is relocatable as a unit. Unspecified in §5.3 and
+    load-bearing the moment anyone runs a sweep from somewhere else.
+
+17. **A malformed dataset line is fatal, and so is an `--only` id that matches
+    nothing.** Both could plausibly have been skips. A sweep that quietly ran 4 of
+    5 instances — or 0 of 5 — would report a pass rate over a set nobody chose,
+    which is the same silent partiality invariant 18 forbids one level up.
+
+18. **The gold set's instance 004 had to be redesigned to be a real trap.** The
+    first draft (a slug truncated onto a trailing hyphen) had no
+    tempting-but-wrong fix — the obvious repair was simply correct, so the
+    instance measured nothing the others did not. The shipped version is a bounded
+    cache where "clear the cache when over capacity" makes the target test pass
+    and breaks another. Verified by *applying the naive fix and watching it
+    break*, not by inspection.
+
+19. **Two more came from the tests rather than review**: `tests/_bootstrap._load`
+    had to learn sub-packages (it resolved `harness.bench.patch` to
+    `harness/patch.py`), and `shutil.rmtree` needed a read-only handler — git
+    stores loose objects read-only, so on Windows every scratch tree survived
+    deletion and a 50-instance sweep would have filled the disk in silence.
 
 ---
 
