@@ -651,6 +651,35 @@ risks a scorer rejecting the file. **Scoring is a hard non-goal** — correctnes
 comes from the benchmark's own evaluation harness, and a scorer written here
 would be a number nobody else could compare against.
 
+**`--out` is a container, not a single sweep's directory.** Each invocation of
+`harness bench run` gets its own `run-<timestamp>-<hex>` subfolder underneath
+it, holding everything that invocation produced — `predictions.jsonl`,
+`runs.jsonl`, `scratch/`, and `state/<instance_id>/` (`usage.jsonl`,
+`session.json`, `raw-trace/` when enabled):
+
+```
+bench-out/
+├── run-20260818-150531-dee21e/
+│   ├── predictions.jsonl
+│   ├── runs.jsonl
+│   ├── scratch/
+│   └── state/gold-001-off-by-one/{usage.jsonl,session.json,raw-trace/}
+└── run-20260818-160210-a1b2c3/
+    └── ...
+```
+
+`resolve_run_dir` picks which subfolder an invocation writes into: the most
+recent one is **reused** when it is not yet complete for the instances this
+invocation selected (resume, one level up from the per-instance resume
+`completed_instance_ids` already does — a sweep killed mid-way continues in the
+same folder), and a **new** one is created when the most recent is already
+complete for that selection, so re-running a finished sweep never reads as a
+silent no-op. `bench show --out <dir>` accepts either a container (reports the
+most recent run inside it) or a specific run's own folder directly — the same
+detection (does `predictions.jsonl` sit right in `<dir>`?) also keeps the
+pre-nesting flat layout working unchanged for anyone pointing `--out` at an
+already-finished sweep's folder.
+
 **`harness bench run` refuses to start without `--max-steps` and `--max-seconds`.**
 The harness itself still defaults to no bound (that is a choice about interactive
 runs), so the driver is where the requirement lives: a sweep on an inherited
@@ -697,8 +726,9 @@ silent failure:
 **`--raw-trace {file,console,both}`** forwards M7's raw trace per instance, off by
 default. `file` is the useful one for a bad patch: the sink already lands at
 `<state-dir>/raw-trace/<run_id>.log`, which — now that `STATE_HOST_DIR` is pinned
-per instance under `<out>/state/<instance_id>/` — sits right beside that
-instance's own `usage.jsonl`. `console`/`both` are wired the same way but weaker
+per instance under `<run-dir>/state/<instance_id>/` — sits right beside that
+instance's own `usage.jsonl`, in the same per-sweep folder as `predictions.jsonl`
+and `runs.jsonl`. `console`/`both` are wired the same way but weaker
 for this: `runs.jsonl`'s `stderr_tail` is dropped on any instance that didn't
 fail, which is exactly the successful-but-empty-patch case this flag exists to
 debug.
@@ -1681,10 +1711,12 @@ harness telemetry pr-block [--run <run-id>]  # the markdown block open-pr.sh app
 # Benchmark sweeps (Milestone 8) -- runs the harness over a pinned dataset,
 # one container per instance, and writes predictions.jsonl + runs.jsonl.
 # Both bounds are REQUIRED: an unbounded sweep is the failure mode M8 removes.
+# --out is a CONTAINER (default bench-out): each invocation gets its own
+# run-<timestamp>-<hex> subfolder, reused if incomplete, else a new one.
 harness bench run <dataset.jsonl> --max-steps N --max-seconds T \
     [--out DIR] [--limit N] [--only ID,ID] [--dry-run] [--model SPEC] [--net-jail] \
     [--raw-trace file|console|both]          # M7 trace per instance, for troubleshooting
-harness bench show [--out DIR]               # summarize a completed sweep
+harness bench show [--out DIR]               # the container's latest run, or a run's own dir
 ```
 
 "Keyless" here means no API key, no network and no model — **and, since M5 §0.1 F6

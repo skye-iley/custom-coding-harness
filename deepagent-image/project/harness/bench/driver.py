@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
 import shutil
 import stat
 import subprocess
@@ -186,6 +187,79 @@ def completed_instance_ids(predictions_path: Path) -> set[str]:
         if isinstance(obj, dict) and obj.get("instance_id"):
             done.add(str(obj["instance_id"]))
     return done
+
+
+# --- per-sweep run directories --------------------------------------------
+
+# `--out` is a CONTAINER; each invocation of `harness bench run` gets its own
+# subfolder here (predictions.jsonl, runs.jsonl, scratch/, state/ -- including
+# raw-trace/ under state/<instance>/ when enabled), named so a plain string
+# sort orders them oldest-to-newest. Timestamp is for a human skimming the
+# directory; the hex suffix is what actually prevents a collision between two
+# sweeps started in the same second.
+_RUN_DIR_PREFIX = "run-"
+
+
+def _new_run_dir_name() -> str:
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    return f"{_RUN_DIR_PREFIX}{ts}-{secrets.token_hex(3)}"
+
+
+def _existing_run_dirs(container: Path) -> list[Path]:
+    if not container.is_dir():
+        return []
+    return sorted(
+        (p for p in container.iterdir() if p.is_dir() and p.name.startswith(_RUN_DIR_PREFIX)),
+        key=lambda p: p.name,
+    )
+
+
+def resolve_run_dir(container: Path, instances: list) -> Path:
+    """Which subfolder of `container` this invocation writes into.
+
+    The most recent existing subfolder is **reused** when it is not yet
+    complete for the instances *this* invocation selected — the resume
+    behaviour `completed_instance_ids` already gives one sweep, one level up:
+    a sweep killed mid-way continues in the same folder rather than starting a
+    fresh one next to it.
+
+    A subfolder where every currently-selected instance is already done is
+    finished business. Reusing it would make a sweep the operator explicitly
+    re-ran look like a silent no-op (0 instances to do, nothing written) — so
+    a **new** subfolder is created instead, matching "only continue instead of
+    creating a new run if it has not completed."
+
+    `instances` is the already-`select()`-ed list (post `--only`/`--limit`),
+    not the whole dataset — a `--limit 1` run must not read as "incomplete"
+    forever just because the other four were never asked for.
+    """
+    existing = _existing_run_dirs(container)
+    if existing:
+        latest = existing[-1]
+        done = completed_instance_ids(latest / PREDICTIONS_FILE)
+        todo = [i for i in instances if i.instance_id not in done]
+        if todo:
+            return latest
+    return container / _new_run_dir_name()
+
+
+def resolve_show_dir(path: Path) -> Path:
+    """Where `bench show` reads from.
+
+    `path` is treated as a specific run's own folder when it already looks
+    like one (a `predictions.jsonl` sitting directly in it) -- true of any
+    folder `resolve_run_dir` ever returned, and also of the pre-nesting flat
+    layout, so an old `--out` pointed straight at a finished sweep keeps
+    working unchanged. Otherwise `path` is a container: report on the most
+    recent run inside it, or `path` itself if there are no runs yet (in which
+    case `summarize` reports all-zero, same as it always has for an empty
+    directory).
+    """
+    path = Path(path)
+    if (path / PREDICTIONS_FILE).is_file():
+        return path
+    existing = _existing_run_dirs(path)
+    return existing[-1] if existing else path
 
 
 def _append(path: Path, row: dict) -> None:
@@ -601,7 +675,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     run = sub.add_parser("run", help="run a sweep")
     run.add_argument("dataset", help="path to a jsonl dataset")
-    run.add_argument("--out", default="bench-out", help="output directory (default: bench-out)")
+    run.add_argument("--out", default="bench-out",
+                     help="container directory (default: bench-out). Each invocation gets "
+                          "its own run-<timestamp>-<hex> subfolder here; an incomplete one "
+                          "from a prior invocation is resumed in place rather than starting "
+                          "a new one, exactly like resume within a single sweep.")
     run.add_argument("--limit", type=int, default=None, help="run at most N instances")
     run.add_argument("--only", default="", help="comma-separated instance ids")
     run.add_argument("--dry-run", action="store_true", help="list what would run")
@@ -614,14 +692,16 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--net-jail", action="store_true",
                      help="run each instance under the deny-all-egress network jail")
     run.add_argument("--scratch", default=None,
-                     help="where instance copies are made (default: <out>/scratch)")
+                     help="where instance copies are made (default: <run-dir>/scratch)")
     run.add_argument("--raw-trace", choices=("file", "console", "both"), default=None,
                      help="M7 raw trace per instance, for troubleshooting a bad patch. "
-                          "'file' lands at <out>/state/<instance_id>/raw-trace/<run_id>.log "
+                          "'file' lands at <run-dir>/state/<instance_id>/raw-trace/<run_id>.log "
                           "-- right beside that instance's usage.jsonl. Off by default.")
 
     show = sub.add_parser("show", help="summarize a completed sweep")
-    show.add_argument("--out", default="bench-out", help="output directory")
+    show.add_argument("--out", default="bench-out",
+                     help="a run's own directory, or the --out container -- the most recent "
+                          "run inside it is reported")
     return parser
 
 
@@ -630,7 +710,7 @@ def bench_main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "show":
-        print(render_show(summarize(Path(args.out))), end="")
+        print(render_show(summarize(resolve_show_dir(Path(args.out)))), end="")
         return 0
 
     # Invariant 7: refuse to start without BOTH bounds. An unbounded sweep is the
@@ -667,7 +747,20 @@ def bench_main(argv: list[str]) -> int:
     # then correctly found an empty workspace and produced an empty patch, and the
     # state dir landed the same way, invisible to `runs.jsonl`'s own join. Not a
     # model failure; a workspace that was never really there.
-    out_dir = Path(args.out).resolve()
+    out_container = Path(args.out).resolve()
+    dataset_path = Path(args.dataset)
+    only = tuple(x.strip() for x in args.only.split(",") if x.strip())
+    try:
+        # Selected (post --only/--limit) so a subfolder's completeness is
+        # judged against what THIS invocation asked for, not the whole
+        # dataset -- see resolve_run_dir's docstring.
+        instances = select(load_dataset(dataset_path), only=only, limit=args.limit)
+    except DatasetError as exc:
+        print(f"[bench] {exc}", file=sys.stderr)
+        return 2
+
+    out_dir = resolve_run_dir(out_container, instances)
+    _log(f"run directory: {out_dir}")
     scratch_root = Path(args.scratch).resolve() if args.scratch else out_dir / "scratch"
     try:
         repo_root = find_repo_root()
@@ -684,7 +777,7 @@ def bench_main(argv: list[str]) -> int:
     )
     try:
         return run_sweep(
-            Path(args.dataset),
+            dataset_path,
             out_dir,
             limits=Limits(
                 max_steps=args.max_steps,
@@ -693,7 +786,7 @@ def bench_main(argv: list[str]) -> int:
             ),
             runner=runner,
             scratch_root=scratch_root,
-            only=tuple(x.strip() for x in args.only.split(",") if x.strip()),
+            only=only,
             limit=args.limit,
             dry_run=args.dry_run,
         )

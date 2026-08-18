@@ -294,7 +294,7 @@ cost. The gold set is exercised end to end by a real sweep, not only by the suit
     per instance exactly like `--model`. Not a fix — asked for, while
     diagnosing item 22, as a standing troubleshooting tool: M7's file sink
     already lives at `<state-dir>/raw-trace/<run_id>.log`, and once item 22's
-    fix pins `state_root` per instance under `<out>/state/<instance_id>/`,
+    fix pins `state_root` per instance under `<run-dir>/state/<instance_id>/`,
     `file` mode puts the trace right beside that instance's own `usage.jsonl`
     — one folder to open, not a console log interleaved across five
     containers' stderr. `console`/`both` are wired identically but are the
@@ -302,6 +302,34 @@ cost. The gold set is exercised end to end by a real sweep, not only by the suit
     **failed** instance (`exit_code` truthy) — the exact case this exists to
     debug, a *successful*-but-empty-patch instance, drops it. Off by default;
     no effect on any existing invocation.
+
+24. **`--out` became a container of per-sweep subfolders, not one flat sweep
+    directory.** Asked for directly: two sweeps against the same `--out` used
+    to overwrite `predictions.jsonl`/`runs.jsonl` in place, so nothing kept the
+    trace/telemetry of an earlier attempt around once a later one ran — the
+    exact evidence items 20-23 needed to diagnose would have been gone the
+    moment anyone re-ran the command. Each invocation of `harness bench run`
+    now gets its own `run-<timestamp>-<hex>` subfolder holding everything that
+    invocation produced (`predictions.jsonl`, `runs.jsonl`, `scratch/`,
+    `state/<instance_id>/` — `usage.jsonl`/`session.json`/`raw-trace/`),
+    picked by `resolve_run_dir`: the most recent subfolder is **reused** when
+    it is not yet complete for the instances *this* invocation selected (the
+    per-sweep resume `completed_instance_ids` already gives one level up — a
+    killed sweep continues in place), and a **new** one is created when the
+    most recent is already complete for that selection, so re-running a
+    finished sweep is never a silent no-op. `bench show --out <dir>` accepts
+    either shape: a container (reports the most recent run inside it) or a
+    specific run's own folder (detected by whether `predictions.jsonl` sits
+    directly in it) — which is also how the pre-nesting flat layout keeps
+    working unchanged for anyone pointing `--out` straight at an already-
+    finished sweep.
+
+    Kept deliberately narrow: `resolve_run_dir`/`resolve_show_dir` live only
+    in `bench_main`, the CLI entry point — `run_sweep`'s own signature and
+    every existing test that calls it directly with a literal output
+    directory are **untouched**. The nesting is a property of how the CLI
+    picks a directory to hand `run_sweep`, not a change to what `run_sweep`
+    does with one.
 
 ---
 

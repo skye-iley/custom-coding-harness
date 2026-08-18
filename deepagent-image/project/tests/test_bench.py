@@ -785,6 +785,189 @@ def test_a_half_written_last_line_does_not_break_resume(tmp_path):
 
 
 # =============================================================================
+# per-sweep run directories: --out is a container, one subfolder per sweep
+# =============================================================================
+
+
+def _inst(iid):
+    return dataset_mod.Instance(instance_id=iid, workspace="ws", task_prompt="fix it")
+
+
+def test_resolve_run_dir_creates_one_when_the_container_is_empty(tmp_path):
+    out = tmp_path / "out"
+    run_dir = driver.resolve_run_dir(out, [_inst("a")])
+    assert run_dir.parent == out
+    assert run_dir.name.startswith("run-")
+    assert not run_dir.exists()  # resolving does not create it -- run_sweep does
+
+
+def test_resolve_run_dir_reuses_an_incomplete_run(tmp_path):
+    out = tmp_path / "out"
+    prior = out / "run-20260101-000000-aaaaaa"
+    prior.mkdir(parents=True)
+    (prior / "predictions.jsonl").write_text(
+        json.dumps({"instance_id": "a", "model_name_or_path": "m", "model_patch": ""}) + "\n",
+        encoding="utf-8",
+    )
+    # "b" is still outstanding for this selection -> reuse, don't create a new one.
+    run_dir = driver.resolve_run_dir(out, [_inst("a"), _inst("b")])
+    assert run_dir == prior
+
+
+def test_resolve_run_dir_starts_fresh_when_the_previous_run_is_complete(tmp_path):
+    """'Only continue instead of creating a new run if it has not completed' --
+    the other half: a completed run must not silently swallow a re-run."""
+    out = tmp_path / "out"
+    prior = out / "run-20260101-000000-aaaaaa"
+    prior.mkdir(parents=True)
+    (prior / "predictions.jsonl").write_text(
+        json.dumps({"instance_id": "a", "model_name_or_path": "m", "model_patch": ""}) + "\n",
+        encoding="utf-8",
+    )
+    run_dir = driver.resolve_run_dir(out, [_inst("a")])
+    assert run_dir != prior
+    assert run_dir.name.startswith("run-")
+
+
+def test_resolve_run_dir_only_looks_at_the_most_recent_run(tmp_path):
+    out = tmp_path / "out"
+    older = out / "run-20260101-000000-aaaaaa"
+    newer = out / "run-20260102-000000-bbbbbb"
+    older.mkdir(parents=True)
+    newer.mkdir(parents=True)
+    (newer / "predictions.jsonl").write_text(
+        json.dumps({"instance_id": "a", "model_name_or_path": "m", "model_patch": ""}) + "\n",
+        encoding="utf-8",
+    )
+    # older is untouched (would look "incomplete" forever) but is not the latest.
+    run_dir = driver.resolve_run_dir(out, [_inst("a"), _inst("b")])
+    assert run_dir == newer
+
+
+def test_resolve_run_dir_ignores_a_limited_selection_from_before(tmp_path):
+    """A `--limit 1` run that finished must not read as incomplete forever just
+    because the rest of the dataset was never asked for."""
+    out = tmp_path / "out"
+    prior = out / "run-20260101-000000-aaaaaa"
+    prior.mkdir(parents=True)
+    (prior / "predictions.jsonl").write_text(
+        json.dumps({"instance_id": "a", "model_name_or_path": "m", "model_patch": ""}) + "\n",
+        encoding="utf-8",
+    )
+    run_dir = driver.resolve_run_dir(out, [_inst("a")])  # same selection as before: done
+    assert run_dir != prior
+
+
+def test_resolve_show_dir_treats_a_run_folder_as_itself(tmp_path):
+    run_dir = tmp_path / "run-x"
+    run_dir.mkdir()
+    (run_dir / "predictions.jsonl").write_text("", encoding="utf-8")
+    assert driver.resolve_show_dir(run_dir) == run_dir
+    # And the pre-nesting flat layout: --out pointed straight at a finished
+    # sweep still works unchanged.
+    assert driver.resolve_show_dir(tmp_path / "run-x") == run_dir
+
+
+def test_resolve_show_dir_picks_the_latest_run_in_a_container(tmp_path):
+    out = tmp_path / "out"
+    (out / "run-20260101-000000-aaaaaa").mkdir(parents=True)
+    newer = out / "run-20260102-000000-bbbbbb"
+    newer.mkdir(parents=True)
+    assert driver.resolve_show_dir(out) == newer
+
+
+def test_resolve_show_dir_on_an_empty_container_returns_it_unchanged(tmp_path):
+    out = tmp_path / "out"
+    assert driver.resolve_show_dir(out) == out
+
+
+def test_bench_main_creates_a_new_run_dir_each_completed_invocation(tmp_path, monkeypatch):
+    bench = tmp_path / "b"
+    _seeded_repo(bench, "001")
+    ds = _dataset(bench, _instance(instance_id="a", workspace="001"))
+    out = tmp_path / "out"
+
+    monkeypatch.setattr(driver, "HolderRunner", lambda **kw: FakeRunner([_result()]))
+    assert driver.bench_main([
+        "run", str(ds), "--out", str(out), "--max-steps", "5", "--max-seconds", "5",
+    ]) == 0
+    first = {p.name for p in out.iterdir() if p.name.startswith("run-")}
+    assert len(first) == 1
+
+    monkeypatch.setattr(driver, "HolderRunner", lambda **kw: FakeRunner([_result()]))
+    assert driver.bench_main([
+        "run", str(ds), "--out", str(out), "--max-steps", "5", "--max-seconds", "5",
+    ]) == 0
+    second = {p.name for p in out.iterdir() if p.name.startswith("run-")}
+    assert len(second) == 2
+    assert first < second  # the first run's folder is untouched, not overwritten
+
+
+def test_bench_main_continues_an_interrupted_run_in_the_same_dir(tmp_path, monkeypatch):
+    bench = tmp_path / "b"
+    _seeded_repo(bench, "001")
+    _seeded_repo(bench, "002")
+    ds = _dataset(
+        bench,
+        _instance(instance_id="a", workspace="001"),
+        _instance(instance_id="b", workspace="002"),
+    )
+    out = tmp_path / "out"
+
+    # First invocation: "a" succeeds, then a RunnerError (launcher missing,
+    # docker daemon down, ...) stops the sweep before "b" is ever attempted --
+    # exactly a kill mid-sweep, not a per-instance failure.
+    monkeypatch.setattr(
+        driver, "HolderRunner",
+        lambda **kw: FakeRunner([_result(), runner_mod.RunnerError("docker is down")]),
+    )
+    rc1 = driver.bench_main([
+        "run", str(ds), "--out", str(out), "--max-steps", "5", "--max-seconds", "5",
+    ])
+    assert rc1 == 2
+    run_dirs = [p for p in out.iterdir() if p.name.startswith("run-")]
+    assert len(run_dirs) == 1
+    assert driver.completed_instance_ids(run_dirs[0] / "predictions.jsonl") == {"a"}
+
+    # Second invocation, same command: continues in the SAME folder rather
+    # than starting a new one, and finishes "b".
+    monkeypatch.setattr(driver, "HolderRunner", lambda **kw: FakeRunner([_result()]))
+    rc2 = driver.bench_main([
+        "run", str(ds), "--out", str(out), "--max-steps", "5", "--max-seconds", "5",
+    ])
+    assert rc2 == 0
+    assert [p for p in out.iterdir() if p.name.startswith("run-")] == run_dirs
+    assert driver.completed_instance_ids(run_dirs[0] / "predictions.jsonl") == {"a", "b"}
+
+
+def test_raw_trace_alongside_output_lands_under_the_run_dir(tmp_path, monkeypatch):
+    """The ask this feature exists for: usage.jsonl, session.json, and
+    raw-trace/ all live inside the SAME per-sweep folder as predictions.jsonl
+    and runs.jsonl, not off in a container-level state/ shared across sweeps."""
+    bench = tmp_path / "b"
+    _seeded_repo(bench, "001")
+    ds = _dataset(bench, _instance(instance_id="a", workspace="001"))
+    out = tmp_path / "out"
+
+    captured = {}
+
+    def _fake_holder_runner(**kwargs):
+        captured.update(kwargs)
+        return FakeRunner([_result()])
+
+    monkeypatch.setattr(driver, "HolderRunner", _fake_holder_runner)
+    assert driver.bench_main([
+        "run", str(ds), "--out", str(out), "--max-steps", "5", "--max-seconds", "5",
+        "--raw-trace", "file",
+    ]) == 0
+
+    run_dirs = [p for p in out.iterdir() if p.name.startswith("run-")]
+    assert len(run_dirs) == 1
+    assert captured["raw_trace"] == "file"
+    assert captured["state_root"] == run_dirs[0] / "state"
+
+
+# =============================================================================
 # the bounds refusal (invariant 7) and `bench show`
 # =============================================================================
 
@@ -849,7 +1032,9 @@ def test_relative_out_resolves_before_the_runner_is_built(tmp_path, monkeypatch)
     ])
     assert rc == 0
     assert captured["state_root"].is_absolute()
-    assert captured["state_root"] == tmp_path / "relout" / "state"
+    container = tmp_path / "relout"
+    assert captured["state_root"].parent.parent == container
+    assert captured["state_root"].name == "state"
 
 
 def test_show_reports_empty_patches_prominently(tmp_path):
