@@ -2,9 +2,42 @@
 
 ## 0. Status
 
-**In-progress — doc + `milestone9_invariants.md` written, no code yet.** Checkable properties:
-`milestone9_invariants.md` (same folder) until the milestone moves to `complete/`, at which point
-it folds in here as a section, per `docs/README.md`'s milestone lifecycle.
+**Built — all seven §3 done-when items land on `feat/milestone9-agentprofile`.** Checkable
+properties: `milestone9_invariants.md` (same folder) until the milestone moves to `complete/`, at
+which point it folds in here as a section, per `docs/README.md`'s milestone lifecycle.
+
+### 0.1 What the build confirmed rather than changed
+
+No design fork in §5 needed revisiting — the build matched the plan exactly:
+
+- `harness/profile.py` (new, stdlib-only, no harness-sibling imports) defines `BindEntry`
+  (workspace-relative-only, per-entry `rw`/`ro`, raises at construction on an absolute path or a
+  `..`-escape) and `AgentProfile` (`name`, `binds`, reserved `harness_profile_key`/`network`).
+  `DEFAULT_PROFILE` is a single `BindEntry(relpath=".", mode="rw")`, and `Path(workspace) / "."`
+  normalizes to `Path(workspace)` exactly (verified), which is what makes invariant 2's "identical
+  two-element pair, not an equivalent one" hold without special-casing `"."`.
+- `jail.bwrap_args` gained `profile: AgentProfile | None = None` (keyword-only, after `*`) and now
+  imports `harness.profile` — the one deliberate exception to "imports no harness sibling" the
+  module's own docstring claims, noted inline as safe because `profile.py` itself imports nothing
+  and so carries no cycle risk. The single hardcoded `--bind` line became a loop over
+  `(profile or DEFAULT_PROFILE).binds`, in the same position between the `project_root` bind and
+  the state-dir bind. `jail.maybe_reexec`'s one internal call site passes no `profile`, so it and
+  the pre-M9 test suite (51 tests) are byte-identical with zero edits.
+- `scripts/sandbox-exec.sh` reads `AGENT_BIND_SCOPE` (`relpath:mode,relpath:mode`); unset or
+  empty short-circuits before the loop body ever runs (invariant 3), and a malformed entry
+  (missing `:mode`, empty relpath, unknown mode) exits 2 before `bwrap` is ever reached — verified
+  via a stub `bwrap` on `PATH` that logs argv instead of exec'ing (`tests/test_sandbox_exec.py`,
+  new, needs a real `bash` — the script uses arrays and `${var@Q}`, not POSIX `sh`).
+- The ordering invariant (masked overmounts strictly after every profile bind, regardless of how
+  many bind lines the profile contributes) and the "only the substituted segment differs" argv-diff
+  invariant are both asserted directly in `tests/test_jail.py`'s new M9 section, argv-equality
+  style — never a substring check, per the M7/M8 lesson.
+- No `run-docker.{ps1,sh}`, `config.py`, or `.harness-profile.yaml` touched, and `check-parity`
+  stays green untouched — there is still no selection surface (§4, §6), exactly as scoped.
+
+Full test run: `pytest tests/` — 1283 passed, 14 skipped (pre-existing Windows/live-model skips
+only), including the new `test_profile.py` (9), the M9 additions to `test_jail.py` (8), and
+`test_sandbox_exec.py` (6).
 
 Source: `design_doc.md` §2 ("HarnessProfile dynamic bind mounts", "Specialized Profiles") + §4
 ("Specialized Profiles": Architect vs. Coder toolsets) + the "Core identity — dependency chain"

@@ -31,8 +31,10 @@ narrow seccomp relaxation in `deepagent-image/seccomp/userns.json`, which expose
 kernel user-namespace surface -- a deliberate operator trade, not a silent
 default.
 
-Imports no harness sibling (same acyclic discipline as mask.py / cost.py), so
-`doctor` and the tests both reuse it without a cycle.
+Imports no harness sibling other than `profile` (same acyclic discipline as
+mask.py / cost.py) -- `profile.py` is itself stdlib-only and imports nothing,
+so pulling it in carries no cycle risk, and `doctor` and the tests both reuse
+this module without one.
 """
 
 from __future__ import annotations
@@ -42,6 +44,8 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+from harness.profile import AgentProfile, DEFAULT_PROFILE
 
 # Set on the child so the re-exec happens exactly once and cannot loop.
 JAILED_MARKER = "DEEPAGENTS_JAILED"
@@ -370,6 +374,7 @@ def bwrap_args(
     unshare_net: bool = False,
     extra_robinds: tuple[str, ...] = (),
     project_root: str | Path | None = None,
+    profile: AgentProfile | None = None,
 ) -> list[str]:
     """Build the bwrap argument list for the harness's own namespace.
 
@@ -377,15 +382,21 @@ def bwrap_args(
     same §9.3 contract the docker mask consumes, so policy is resolved once and
     stays enforcement-agnostic. Each entry needs `relpath` and `type`.
 
+    `profile` (M9, milestone9.md §3) narrows which workspace paths get bound and
+    how -- `None` defaults to `DEFAULT_PROFILE`, whose single `rw` "." entry
+    resolves to the exact single `--bind` line this parameter replaced, so every
+    existing caller and every pre-M9 test is byte-identical without editing them.
+
     Masked entries are overmounted *inside* the jail: a masked dir becomes an
     empty tmpfs, a masked file an empty read-only bind. This is what makes the
     floor's fourth leg (invariant 5) independent of the docker mask -- with the
     jail on, a floor path is unreadable even if the docker overlay were disabled
     or misconfigured.
 
-    Ordering is deliberate and stable: system binds, then the workspace, then the
-    state dir, then the masked overmounts *last* so they layer on top of the
-    workspace bind (same "later mount wins" reasoning as the docker mask, §11.1).
+    Ordering is deliberate and stable: system binds, then the workspace (now the
+    profile's bind list), then the state dir, then the masked overmounts *last*
+    so they layer on top -- same "later mount wins" reasoning as the docker mask
+    (§11.1), and unaffected by how many bind lines the profile contributes.
     A stable list also lets the tests assert the whole argv.
     """
     workspace = Path(workspace)
@@ -407,7 +418,10 @@ def bwrap_args(
         if project_root.exists():
             args += ["--ro-bind", str(project_root), str(project_root)]
 
-    args += ["--bind", str(workspace), str(workspace)]
+    for entry in (profile or DEFAULT_PROFILE).binds:
+        flag = "--bind" if entry.mode == "rw" else "--ro-bind"
+        target = str(workspace / entry.relpath)
+        args += [flag, target, target]
 
     if state_dir is not None:
         state_dir = Path(state_dir)

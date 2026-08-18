@@ -10,9 +10,41 @@
 #
 # Note: bwrap nested in Docker needs unprivileged user namespaces (see design_doc.md §2).
 # If the host disallows them this exits non-zero rather than running unsandboxed.
+#
+# AGENT_BIND_SCOPE (M9, milestone9.md §2/§6): optional "relpath:mode,relpath:mode"
+# list, mirroring harness/profile.py's AgentProfile on the Python side of the other
+# bwrap seam. Unset -> the single hardcoded workspace bind below, unchanged (no
+# selection surface feeds this var yet -- see milestone9.md §6). A malformed entry
+# is a hard failure: it must never silently fall back to binding the whole workspace,
+# which would be a widening disguised as a parse error (invariant 10).
 set -euo pipefail
 
 WS="${AGENT_WORKSPACE:-/project/workspace}"
+
+ws_bind_args=()
+if [[ -n "${AGENT_BIND_SCOPE:-}" ]]; then
+  IFS=',' read -ra _scope_entries <<< "$AGENT_BIND_SCOPE"
+  for entry in "${_scope_entries[@]}"; do
+    relpath="${entry%%:*}"
+    mode="${entry##*:}"
+    if [[ -z "$relpath" || -z "$mode" || "$entry" != "$relpath:$mode" ]]; then
+      echo "sandbox-exec: malformed AGENT_BIND_SCOPE entry: ${entry@Q}" >&2
+      exit 2
+    fi
+    case "$mode" in
+      rw) flag="--bind" ;;
+      ro) flag="--ro-bind" ;;
+      *)
+        echo "sandbox-exec: AGENT_BIND_SCOPE mode must be rw or ro, got: ${mode@Q}" >&2
+        exit 2
+        ;;
+    esac
+    target="$WS/$relpath"
+    ws_bind_args+=("$flag" "$target" "$target")
+  done
+else
+  ws_bind_args=(--bind "$WS" "$WS")
+fi
 
 phase="${1:-}"
 shift || true
@@ -47,7 +79,7 @@ exec bwrap \
   --ro-bind /lib64 /lib64 \
   --ro-bind /etc /etc \
   --ro-bind /opt /opt \
-  --bind "$WS" "$WS" \
+  "${ws_bind_args[@]}" \
   --dir /tmp \
   --proc /proc \
   --dev /dev \
