@@ -35,13 +35,29 @@ A milestone moves through three folders. What each stage carries is deliberate:
 
 ## Planned milestones — `milestones/planned/`
 
-*(Empty — nothing is queued. `milestone8.md` moved to `in-progress/`. Other forward candidates, not
-yet written up: `design_doc.md` §13 (file-read middleware), §12.6 (deepagents-native
-skills/memories), and the "Core identity — dependency chain" list; `features/` holds the two named
+*(Empty. Other forward candidates, not yet written up: `design_doc.md` §13 (file-read
+middleware), §12.6 (deepagents-native skills/memories), and core-identity chain items 3/4/5/6 —
+`milestone9.md`, chain item 2, moved to `in-progress/`; `features/` holds the two named
 non-milestone plans.)*
 
 ## In-progress milestones — `milestones/in-progress/`
 
+- **`milestone9.md`** (+ **`milestone9_invariants.md`**) — **HarnessProfile (per-agent scoped
+  bind/tool config)** (`design_doc.md` §2/§4, core-identity chain item 2). **Plan + invariants
+  written, no code yet.** Flags a naming collision up front: `deepagents.profiles.HarnessProfile`
+  (installed library, beta, prompt/tool config — already exists, has four measured footguns per
+  `design_doc.md` §5) is a different thing from §2's bind-mount-scoping concept, which has no
+  library implementation. This milestone builds the latter as a harness-owned `AgentProfile`
+  (`harness/profile.py`), parameterizing the two hardcoded full-workspace bwrap binds
+  (`harness/jail.py:410`, `scripts/sandbox-exec.sh:50`) with zero behavior change at the default.
+  Scoped to the object + the two seams only — no second live agent (needs chain items 5/6,
+  unbuilt), no `NetworkPolicy` (chain item 3, depends on this one), no config-file profile picker
+  (chain item 4's job). `milestone9_invariants.md` splits five ways: default-behavior preservation
+  (byte-identical argv at the default), bind construction (relpath-only, per-entry rw/ro — the
+  direct mitigation for `design_doc.md` §10's dynamic-bind escape risk), ordering (masked overmounts
+  still land after every profile bind), script parity (`sandbox-exec.sh` held to the same
+  argv-equality standard as `bwrap_args`, via a stub `bwrap` shim — the script's first direct test
+  coverage), and removability.
 - **`milestone8.md`** — **Benchmark Ladder, Tier 1 (Gold Set)** (`design_doc.md` §11): run the
   harness over a pinned set of bug-fix tasks, unattended, on the free local model, and have each run
   emit a scorable `git diff` plus a telemetry row that joins to it. **Plan + invariants written, no
