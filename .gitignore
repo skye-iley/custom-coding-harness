@@ -54,6 +54,14 @@ deepagent-image/test-artifacts/
 deepagent-image/.ephemeral/
 deepagent-image/workspace-logs/
 
+# harness bench run output (Milestone 8): predictions/runs.jsonl, per-run scratch
+# copies and state (usage.jsonl, session.json, raw-trace/ logs -- the last of
+# which can carry full model context, same secret-bearing-artifact caveat as M7's
+# raw trace file sink). `--out` defaults to bench-out/ at wherever the command was
+# invoked from, most often the repo root per the documented example -- not under
+# deepagent-image/ like the launcher outputs above, so it needs its own entry.
+bench-out/
+
 # Locally-created Ollama tags (`ollama create gemma4:harnesstest1`). The registry
 # is a shipped table, and a spec for a tag that exists on exactly one machine is
 # personal state in it — inert for everyone else, but noise that reads as a
