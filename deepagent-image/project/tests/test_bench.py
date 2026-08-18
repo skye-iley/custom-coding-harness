@@ -892,6 +892,10 @@ def test_a_row_records_both_the_process_and_the_harness_exit_code():
     assert row["harness_exit_code"] == 43
 
 
+@pytest.mark.skipif(
+    not (Path(__file__).resolve().parents[2] / "scripts" / "run-docker.sh").is_file(),
+    reason="run-docker.sh not available (scripts/ is not COPYed into the image)",
+)
 def test_both_launchers_propagate_the_container_exit_code():
     """A textual guard, because a sweep cannot see this any other way.
 
