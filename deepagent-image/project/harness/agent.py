@@ -181,6 +181,12 @@ class RawTraceMiddleware(AgentMiddleware):
         self.sink = sink
         self.turn_index = 0
         self.call_index = 0
+        # Held across the whole run (not reset per turn): the system prompt
+        # and tool schema block are almost always identical call to call, and
+        # a model switch rebuilds the agent (and this middleware) from
+        # scratch, which naturally clears these back to None.
+        self._last_system_hash: str | None = None
+        self._last_tools_hash: str | None = None
 
     def begin_turn(self) -> None:
         """Start a new turn's call numbering. Called by `cli.run_turn` — **never
@@ -199,7 +205,12 @@ class RawTraceMiddleware(AgentMiddleware):
             call=self.call_index,
             model=getattr(request, "model", None),
         ))
-        self.sink.append(rawtrace.format_request(request))
+        text, self._last_system_hash, self._last_tools_hash = rawtrace.format_request_dedup(
+            request,
+            last_system_hash=self._last_system_hash,
+            last_tools_hash=self._last_tools_hash,
+        )
+        self.sink.append(text)
         return time.perf_counter()
 
     def _close(self, started: float, response=None, exc: BaseException | None = None) -> None:

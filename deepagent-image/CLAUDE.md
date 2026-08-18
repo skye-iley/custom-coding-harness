@@ -464,6 +464,15 @@ Six things to know before touching this code:
   (L2, deferred), and **not** the chat-template token string (L3) — Ollama renders the
   template server-side, so that needs `OLLAMA_DEBUG=1` / `/api/show`. `design_doc.md` §11's
   old "raw tags included" wording promised L3 and is corrected there.
+- **Request-side dedup (post-M7, found via M8 self-test).** The system prompt and tool-schema
+  blocks are large and near-static call to call — a multi-step turn otherwise reprints both in
+  full at every step for no diagnostic gain. `rawtrace.format_request_dedup` (the function
+  `RawTraceMiddleware` actually calls; `format_request` is now test-only) replaces a block with
+  `(unchanged from previous call, sha256=…)` when it hashes identical to the immediately
+  preceding call's rendering of that block, and always re-renders in full the moment either
+  changes — so the full body is guaranteed to exist earlier in the same file and no change is
+  ever silently absorbed. Message content, tool calls, and tool results are **never** elided —
+  only these two blocks. `milestone7.md` §0.3/invariant 1 has the amended wording.
 
 Other properties worth not rediscovering: `off` is a **true pass-through** (mode checked
 before any work — no file, no directory, no formatting), which is what makes a live toggle
@@ -772,6 +781,81 @@ that directory must break nothing.
 green sweep looked like, on what host, against which model tag, under which
 bounds — plus the three defects the first sweeps found. Re-baseline whenever any
 of those change; a model upgrade is a re-baseline, not a regression.
+
+### The bench pytest image — a working test runner inside the container (post-B5 fix)
+
+`docs/milestones/in-progress/milestone8_selftest_findings.md` §1 found that **every**
+gold-set instance, in every self-test sweep, had zero working route to a test
+runner inside its own container: the shippable `deepagent-harness` runtime image
+ships no pytest (deliberately — see the Dockerfile's runtime-stage header), the
+workspace conda env never exists for a `SEED_WORKSPACE=0` instance with no
+`environment.yml`, and `AGENTS.md`'s manual-activation fallback used `source`,
+which the agent's `/bin/sh` (dash) has no builtin for. A model can still
+one-shot a correct fix by reading source, but it can never *verify* one — the
+capability the gold set's `gold-003-read-the-failure` instance exists to
+exercise.
+
+Fix: a **separate image tag**, `deepagent-harness-bench` — the `bench` Dockerfile
+stage, `runtime` plus `pytest` installed into `/opt/venv` (the harness venv,
+already first on `PATH`) and nothing else, no `tests/`. It is **not** the
+shippable image; that one stays pytest-free. Build it explicitly
+(`scripts/build.{ps1,sh} -Bench` / `BENCH=1 ./build.sh`); it is not built by a
+plain `build.ps1`/`build.sh` run. `run-docker.{ps1,sh}` now read the image tag to
+run from **`DEEPAGENTS_IMAGE`** (default `deepagent-harness`) instead of a
+hardcoded literal, and `HolderRunner.build_env` (`harness/bench/runner.py`) sets
+it to `deepagent-harness-bench` **unconditionally** for every bench instance —
+not opt-in, because an instance's ability to verify its own patch must not
+depend on an operator remembering a flag. `check-parity.{sh,ps1}` gates
+`DEEPAGENTS_IMAGE` as a semantic-parity marker, same reasoning as `STATE_HOST_DIR`
+/ `SEED_WORKSPACE`: dropped from one launcher only, a sweep on that platform
+silently reverts to the pytest-less runtime image with no error anywhere.
+
+Pytest lands in `/opt/venv`, not a workspace conda env, because a benchmark
+instance is plain-stdlib code with no `environment.yml` — there is no workspace
+env to put it in, and this is the test-running *tool* the driver supplies
+regardless of what the instance ships, not one of the workspace's own
+dependencies (the two-stack rule is about the latter). `AGENTS.md`'s manual
+fallback now uses `.` instead of `source`, and `conda-init-workspace.sh` exits 0
+(not 1) when `environment.yml` is absent — a workspace with no conda
+dependencies has nothing to activate, which is not an error.
+
+### `harness bench score` — UNOFFICIAL local diagnostic (post-B5 addition)
+
+`harness/bench/score.py`, deliberately **not** part of the §9 non-goal it looks
+adjacent to. §9's "no bespoke scorer, ever" is about the number that gets
+compared against someone else's run — a self-authored gold set scored by a
+self-authored scorer is grading your own homework twice, and `dataset.py`'s
+`fail_to_pass`/`pass_to_pass` are documented as "carried, not run" for exactly
+that reason. This is the opposite use: **local-only, never published, never
+compared against anyone else's number** — the question it answers is "is my
+harness (or this run's settings) even capable of solving these, or is the
+model" — which is diagnosis, not scoring.
+
+```bash
+python -m harness bench score benchmarks/gold/gold.jsonl --out /tmp/gold-run
+```
+
+For each row in `predictions.jsonl`: a **fresh** clone of the instance's base
+state via `driver.prepare_workspace` (never the driver's post-sweep `scratch/`
+— stale env or leftover files there would make a patch look like it fixed
+something it didn't), `git apply` the `model_patch`, then run the dataset's own
+`fail_to_pass` then `pass_to_pass` commands. Writes `<run-dir>/scores.jsonl` —
+a **separate** file from `predictions.jsonl`/`runs.jsonl`, never read by
+`bench run` or `bench show`, so the official contract is untouched by this
+existing at all. Three outcomes, not two, and keeping them apart is the whole
+point:
+
+| Outcome | Meaning |
+|---|---|
+| `apply_failed` | the patch itself is broken — an extractor/harness bug, not a model judgement |
+| `unresolved` | patch applied, `fail_to_pass`/`pass_to_pass` still not all green — the model didn't solve it |
+| `resolved` | applied and every test green |
+| `unscored` (`resolved: null`) | the instance carries no `fail_to_pass` commands — measures nothing, not a failure |
+
+Needs `pytest` importable by whatever runs the command — a scoring-time
+requirement, not a harness dependency (same as `tests/test_gold_set.py` already
+has for running these same commands directly). Tests: `tests/test_bench_score.py`
+(host, skips without `git`).
 
 ## Present / past memory (Milestone 2)
 
@@ -1717,6 +1801,16 @@ harness bench run <dataset.jsonl> --max-steps N --max-seconds T \
     [--out DIR] [--limit N] [--only ID,ID] [--dry-run] [--model SPEC] [--net-jail] \
     [--raw-trace file|console|both]          # M7 trace per instance, for troubleshooting
 harness bench show [--out DIR]               # the container's latest run, or a run's own dir
+
+# UNOFFICIAL local diagnostic (harness/bench/score.py) -- NOT the M8 contract.
+# §9 "no bespoke scorer, ever" is about a number compared against anyone else's
+# run; this is a local-only fresh-clone-+ git apply + fail_to_pass/pass_to_pass
+# check, for telling "harness didn't converge" apart from "model isn't capable
+# of this" on your own gold set. Writes scores.jsonl beside predictions.jsonl /
+# runs.jsonl -- additive, never read by `bench run`/`bench show`. Needs pytest
+# importable by whatever runs this command (same requirement test_gold_set.py
+# already has for running these same commands directly).
+harness bench score <dataset.jsonl> [--out DIR] [--only ID,ID]
 ```
 
 "Keyless" here means no API key, no network and no model — **and, since M5 §0.1 F6

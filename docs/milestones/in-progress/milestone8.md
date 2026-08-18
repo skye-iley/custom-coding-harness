@@ -731,9 +731,18 @@ have. Mostly. Do not write that down as a guarantee.
 
 ## 9. Non-goals
 
-- **Scoring.** No bespoke scorer, ever. The contract this milestone satisfies is the predictions
-  jsonl; correctness comes from the benchmark's own evaluation harness (SWE-bench eval, the Aider
-  runner). A scorer written here would be a number nobody else can compare against.
+- **Scoring.** No bespoke scorer, ever, **as part of the tier-1 contract** — `predictions.jsonl` is
+  the deliverable; correctness comes from the benchmark's own evaluation harness (SWE-bench eval,
+  the Aider runner). A scorer written here as *the* number would be a number nobody else can
+  compare against.
+  **Post-B5 addition, deliberately outside that contract:** `harness bench score`
+  (`harness/bench/score.py`) — a local, unofficial, never-published diagnostic that re-applies each
+  prediction's patch to a fresh clone and runs the dataset's own `fail_to_pass`/`pass_to_pass`, so an
+  operator can tell "the harness didn't converge" apart from "the model can't solve this" on their
+  own gold set. It reasons about *your own* run only, is never compared to anyone else's number, and
+  writes a separate `scores.jsonl` that nothing else reads — the distinction §9 actually protects
+  (comparability) is untouched; only the "ever" needed narrowing. See the deepagent-image/CLAUDE.md
+  "`harness bench score`" section for the contract.
 - **Tiers 2 and 3.** Aider polyglot and SWE-bench Lite/Verified are follow-on milestones. They need
   only the driver + patch output + bounds this milestone builds; the per-instance Docker images and
   the network posture are *their* open questions (`design_doc.md` §11 — including the unpinned

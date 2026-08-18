@@ -581,6 +581,49 @@ def test_call_numbering_restarts_per_turn_not_per_invoke(tmp_path):
     assert "turn 2 | call 1" in text
 
 
+# --- M7 §0.3: request-side dedup through the real seam, not just the pure
+# --- function tests in test_rawtrace.py. milestone7.md invariant 1 was amended
+# --- to allow a repeated system/tools block to be elided; these pin the two
+# --- properties that amendment depends on -- the full body is guaranteed
+# --- present earlier in the file, and a change is never silently absorbed --
+# --- against the actual production path (RawTraceMiddleware.wrap_model_call).
+
+
+def test_unchanged_system_and_tools_are_elided_on_a_second_call(tmp_path):
+    mw = _trace_mw(tmp_path)
+    req = _TraceRequest(tools=[_NamedTool("write_file")], system_message="SYS PROMPT")
+
+    mw.wrap_model_call(req, lambda r: _FakeResponse())
+    mw.wrap_model_call(req, lambda r: _FakeResponse())
+
+    text = (tmp_path / "t.log").read_text(encoding="utf-8")
+    records = text.split("===== run ")[1:]
+    assert len(records) == 2
+    assert "SYS PROMPT" in records[0] and "write_file" in records[0]
+    # Second call: pointer only, invariant-1's exception -- not the bodies again.
+    assert "SYS PROMPT" not in records[1]
+    assert "write_file:" not in records[1]
+    assert "unchanged from previous call, sha256=" in records[1]
+
+
+def test_a_changed_system_prompt_is_surfaced_in_full_not_silently_absorbed(tmp_path):
+    mw = _trace_mw(tmp_path)
+    first = _TraceRequest(tools=[_NamedTool("write_file")], system_message="SYS V1")
+    second = _TraceRequest(tools=[_NamedTool("write_file")], system_message="SYS V2")
+
+    mw.wrap_model_call(first, lambda r: _FakeResponse())
+    mw.wrap_model_call(second, lambda r: _FakeResponse())
+
+    text = (tmp_path / "t.log").read_text(encoding="utf-8")
+    records = text.split("===== run ")[1:]
+    # The change is rendered in full, not pointed at -- invariant 1's "no
+    # change is silently absorbed" half.
+    assert "SYS V2" in records[1]
+    assert "unchanged from previous call" not in records[1].split("--- messages")[0]
+    # The unchanged tool list still elides on the same call.
+    assert "write_file:" not in records[1].split("--- messages")[0]
+
+
 # --- M4 slice H backstop: the namespace guard on the shell tool ---------------
 # The seccomp relaxation the jail needs is applied to the WHOLE container, so it
 # hands the agent's shell the same five syscalls. These cover the backend seam;

@@ -65,6 +65,34 @@ the registry, but `_handle_config`'s `save` branch builds its `values` dict fiel
 noted: it is the one remaining place where adding a persisted live field is more than a `FieldSpec`
 plus an applier.
 
+### 0.3 Post-completion addendum — request-side dedup (found via M8 self-test)
+
+`milestone8_selftest_findings.md` used `--raw-trace file` against real bench sweeps and found the
+request half repeats its two largest blocks — the system prompt and the tool schema list — on
+**every** model call in a run, even though both are static far more often than not (they only
+change on an `AGENTS.md` edit or a `/config set model` rebuild). A multi-step ReAct turn re-prints
+both in full at every step, which is waste with no diagnostic value: the record already has the
+byte-for-byte body from an earlier call in the same file.
+
+Fix: `rawtrace.format_request_dedup` (used by `agent.RawTraceMiddleware` in production;
+`format_request` stays as the always-full renderer and is now test-only) replaces a block with a
+one-line pointer — `(unchanged from previous call, sha256=<hash>)` — **only** when it hashes
+identical to the immediately preceding call's rendering of that same block, and renders it in full
+again the moment either changes. Message history is never touched by this — it is the interesting
+part of a growing run, not repetition to collapse.
+
+This narrows **invariant 1** below (verbatim bodies) without violating its intent: the intent is
+that a reviewer can be certain nothing was dropped or altered unnoticed, not that identical bytes
+are physically repeated on disk. Both conditions the narrowing depends on hold structurally — the
+full body always exists earlier in the same file (the first call is never elided, since there is no
+prior hash to compare against), and a change is never silently absorbed (a hash mismatch always
+falls back to full rendering, and the mismatch is the same code path that would render on the very
+first call). The invariant's wording is amended in place below to say this rather than carry a
+silent exception. Tests: `test_rawtrace.py`'s three `format_request_dedup` cases (elide, re-render
+on change, first-call parity with `format_request`) plus `test_agent.py`'s
+`RawTraceMiddleware`-level cases proving the same properties hold through the actual production
+seam, not just the pure function.
+
 ## 1. Goal & Definition of Done
 
 **Goal.** Show, per model call, everything the harness hands the model and everything the model
@@ -616,7 +644,14 @@ disagreement a test failure rather than a debugging dead end.
 1. **Bodies are verbatim.** The `system_message` text, each message's content, each tool-call block,
    each tool-result content, and each tool schema appear byte-for-byte as they were on the
    `ModelRequest`, modulo the scrub of invariant 13. No truncation, no pretty-printing, no
-   re-serialization.
+   re-serialization. **Amended (§0.3):** the system-prompt and tool-schema blocks specifically may
+   be replaced by a `(unchanged from previous call, sha256=…)` pointer when byte-identical to the
+   immediately preceding call's rendering of that same block — the intent this invariant protects is
+   that nothing is dropped or altered *unnoticed*, and a pointer satisfies that exactly when (a) the
+   full body it points at is guaranteed present earlier in the same file (the first call is never
+   elided) and (b) any change falls back to a full re-render, never a silent no-op. Message content,
+   tool calls, and tool results are never elided under this exception — only the two blocks that are
+   large and near-static call to call.
 
 2. **Additions are structural only.** The `===== run … =====` header, the `--- system ---` /
    `--- messages (N) ---` / `--- tools (N) ---` / `--- response ---` rules, block indices, and counts

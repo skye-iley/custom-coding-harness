@@ -702,6 +702,18 @@ def _build_parser() -> argparse.ArgumentParser:
     show.add_argument("--out", default="bench-out",
                      help="a run's own directory, or the --out container -- the most recent "
                           "run inside it is reported")
+
+    score = sub.add_parser(
+        "score",
+        help="UNOFFICIAL local diagnostic: re-apply each prediction's patch to a fresh "
+             "clone and run the dataset's own fail_to_pass/pass_to_pass. Not the M8 "
+             "contract -- see harness/bench/score.py.",
+    )
+    score.add_argument("dataset", help="path to the jsonl dataset that produced the run")
+    score.add_argument("--out", default="bench-out",
+                       help="a run's own directory, or the --out container -- the most "
+                            "recent run inside it is scored")
+    score.add_argument("--only", default="", help="comma-separated instance ids")
     return parser
 
 
@@ -712,6 +724,13 @@ def bench_main(argv: list[str]) -> int:
     if args.command == "show":
         print(render_show(summarize(resolve_show_dir(Path(args.out)))), end="")
         return 0
+
+    if args.command == "score":
+        from harness.bench.score import score_sweep
+
+        only = tuple(x.strip() for x in args.only.split(",") if x.strip())
+        run_dir = resolve_show_dir(Path(args.out))
+        return score_sweep(Path(args.dataset), run_dir, only=only)
 
     # Invariant 7: refuse to start without BOTH bounds. An unbounded sweep is the
     # failure mode this milestone exists to remove, and it must not be reachable

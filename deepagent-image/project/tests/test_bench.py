@@ -346,6 +346,16 @@ def test_net_jail_is_passed_through_rather_than_assumed_off(tmp_path):
     assert _runner(tmp_path).build_env(tmp_path / "ws")["NET_JAIL"] == "0"
 
 
+def test_the_pytest_enabled_bench_image_is_selected_unconditionally(tmp_path):
+    """milestone8_selftest_findings.md §1: the shippable runtime image ships no
+    pytest, so an instance had zero working route to a test runner. The driver
+    must always point the launcher at the bench image -- not opt-in, or the same
+    gap comes back the moment an operator forgets a flag -- and a stray
+    DEEPAGENTS_IMAGE already in the environment must not silently defeat it."""
+    r = _runner(tmp_path, env={"DEEPAGENTS_IMAGE": "something-else"})
+    assert r.build_env(tmp_path / "ws")["DEEPAGENTS_IMAGE"] == "deepagent-harness-bench"
+
+
 def test_a_missing_launcher_raises_rather_than_failing_every_instance(tmp_path):
     r = runner_mod.HolderRunner(repo_root=tmp_path, launcher=tmp_path / "nope.sh",
                                 platform="linux")

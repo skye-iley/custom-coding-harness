@@ -67,6 +67,11 @@ $markers = @("mask-scan", "refusing to launch unmasked", "DEEPAGENTS_MASK", "DEE
              "SEED_WORKSPACE",
              "DEEPAGENTS_JAIL_SYSTEMPATHS",
              "/project/.harness-profile.yaml",
+             # M8 self-test findings: the bench driver selects the pytest-enabled
+             # bench image via this var. Dropped from one launcher only, a sweep
+             # on that platform silently runs the pytest-less runtime image and
+             # no instance can ever verify its own patch.
+             "DEEPAGENTS_IMAGE",
              "PIDS_LIMIT=", "DEEPAGENTS_JAIL=1", "DEEPAGENTS_MASK_MODE=")
 $rdPs1 = Join-Path (Join-Path $Root "scripts") "run-docker.ps1"
 $rdSh  = Join-Path (Join-Path $Root "scripts") "run-docker.sh"

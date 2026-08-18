@@ -77,6 +77,11 @@ markers=(
   # test_config.py::test_prespinup_profile_keys_are_consumed_by_both_launchers
   # checks ALL of them, so a new knob is covered without editing this list.
   "/project/.harness-profile.yaml"
+  # M8 self-test findings: the bench driver selects the pytest-enabled bench
+  # image via this var. Dropped from one launcher only, a sweep on that
+  # platform silently runs the pytest-less runtime image and no instance can
+  # ever verify its own patch.
+  "DEEPAGENTS_IMAGE"
   # The caps are docker flags, not env vars, so the container can only report
   # them truthfully in `/config` if they are forwarded explicitly.
   "PIDS_LIMIT="

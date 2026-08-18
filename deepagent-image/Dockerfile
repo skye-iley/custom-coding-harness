@@ -104,6 +104,29 @@ USER agent
 
 CMD ["python3", "main.py"]
 
+# bench stage: runtime + pytest only, no tests/. Not the shippable image -- that
+# stays pytest-free by design (see the runtime stage's own header comment). This
+# is a SEPARATE tag (`docker build --target bench`, conventionally tagged
+# deepagent-harness-bench) that the benchmark driver selects via DEEPAGENTS_IMAGE
+# so a benchmark instance's shell can actually run `pytest tests/` -- see
+# milestone8_selftest_findings.md §1/§4: the runtime image ships no pytest, the
+# workspace conda env never exists for a SEED_WORKSPACE=0 instance with no
+# environment.yml, and AGENTS.md's manual-activation fallback doesn't work
+# either, so a gold-set instance had ZERO working route to a test runner. Pytest
+# lands in /opt/venv (the harness venv, already on PATH first) rather than a
+# workspace conda env: a benchmark instance is plain-stdlib code with no
+# environment.yml, so there is no workspace env to put it in, and the two-stack
+# rule (harness deps vs. workspace deps) is about a WORKSPACE's own dependencies,
+# not the test-running tool the driver supplies regardless of what the instance
+# ships. Distinct from the `test` stage below, which carries tests/ +
+# requirements-dev.txt and exists to run THIS repo's own suite, not an agent's.
+FROM runtime AS bench
+
+WORKDIR /tmp/build
+RUN uv pip install --index-url https://pypi.org/simple pytest
+
+WORKDIR /project
+
 # test stage: runtime + pytest + tests/. Built with `docker build --target test`
 # (smoke). FROM runtime means the suite exercises the real runtime layer, so the
 # import-cycle / package-split checks still hold. pytest lives only here, never in

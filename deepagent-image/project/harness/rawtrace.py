@@ -35,6 +35,7 @@ cannot read this as something it is not.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from datetime import datetime, timezone
@@ -352,6 +353,30 @@ def format_header(*, run_id: str, turn: int, call: int, model, ts: str | None = 
     )
 
 
+def _hash12(text: str) -> str:
+    """A short content hash for the "unchanged since last call" check.
+
+    12 hex chars of sha256 — collision-proof for this purpose (comparing a
+    handful of hashes within one run's log) and short enough not to be the
+    thing a reader has to skip past.
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def _system_block(system) -> tuple[str, str]:
+    """The rendered system-prompt body and its hash, factored out so the plain
+    and deduping renderers below always agree on what "the system block" is."""
+    text = format_system(system)
+    return text, _hash12(text)
+
+
+def _tools_block(tools) -> tuple[str, str]:
+    """The rendered tool-schema body and its hash — same factoring as
+    `_system_block`, and for the same reason."""
+    text = "\n".join(f"{_tool_name(tool)}: {_json(_tool_schema(tool))}" for tool in tools)
+    return text, _hash12(text)
+
+
 def format_request(request) -> str:
     """The outgoing half: system prompt, full message history, tool schemas.
 
@@ -362,9 +387,9 @@ def format_request(request) -> str:
     """
     out: list[str] = []
 
-    system = _get(request, "system_message")
+    system_text, _ = _system_block(_get(request, "system_message"))
     out.append("--- system ---")
-    out.append(format_system(system))
+    out.append(system_text)
 
     messages = list(_get(request, "messages") or [])
     out.append(f"--- messages ({len(messages)}) ---")
@@ -372,9 +397,9 @@ def format_request(request) -> str:
         out.append(format_message(i, message))
 
     tools = list(_get(request, "tools") or [])
+    tools_text, _ = _tools_block(tools)
     out.append(f"--- tools ({len(tools)}) ---")
-    for tool in tools:
-        out.append(f"{_tool_name(tool)}: {_json(_tool_schema(tool))}")
+    out.append(tools_text)
 
     for label, key in (("tool_choice", "tool_choice"), ("response_format", "response_format")):
         value = _get(request, key)
@@ -382,6 +407,60 @@ def format_request(request) -> str:
             out.append(f"--- {label} ---\n{_json(value)}")
 
     return "\n".join(out)
+
+
+def format_request_dedup(
+    request,
+    *,
+    last_system_hash: str | None = None,
+    last_tools_hash: str | None = None,
+) -> tuple[str, str, str]:
+    """`format_request`, but the system prompt / tool schema block is replaced
+    by a one-line pointer when it hashes identical to the previous call's.
+
+    Both blocks are static far more often than not — the system prompt only
+    changes on an AGENTS.md edit or a `/config set model` rebuild, and the tool
+    list only on the same rebuild or a mid-run exclusion change — while message
+    history is dumped in full every call regardless (invariant: only a block
+    that is byte-identical to what already sits earlier in the same file is
+    ever elided, and elision always points at a hash, never silently omits).
+    `agent.py`'s `RawTraceMiddleware` holds the two hashes across calls for one
+    run and passes them back in here, so this stays a pure function: hashes and
+    request in, rendered text and the (possibly unchanged) hashes out.
+
+    Message history, `tool_choice` and `response_format` are untouched — the
+    thing this exists to stop repeating is the two blocks that are large *and*
+    almost always identical to the previous call, not history growth, which is
+    itself the interesting record of a run.
+    """
+    out: list[str] = []
+
+    system_text, system_hash = _system_block(_get(request, "system_message"))
+    out.append("--- system ---")
+    if last_system_hash is not None and system_hash == last_system_hash:
+        out.append(f"(unchanged from previous call, sha256={system_hash})")
+    else:
+        out.append(system_text)
+
+    messages = list(_get(request, "messages") or [])
+    out.append(f"--- messages ({len(messages)}) ---")
+    for i, message in enumerate(messages):
+        out.append(format_message(i, message))
+
+    tools = list(_get(request, "tools") or [])
+    tools_text, tools_hash = _tools_block(tools)
+    out.append(f"--- tools ({len(tools)}) ---")
+    if last_tools_hash is not None and tools_hash == last_tools_hash:
+        out.append(f"(unchanged from previous call, sha256={tools_hash})")
+    else:
+        out.append(tools_text)
+
+    for label, key in (("tool_choice", "tool_choice"), ("response_format", "response_format")):
+        value = _get(request, key)
+        if value is not None:
+            out.append(f"--- {label} ---\n{_json(value)}")
+
+    return "\n".join(out), system_hash, tools_hash
 
 
 def _tool_name(tool) -> str:

@@ -143,6 +143,15 @@ class HolderRunner:
     # explaining, not a console log mixed across five containers' stderr.
     raw_trace: str | None = None
     state_root: Path | None = None
+    # A benchmark instance needs a working `pytest` inside its own container --
+    # the shippable `deepagent-harness` runtime image ships none, deliberately
+    # (see the Dockerfile). `deepagent-harness-bench` is the same image with
+    # pytest added to /opt/venv and nothing else, built by
+    # `scripts/build.{ps1,sh} -Bench` / `BENCH=1 ./build.sh`. Selected via
+    # DEEPAGENTS_IMAGE, which run-docker reads before every literal
+    # "deepagent-harness" it used to hardcode -- see
+    # milestone8_selftest_findings.md §1/§4.
+    image: str = "deepagent-harness-bench"
     env: dict[str, str] = field(default_factory=dict)
     timeout_slack_seconds: float = 120.0
     # Injected so the host tier can exercise the whole command construction
@@ -201,6 +210,11 @@ class HolderRunner:
     def build_env(self, workspace: Path) -> dict[str, str]:
         env = dict(os.environ)
         env.update(self.env)
+        # Selects the pytest-enabled image (see `image` above), unconditionally
+        # -- an instance's ability to verify its own patch must not depend on
+        # whether the operator remembered a flag, same reasoning as
+        # SEED_WORKSPACE/DEEPAGENTS_WORKFLOWS_DIR below.
+        env["DEEPAGENTS_IMAGE"] = self.image
         # The git lifecycle must not run: its commit swallows the diff, and a
         # sweep must not open a PR per instance (invariant 25).
         env["DEEPAGENTS_WORKFLOWS_DIR"] = str(workspace / ".no-workflows-for-bench")

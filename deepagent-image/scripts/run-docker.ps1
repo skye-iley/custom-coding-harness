@@ -98,6 +98,14 @@ if (-not $PSBoundParameters.ContainsKey('NetJail')) {
     if ($NetJailResolved -in @("1", "true", "yes", "on")) { $NetJail = [switch]$true }
 }
 
+# Image tag to run. Default is the shippable runtime image (no pytest, by
+# design -- see the Dockerfile). The bench driver points this at
+# deepagent-harness-bench (runtime + pytest in /opt/venv, still no tests/) so a
+# benchmark instance's shell can actually run `pytest` -- see the "bench pytest
+# image" section of deepagent-image/CLAUDE.md. Not a Resolve-HostSetting knob:
+# this is an internal driver detail, not something an operator saves to a profile.
+$Image = if ($env:DEEPAGENTS_IMAGE) { $env:DEEPAGENTS_IMAGE } else { "deepagent-harness" }
+
 $DefaultWorkspace = Join-Path $Root "project\workspace"
 if (-not $WorkspacePath) {
     $WorkspacePath = $DefaultWorkspace
@@ -384,7 +392,7 @@ if ($MaskEnabled -eq "" -or $MaskEnabled -eq "1") {
         "-v", "${StateHostDir}:/project/state",
         "-e", "DEEPAGENTS_STATE_DIR=/project/state"
     ) + $ScanModeArgs + @(
-        "deepagent-harness", "python3", "-m", "harness", "mask-scan"
+        $Image, "python3", "-m", "harness", "mask-scan"
     )
     # Native command stderr must not become a terminating error under
     # ErrorActionPreference=Stop (see Remove-ContainerIfExists above) — mask-scan
@@ -473,10 +481,10 @@ if ($JailMode -and $JailMode -notin @("0", "false", "no", "off")) {
         # is not loaded anywhere and make the launcher announce a boundary that does not
         # exist. Ask what actually confines a container here before asking for a profile.
         $probe = "deepagent-userns"
-        $inForce = (docker run --rm deepagent-harness sh -c 'cat /proc/self/attr/apparmor/current 2>/dev/null || cat /proc/self/attr/current 2>/dev/null || true' 2>$null)
+        $inForce = (docker run --rm $Image sh -c 'cat /proc/self/attr/apparmor/current 2>/dev/null || cat /proc/self/attr/current 2>/dev/null || true' 2>$null)
         if ($inForce) { $inForce = ($inForce -replace ' \(.*', '').Trim() }
         if ($inForce -and $inForce -notin @("unconfined", "kernel")) {
-            docker run --rm --security-opt "apparmor=$probe" deepagent-harness true 2>$null | Out-Null
+            docker run --rm --security-opt "apparmor=$probe" $Image true 2>$null | Out-Null
             if ($LASTEXITCODE -eq 0) {
                 $Apparmor = $probe
             } else {
@@ -667,7 +675,7 @@ if (Test-Path $ProfileFile) {
     Write-Host "Config profile: mounted (.harness-profile.yaml present)"
 }
 
-$dockerArgs += "deepagent-harness"
+$dockerArgs += $Image
 
 if ($TaskParts.Count -gt 0) {
     $dockerArgs += "python3", "main.py"
