@@ -65,6 +65,14 @@ looks like paranoia about empty patches or misclassified outcomes is that rule a
 
 ## Patch fidelity (the artifact is scorable)
 
+> **Built (B2).** 8–12, 12a, 12b and 14 are pinned by `tests/test_bench_patch.py` (host tier,
+> skips without `git`), which drives the extractor **the way the driver does** rather than
+> through `--emit-patch` — that is invariant 12a holding today. The wiring and the removable
+> contract are in the B2 block of `tests/test_cli.py`, and
+> `test_live_model.py::test_a_real_turn_produces_a_patch_that_actually_applies` is the case a
+> stub cannot substitute for. Every one asserts by **applying** the patch. **13 is not built**:
+> `predictions.jsonl` belongs to the driver (B3).
+
 8. **A new file the agent never staged appears in the patch.** The `gold-005-new-module` case, and
    the single most likely silent defect in this milestone: without `git add -A -N` the patch is
    empty, applies cleanly as a no-op, and scores 0 with a signature identical to "the model did

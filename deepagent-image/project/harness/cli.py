@@ -147,6 +147,16 @@ def parse_args() -> argparse.Namespace:
         help="End the session once cumulative tokens cross this (also DEEPAGENTS_MAX_TOKENS).",
     )
     parser.add_argument(
+        "--emit-patch",
+        action="store_true",
+        default=None,
+        help="Put a `git diff` of the workspace on the headless JSON as "
+        "`model_patch` (M8). Taken against the commit HEAD pointed at when the "
+        "run started, before any session commit, and excluding harness artifacts. "
+        "Read-only: the repo index is not touched. Refuses to start if the "
+        "workspace is not a git repository (also DEEPAGENTS_EMIT_PATCH).",
+    )
+    parser.add_argument(
         "--max-steps",
         type=int,
         default=None,
@@ -184,6 +194,7 @@ def parse_args() -> argparse.Namespace:
     args.thread_id = settings.thread_id
     args.topic = settings.topic
     args.headless = settings.headless
+    args.emit_patch = settings.emit_patch
     args.max_cost = settings.max_cost
     args.max_tokens = settings.max_tokens
     args.max_steps = settings.max_steps
@@ -2333,7 +2344,7 @@ def _pr_approval(hitl_conf, workspace: Path | None, headless: bool) -> bool:
 
 
 def _batch_payload(final_message, config, tracker, workspace, exit_code,
-                   telemetry=None) -> dict:
+                   telemetry=None, model_patch=None) -> dict:
     """The one JSON object a headless run emits on stdout (P2). PR URL is not yet
     captured here — git-pr runs at session.end (after this) and logs its URL to
     stderr; wiring it into the payload is a follow-up.
@@ -2347,7 +2358,13 @@ def _batch_payload(final_message, config, tracker, workspace, exit_code,
 
     The keys are present with `None` values when telemetry is off, rather than
     absent: a driver that reads `payload["run_id"]` should get a null it can test,
-    not a KeyError that looks like a schema change."""
+    not a KeyError that looks like a schema change.
+
+    Milestone 8 adds `model_patch` on the same convention: **present as `null`**
+    unless `--emit-patch` asked for one. It is a convenience, not the mechanism —
+    the batch driver extracts the patch itself, from a workspace it owns, through
+    the same `harness.bench.patch` function, because a foreign harness has no
+    such flag (`milestone8.md` §5.2)."""
     thread_id = config.get("configurable", {}).get("thread_id")
     tokens = cost = None
     if tracker is not None:
@@ -2363,8 +2380,62 @@ def _batch_payload(final_message, config, tracker, workspace, exit_code,
         "cost_usd": cost,
         "branch": _read_session_branch(workspace),
         "pr_url": None,
+        "model_patch": model_patch,
         "exit_code": exit_code,
     }
+
+
+def _resolve_patch_base(workspace: Path) -> str:
+    """The commit `--emit-patch` will diff against, resolved once at startup.
+
+    **Refuses to start** when the workspace is not a git repository, rather than
+    running and reporting `model_patch: null`. The operator asked for a patch;
+    a run that cannot produce one has not done what was asked, and a null that
+    means "impossible here" is indistinguishable from a null that means "you did
+    not ask" -- the same point-of-entry principle M5.1 applied to enum knobs.
+    """
+    from harness.bench import patch as patch_mod
+
+    try:
+        return patch_mod.resolve_base(workspace)
+    except patch_mod.PatchError as exc:
+        raise SystemExit(
+            f"--emit-patch: {exc}. A patch needs a base commit to diff against, "
+            "so the workspace must be a git repository with at least one commit."
+        ) from exc
+
+
+def _emit_patch(workspace: Path | None, patch_base: str | None) -> str | None:
+    """The `--emit-patch` diff, or ``None`` when it was not asked for (M8 B2).
+
+    Taken **here**, from `run_batch`, while the working tree is still dirty and
+    *before* `main`'s `finally` runs the `session.end` workflows. That ordering is
+    the point: `git-pr` commits, and after a commit `git diff HEAD` is empty and
+    the patch is silently lost. The base is a SHA recorded at startup, so even a
+    commit cannot move it.
+
+    `patch_base is None` means the flag is off, and then **no git subprocess runs
+    at all** — the removable contract, structural rather than a branch inside the
+    extractor.
+
+    A failed extraction degrades to `null` plus a loud stage line rather than
+    taking the run down: the turn already happened and its telemetry is real. The
+    line is what keeps the null from reading as "the flag was off" — and the
+    driver does not come through here at all, so the ambiguity never reaches a
+    sweep.
+    """
+    if patch_base is None or workspace is None:
+        return None
+    # Function-local, like every other route in `entry.dispatch`: `harness.bench`
+    # must not appear at cli.py's module top, or the keyless import-isolation
+    # guard on the bench package would be testing a module that drags cli in.
+    from harness.bench import patch as patch_mod
+
+    try:
+        return patch_mod.extract_patch(workspace, patch_base)
+    except Exception as exc:  # noqa: BLE001 - a patch failure must not fail the run
+        _stage(f"emit-patch: could not extract a patch ({_err_detail(exc)})")
+        return None
 
 
 def run_batch(
@@ -2379,6 +2450,7 @@ def run_batch(
     raw_trace: "RawTraceMiddleware | None" = None,
     turns: "limits_mod.TurnCounter | None" = None,
     deadline: "limits_mod.Deadline | None" = None,
+    patch_base: str | None = None,
 ) -> int:
     """Headless one-shot mode (P2 / design_doc.md §12.3).
 
@@ -2432,7 +2504,10 @@ def run_batch(
 
     _print_session_total(tracker)
     print(json.dumps(
-        _batch_payload(final_message, config, tracker, workspace, exit_code, telemetry)
+        _batch_payload(
+            final_message, config, tracker, workspace, exit_code, telemetry,
+            model_patch=_emit_patch(workspace, patch_base),
+        )
     ))
     _stage("session closed")
     return exit_code
@@ -2532,6 +2607,13 @@ def main() -> int:
     turn_counter = (
         limits_mod.TurnCounter(args.max_turns) if args.max_turns is not None else None
     )
+    # M8 B2: record the base commit NOW, before the agent has touched anything.
+    # Keeping the string "HEAD" instead would lose the patch entirely on any run
+    # where the git lifecycle commits at session.end -- `git diff HEAD` is empty
+    # after a commit, and the failure is silent, indistinguishable from an agent
+    # that changed nothing. None unless the flag is on, so no git subprocess runs
+    # on an ordinary run.
+    patch_base = _resolve_patch_base(workspace) if args.emit_patch else None
 
     # Past archive (Milestone 2, §2.2): a SEPARATE sqlite store beside the
     # checkpointer, never opened by LangGraph, so it is structurally impossible to
@@ -2717,6 +2799,7 @@ def main() -> int:
                     raw_trace=raw_trace,
                     turns=turn_counter,
                     deadline=deadline,
+                    patch_base=patch_base,
                 )
             else:
                 rc = run_repl(

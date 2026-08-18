@@ -571,6 +571,62 @@ roll-up), `tests/test_config.py` (four-tier resolution), and
 `tests/test_live_model.py` — the tier that catches a bound the harness believes in
 and LangGraph does not honour.
 
+## Scorable patch out (Milestone 8, slice B2)
+
+`harness/bench/patch.py` turns a workspace the agent worked in into a `git diff`
+an *official* scorer can consume — the `model_patch` of a SWE-bench-style
+predictions line. Stdlib + the `git` binary only, so it stays in the host test
+tier and imports no harness sibling.
+
+```bash
+python3 main.py --headless --emit-patch "fix the failing test"
+# -> {"final_message": ..., "model_patch": "diff --git a/...", "exit_code": 0}
+```
+
+**`--emit-patch` is a convenience, not the mechanism.** There is exactly one
+extractor and the *driver* calls it directly, against a workspace the driver
+prepared. A foreign harness (Aider, SWE-agent, Claude Code) has no such flag and
+never will, so a sweep that depended on one could never compare anything — and
+two implementations of `git add -A -N` is two chances to get the untracked-file
+case wrong, in which the one that gets it wrong is the one nobody is looking at.
+The flag exists for an operator running a single instance by hand.
+
+Four things are load-bearing, each guarding a failure that is otherwise silent:
+
+- **Intent-to-add.** `git diff` shows *nothing* for an untracked file. An agent
+  that fixes a bug by adding a new module would emit an **empty patch** — which
+  applies cleanly as a no-op and scores zero with a signature identical to "the
+  model did nothing". `git add -A -N` is what makes the new file visible.
+- **The real index is never touched.** The intent-to-add marks go into a
+  throwaway `GIT_INDEX_FILE` **outside the workspace**, seeded with `read-tree
+  <base>`. Extraction is therefore read-only with respect to the operator's repo
+  *and* independent of whatever the agent staged mid-run. Outside the workspace
+  is not fussiness — measured: a scratch index inside it gets swept up by
+  `git add -A` into the very diff it is computing.
+- **Exclusion is by pathspec** (`:(exclude).deepagents` and four more), never by
+  filtering the diff text afterwards. A unified diff edited after the fact does
+  not apply.
+- **The base is a SHA recorded at startup, not `HEAD`.** `git-pr` commits at
+  `session.end`, and after a commit `git diff HEAD` is empty — the patch is
+  silently lost and looks exactly like an agent that changed nothing. The diff is
+  also taken from `run_batch`, *before* `main`'s `finally` runs `session.end`, so
+  the tree is still dirty when it is read.
+
+`model_patch` is on the headless payload as **`null` when the flag is off** —
+present, not absent, the same convention M6 used for `run_id`/`topic`/`usage_log`
+— and with the flag off **no git subprocess runs at all**. `--emit-patch` on a
+workspace with no base commit **refuses to start** rather than reporting a null
+that cannot be told apart from "you did not ask".
+
+Tests: `tests/test_bench_patch.py` (host, skips without `git`) drives the
+extractor **the way the driver does**, not through the flag; the B2 block in
+`tests/test_cli.py` covers the wiring and the removable contract; and
+`tests/test_live_model.py::test_a_real_turn_produces_a_patch_that_actually_applies`
+is the one a stub cannot substitute for. Every patch assertion is made by
+**applying the patch** (`git apply --check`) against a *fresh* copy of the base —
+never by substring, which is M7 §0.2's lesson: a substring assertion against a
+serialised blob cannot tell a correct artifact from a plausible-looking one.
+
 ## Present / past memory (Milestone 2)
 
 The harness keeps **two** stores in the harness **state dir** (`archive.state_dir`),
@@ -1534,6 +1590,7 @@ how to disable them, and what behavior they enable/disable:
 | Telemetry | M6 | `DEEPAGENTS_TELEMETRY` | 1 | Rarely — the run you want telemetry for is the one you did not expect to go wrong | No `usage.jsonl`, no `session.json`, no PR block, no middleware appended, no new stderr line |
 | Raw trace | M7 | `DEEPAGENTS_RAW_TRACE` | `off` | n/a — off IS the default; turn it **on** (`file`/`console`/`both`) to debug a model, then back off | Middleware installed but a pure pass-through: no file, no directory, no output, no formatting performed |
 | Hard stops | M8 | `DEEPAGENTS_MAX_STEPS` / `_MAX_SECONDS` / `_MAX_TURNS` | unset | n/a — unset IS the default; set one to bound a run | No `recursion_limit` in the graph config, no deadline computed, no turn counter compared. Absent, not infinite |
+| `--emit-patch` | M8 | `DEEPAGENTS_EMIT_PATCH` | off | n/a — off IS the default; turn it on to get a scorable diff on the headless JSON | No git subprocess runs; `model_patch` is `null` (present, not absent) |
 
 **Removable contract:** Each "off" state is byte-for-byte identical to the prior milestone 
 (see [Glossary](../docs/README.md#glossary)). E.g., `DEEPAGENTS_MASK=0` ⇒ M3 parity.

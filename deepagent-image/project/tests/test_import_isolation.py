@@ -229,3 +229,30 @@ def test_limits_imports_no_sibling_harness_module():
         if m.startswith("harness.") and m not in ("harness.limits",)
     }
     assert not siblings, f"harness.limits pulled in siblings: {sorted(siblings)}"
+
+
+def test_bench_imports_without_the_runtime_stack():
+    """Milestone 8 B3's done-when #6, holding from B2 onward.
+
+    `harness bench` is a host-side admin command routed through
+    `entry.dispatch`, so it must be keyless in the strong sense: no API key, no
+    network, no model, and no runtime stack. The package `__init__` is
+    deliberately empty of imports for this reason — a convenience re-export there
+    would break the guarantee the moment one submodule grew a dependency, which
+    is the defect M5 §0.1 F6 removed from `harness/__init__.py`.
+    """
+    _assert_no_runtime_stack(_modules_after("import harness.bench"), "harness.bench")
+    _assert_no_runtime_stack(
+        _modules_after("import harness.bench.patch"), "harness.bench.patch"
+    )
+
+
+def test_bench_patch_imports_no_sibling_harness_module():
+    # It runs `git` as a subprocess and reads nothing else the harness owns, so a
+    # sibling import here would be a new coupling rather than a reuse.
+    loaded = _modules_after("import harness.bench.patch")
+    siblings = {
+        m for m in loaded
+        if m.startswith("harness.") and m not in ("harness.bench", "harness.bench.patch")
+    }
+    assert not siblings, f"harness.bench.patch pulled in siblings: {sorted(siblings)}"

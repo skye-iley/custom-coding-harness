@@ -1,7 +1,8 @@
 # Milestone 8 — Benchmark Ladder, Tier 1 (Gold Set)
 
-> **Status:** 🚧 In progress — **B1 (hard stops) is built** on `feat/milestone8-bench-ladder`;
-> B2–B5 not started. §0.1 records what the build changed about the plan.
+> **Status:** 🚧 In progress — **B1 (hard stops) and B2 (`--emit-patch` + the patch extractor)
+> are built** on `feat/milestone8-bench-ladder`; B3–B5 not started. §0.1 records what the build
+> changed about the plan.
 > `design_doc.md` §11 "Automated Benchmarking Suite" is the parent entry; this doc is the concrete
 > tier-1 slice and wins over it for *what we build next*.
 >
@@ -53,13 +54,14 @@ stall on an unmeasured LSM the way anything touching the jail can.
 | Slice | State |
 |---|---|
 | **B1** hard stops (`--max-steps` / `--max-seconds` / `--max-turns`, `OUTCOME_STOPPED` + `stop_reason`) | ✅ **built** |
-| **B2** `--emit-patch` | not started |
+| **B2** `--emit-patch` + `harness/bench/patch.py` | ✅ **built** |
 | **B3** `harness/bench/` driver | not started |
 | **B4** the gold set | not started |
 | **B5** baseline record | not started |
 
-Suite after B1: **1059 passed / 4 platform skips** on the host dev venv with the live-model
-tier on (the 4 are the standing Windows symlink/posix-path skips).
+Suite after B2: **1079 passed / 13 skips** hermetic, and green with the live-model tier on
+(the standing skips are Windows symlink/posix-path cases plus the image-only tiers when run
+without the dev venv).
 
 ### What B1 changed about the plan
 
@@ -115,6 +117,42 @@ tier on (the 4 are the standing Windows symlink/posix-path skips).
    free: it is a fold over the records like every other summary field
    (M6 invariant 6), and without it `harness telemetry show` could say a run was
    `stopped` without saying by what.
+
+### What B2 changed about the plan
+
+8. **`--emit-patch` refuses to start on a workspace with no base commit**, which
+   §5.2 did not specify. Reporting `model_patch: null` instead would have made
+   "impossible here" indistinguishable from "you did not ask for one" — the same
+   point-of-entry principle M5.1 applied to enum knobs, and the same
+   null-means-two-things trap M6 avoided by making the join keys present-and-null
+   rather than absent.
+
+9. **The scratch index has to live outside the workspace, and that was measured
+   rather than reasoned.** A first pass put `GIT_INDEX_FILE` inside the tree;
+   `git add -A -N -- .` promptly swept the index file itself into the diff it was
+   being used to compute. It is now a `tempfile.TemporaryDirectory`, and a test
+   pins it.
+
+10. **The scratch index is seeded with `read-tree <base>`, not copied from the
+    real index.** Copying would have been the obvious way to preserve tracked
+    state, but it makes the patch depend on whatever the *agent* staged — an
+    agent that ran `git add` or `git rm --cached` mid-run could move the result.
+    Seeding from the base tree makes the patch describe base → worktree and
+    nothing else, and it is also what keeps extraction read-only with respect to
+    the operator's repo.
+
+11. **A non-UTF-8 diff raises rather than being decoded lossily.**
+    `errors="replace"` would hand a scorer a patch that looks fine and does not
+    apply — an instance that scores zero and reads as a weak model, which is the
+    exact confusion this milestone exists to remove.
+
+12. **`tests/_bootstrap._load` had to learn sub-packages.** It resolved
+    `harness.<name>` to `harness/<name>.py` by taking the last dotted component,
+    so `harness.bench.patch` would have loaded `harness/patch.py`. It now walks
+    intermediate directories, registering each as a bare package object for the
+    same reason it fakes `harness` itself: running a real `__init__.py` is what
+    would pull whatever it imports. Bare names (`_load("seccomp")`) still work.
+
 
 ---
 

@@ -81,6 +81,7 @@ with a `stop_reason` naming which one fired, never `error`, and the process exit
 | `DEEPAGENTS_MAX_STEPS` | Bound the ReAct loop **inside one turn** (LangGraph super-steps). The benchmark bound — a headless run is one turn, so a turn cap cannot catch a runaway loop. Unset ⇒ LangGraph's own default, which is `10007` on the pinned version. | int | unset | `40` |
 | `DEEPAGENTS_MAX_SECONDS` | Session wall clock, checked at the next model-call boundary (overshoots by at most one model call). | float | unset | `600` |
 | `DEEPAGENTS_MAX_TURNS` | End the session after this many turns. | int | unset | `10` |
+| `DEEPAGENTS_EMIT_PATCH` | Put a `git diff` of the workspace on the headless JSON as `model_patch`, taken against the commit HEAD pointed at when the run started and excluding harness artifacts. Off ⇒ no git subprocess runs and the key is `null`. | 0/1 | `0` | `1` |
 
 ## Workspace & Shell (Sandbox Boundary)
 

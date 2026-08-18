@@ -742,3 +742,42 @@ def test_hard_stops_are_live_and_persisted():
         # Numeric knobs, so no `choices` -- a value list on an int field would
         # reject every number outside it.
         assert spec.choices is None, name
+
+
+def test_emit_patch_is_a_prespinup_knob_that_is_not_persisted():
+    """Milestone 8 B2, on `headless`'s precedent (§13 item 4).
+
+    A real FieldSpec, so it gets validation and `harness doctor` display for
+    free, but `profile_key=None`: it is a per-sweep mode, not a preference.
+    Pre-spinup rather than live because the base commit is resolved once at
+    startup -- a live toggle could not take effect, and a knob that silently
+    does nothing is worse than one that is honestly fixed.
+    """
+    spec = cfg.SPECS_BY_NAME["emit_patch"]
+    assert spec.tier == "prespinup"
+    assert spec.profile_key is None
+    assert spec.settable is False
+    assert spec.env_var == "DEEPAGENTS_EMIT_PATCH"
+    # No `choices` on a bool: a value list would reject `DEEPAGENTS_EMIT_PATCH=1`,
+    # the spelling a launcher passes (M5.1 invariant 19).
+    assert spec.choices is None
+
+
+def test_emit_patch_resolves_from_env_and_defaults_off(tmp_path):
+    hitl = tmp_path / "none-hitl.yaml"
+    settings, sources = cfg.resolve_settings(
+        env={}, profile_path=tmp_path / "none.yaml", hitl_path=hitl
+    )
+    assert settings.emit_patch is False and sources.emit_patch == "default"
+
+    settings, sources = cfg.resolve_settings(
+        env={"DEEPAGENTS_EMIT_PATCH": "1"},
+        profile_path=tmp_path / "none.yaml", hitl_path=hitl,
+    )
+    assert settings.emit_patch is True and sources.emit_patch == "env"
+
+    settings, sources = cfg.resolve_settings(
+        cli={"emit_patch": True}, env={"DEEPAGENTS_EMIT_PATCH": "0"},
+        profile_path=tmp_path / "none.yaml", hitl_path=hitl,
+    )
+    assert settings.emit_patch is True and sources.emit_patch == "cli"

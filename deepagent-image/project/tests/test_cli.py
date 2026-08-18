@@ -2434,3 +2434,151 @@ def test_the_bound_appliers_report_rather_than_raise_when_no_bound_is_active(cap
     assert ctx.edited == set()
     err = capsys.readouterr().err
     assert "no session deadline" in err and "no turn limit" in err
+
+
+# =============================================================================
+# Milestone 8 B2 — `--emit-patch`
+# =============================================================================
+#
+# The extractor itself is tested where the DRIVER calls it
+# (`tests/test_bench_patch.py`, invariant 12a) -- a sweep must not depend on this
+# flag, so the flag is not where the fidelity cases belong. What is asserted here
+# is only the wiring: the payload convention, the removable contract, and the
+# ordering that keeps a session commit from emptying the diff.
+
+
+def test_the_headless_payload_carries_a_null_model_patch_when_the_flag_is_off(capsys):
+    """Invariant 14, and M6's convention: present-and-null, never absent.
+
+    A driver reading `payload["model_patch"]` should get a null it can test, not
+    a KeyError that looks like a schema change.
+    """
+    cli.run_batch(_OkAgent(), {}, ["go"])
+    import json as _json
+    payload = _json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert "model_patch" in payload
+    assert payload["model_patch"] is None
+
+
+def test_no_git_subprocess_runs_when_the_flag_is_off(monkeypatch, capsys):
+    """The other half of invariant 14, asserted structurally.
+
+    "Returns null" and "does no work" are different contracts, and only the
+    second is the removable one -- an extractor that runs and throws its answer
+    away would still touch the operator's repo on every headless run.
+    """
+    import subprocess as _sp
+
+    def boom(*a, **k):
+        raise AssertionError("a git subprocess ran with --emit-patch off")
+
+    monkeypatch.setattr(_sp, "run", boom)
+    cli.run_batch(_OkAgent(), {}, ["go"])
+    capsys.readouterr()
+
+
+def test_emit_patch_puts_a_real_diff_on_the_payload(tmp_path, capsys):
+    import json as _json
+    import subprocess as _sp
+
+    patch_mod = _load("harness.bench.patch")
+    if not patch_mod.git_available():
+        pytest.skip("no git binary on PATH")
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "a.py").write_text("VALUE = 1\n")
+    for args in (["init", "-q", "."], ["config", "user.email", "t@e.c"],
+                 ["config", "user.name", "t"], ["add", "-A"], ["commit", "-qm", "base"]):
+        _sp.run(["git", "-C", str(ws), *args], check=True, capture_output=True)
+    base = patch_mod.resolve_base(ws)
+
+    class _EditingAgent(_OkAgent):
+        def invoke(self, *a, **k):
+            # What the agent would have done: an edit AND a brand-new file git
+            # has never seen, which is the case that needs intent-to-add.
+            (ws / "a.py").write_text("VALUE = 2\n")
+            (ws / "new.py").write_text("NEW = True\n")
+            return super().invoke(*a, **k)
+
+    cli.run_batch(_EditingAgent(), {}, ["go"], workspace=ws, patch_base=base)
+    payload = _json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+    assert payload["model_patch"], "the flag was on and the patch is empty"
+    paths = set(patch_mod.changed_paths(payload["model_patch"]))
+    assert paths == {"a.py", "new.py"}
+
+
+def test_the_patch_is_taken_before_any_session_end_commit(tmp_path, capsys):
+    """The ordering `milestone8.md` §5.2 calls out, at the wiring level.
+
+    `run_batch` prints the payload; `main`'s `finally` runs `session.end`
+    afterwards. So the diff is computed while the tree is still dirty. Asserted
+    by committing *after* `run_batch` returns and showing the payload already has
+    the patch -- the sequence the real `git-pr` workflow reproduces.
+    """
+    import json as _json
+    import subprocess as _sp
+
+    patch_mod = _load("harness.bench.patch")
+    if not patch_mod.git_available():
+        pytest.skip("no git binary on PATH")
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "a.py").write_text("VALUE = 1\n")
+    for args in (["init", "-q", "."], ["config", "user.email", "t@e.c"],
+                 ["config", "user.name", "t"], ["add", "-A"], ["commit", "-qm", "base"]):
+        _sp.run(["git", "-C", str(ws), *args], check=True, capture_output=True)
+    base = patch_mod.resolve_base(ws)
+
+    class _EditingAgent(_OkAgent):
+        def invoke(self, *a, **k):
+            (ws / "a.py").write_text("VALUE = 2\n")
+            return super().invoke(*a, **k)
+
+    cli.run_batch(_EditingAgent(), {}, ["go"], workspace=ws, patch_base=base)
+    payload = _json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["model_patch"]
+
+    # git-pr's commit lands after the payload is already out.
+    _sp.run(["git", "-C", str(ws), "commit", "-aqm", "session"], check=True,
+            capture_output=True)
+    # And the recorded base still yields the same patch, which is why the base is
+    # a SHA rather than the string HEAD.
+    assert patch_mod.extract_patch(ws, base) == payload["model_patch"]
+
+
+def test_a_failed_extraction_degrades_to_null_and_says_so(tmp_path, capsys):
+    # The turn already happened and its telemetry is real; a patch failure must
+    # not take the run down. The stage line is what keeps the null from silently
+    # reading as "the flag was off".
+    import json as _json
+
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    cli.run_batch(_OkAgent(), {}, ["go"], workspace=plain, patch_base="deadbeef")
+    out = capsys.readouterr()
+    payload = _json.loads(out.out.strip().splitlines()[-1])
+    assert payload["model_patch"] is None
+    assert "emit-patch" in out.err
+
+
+def test_emit_patch_refuses_to_start_without_a_base_commit(tmp_path):
+    """A null that means "impossible here" is indistinguishable from a null that
+    means "you did not ask" -- so the flag fails at the point of entry instead."""
+    patch_mod = _load("harness.bench.patch")
+    if not patch_mod.git_available():
+        pytest.skip("no git binary on PATH")
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    with pytest.raises(SystemExit, match="--emit-patch"):
+        cli._resolve_patch_base(plain)
+
+
+def test_emit_patch_parses_and_defaults_off(monkeypatch):
+    monkeypatch.delenv("DEEPAGENTS_EMIT_PATCH", raising=False)
+    _argv(monkeypatch)
+    assert cli.parse_args().emit_patch is False
+    _argv(monkeypatch, "--emit-patch")
+    assert cli.parse_args().emit_patch is True

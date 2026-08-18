@@ -496,6 +496,19 @@ FIELD_SPECS: tuple[FieldSpec, ...] = (
         cast=_to_bool, default=False, label="Headless",
     ),
     FieldSpec(
+        # Milestone 8 B2. profile_key=None on `headless`'s precedent (§13 item 4):
+        # a per-sweep mode, not a preference. Being a real FieldSpec still buys
+        # validation and `harness doctor` display for free.
+        #
+        # tier="prespinup" rather than "live" because the base commit is resolved
+        # once, at startup, before the agent touches anything -- turning the flag
+        # on mid-session would have no base to diff against, and turning it off
+        # would leave a resolved base nothing reads. A knob whose live value could
+        # not take effect is worse than one that is honestly fixed.
+        name="emit_patch", tier="prespinup", env_var="DEEPAGENTS_EMIT_PATCH",
+        profile_key=None, cast=_to_bool, default=False, label="Emit patch",
+    ),
+    FieldSpec(
         # profile_key=None: a debugging escape hatch (M4's removable contract), not
         # a saveable default -- saving "masking off" is exactly the setting nobody
         # should acquire by accident.
@@ -612,6 +625,7 @@ class Settings:
 
     # --- pre-spinup-only (fixed at container start; shown read-only in /config) ---
     headless: bool = False
+    emit_patch: bool = False
     mask_enabled: bool = True
     telemetry: bool = True
     mask_mode: str = "deny"
@@ -641,6 +655,7 @@ class SettingsSources:
     raw_trace: str = "default"
     hitl: str = "default"
     headless: str = "default"
+    emit_patch: str = "default"
     mask_enabled: str = "default"
     telemetry: str = "default"
     mask_mode: str = "default"

@@ -400,3 +400,84 @@ def test_a_real_deadline_stops_the_turn_at_the_model_boundary(live_model, tmp_pa
     # counted as a model call that never reached a provider.
     assert rec["model_calls"] == 0
     assert rec["input"] == 0 and rec["output"] == 0
+
+
+@pytest.mark.live_model
+def test_a_real_turn_produces_a_patch_that_actually_applies(live_model, tmp_path):
+    """Milestone 8 B2's live case: a real model edits a real repo, and the diff
+    that comes out applies to a fresh checkout of the base.
+
+    A stub cannot hold this. It would return whatever the test wrote, so the
+    whole chain under test -- the model deciding to call `write_file`, the tool
+    actually writing into the workspace, `git add -A -N` seeing a file git has
+    never heard of, the pathspec exclusions, and the diff applying somewhere else
+    -- is exercised only when a model really drives it.
+
+    The assertion is `git apply --check` against a **fresh** copy of the base,
+    never a substring of the diff. That is the M7 §0.2 lesson applied: a
+    substring assertion against a serialised blob cannot tell a correct artifact
+    from a plausible-looking one, and `"NEW" in model_patch` would pass on a
+    patch that does not apply at all.
+    """
+    import subprocess
+
+    from _bootstrap import _load
+
+    pytest.importorskip("deepagents")
+    agent_mod = _load("harness.agent")
+    cli = _load("harness.cli")
+    patch_mod = _load("harness.bench.patch")
+
+    if not patch_mod.git_available():
+        pytest.skip("no git binary on PATH")
+
+    def git(cwd, *args):
+        return subprocess.run(["git", "-C", str(cwd), *args],
+                              capture_output=True, text=True, check=True).stdout
+
+    ws = tmp_path / "ws"
+    (ws / "src").mkdir(parents=True)
+    (ws / "src" / "app.py").write_text("def greet():\n    return 'hello'\n")
+    git(tmp_path, "init", "-q", str(ws))
+    git(ws, "config", "user.email", "t@example.com")
+    git(ws, "config", "user.name", "test")
+    git(ws, "add", "-A")
+    git(ws, "commit", "-qm", "seed")
+    base = patch_mod.resolve_base(ws)
+
+    # Harness noise the run would legitimately produce, present and dirty, so a
+    # missing exclusion fails here rather than passing by luck.
+    (ws / ".deepagents").mkdir()
+    (ws / ".deepagents" / "session.env").write_text("DEEPAGENTS_SESSION_ID=live\n")
+
+    agent = agent_mod.build_agent(live_model, ws)
+    cli.run_turn(
+        agent,
+        "Create a new file src/farewell.py in the workspace whose entire content "
+        "is exactly these two lines:\n"
+        "def farewell():\n"
+        "    return 'bye'\n"
+        "Use your file tools. Do not change any other file.",
+        {},
+    )
+
+    result = patch_mod.extract_patch(ws, base)
+    assert not patch_mod.is_empty(result), (
+        "a real turn left no patch -- either the model never called a file tool "
+        "or intent-to-add is not surfacing the new file"
+    )
+    for excluded in patch_mod.DEFAULT_EXCLUDES:
+        assert excluded not in result, f"{excluded} leaked into the patch"
+
+    # Applies to a FRESH copy of the base, not the tree it came from (which would
+    # pass trivially).
+    fresh = tmp_path / "fresh"
+    git(tmp_path, "clone", "-q", str(ws), str(fresh))
+    git(fresh, "checkout", "-q", base)
+    patch_file = tmp_path / "model.patch"
+    patch_file.write_text(result, encoding="utf-8", newline="")
+    proc = subprocess.run(
+        ["git", "-C", str(fresh), "apply", "--check", str(patch_file)],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, f"the patch does not apply: {proc.stderr}"
