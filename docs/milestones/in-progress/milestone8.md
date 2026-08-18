@@ -59,8 +59,10 @@ stall on an unmeasured LSM the way anything touching the jail can.
 | **B4** the gold set (5 instances, self-checking) | ✅ **built** |
 | **B5** baseline record | ✅ **built** — `milestone8_baseline.md` |
 
-Suite after B5: **1159 passed / 14 skips**, live-model tier included. The gold set is exercised
-end to end by a real sweep, not only by the suite — see `milestone8_baseline.md`.
+Suite after B5: **1159 passed / 14 skips**, live-model tier included — the host dev venv
+(`scripts/dev-setup`), not a `smoke.ps1` image-tier run; see item 21 for what that distinction
+cost. The gold set is exercised end to end by a real sweep, not only by the suite — see
+`milestone8_baseline.md`.
 
 ### What B1 changed about the plan
 
@@ -226,6 +228,32 @@ end to end by a real sweep, not only by the suite — see `milestone8_baseline.m
     fixtures were present on the authoring machine the whole time, so
     `test_gold_set.py` never saw the defect a fresh clone would hit. Recorded in
     full in `milestone8_next_session.md`.
+
+21. **`smoke.ps1` had never actually been run in-container since B4 landed, and
+    it found two more collection-time defects the moment it was.** Both are the
+    same shape as item 20: code written and reasoned about, never executed
+    against the real target.
+    * `test_gold_set.py`'s `_REPO_ROOT = Path(__file__).resolve().parents[3]`
+      assumed the host layout (`tests/ -> project/ -> deepagent-image/ -> repo
+      root`) unconditionally. Inside the image `tests/` is `/project/tests` —
+      `benchmarks/` is never `COPY`ed in — so only two ancestors exist and
+      `parents[3]` raised `IndexError` at **collection**, taking the whole 1152-test
+      run down instead of letting the module's own `skipif` (invariant 28) handle
+      it. The first fix reached for `Path.root`, which is a `str`, not a `Path` —
+      same crash, one line later (`TypeError` on `/`), caught only by running
+      smoke a second time. `.parents[-1]` (still a `Path`) is what actually works.
+    * `test_bench.py::test_both_launchers_propagate_the_container_exit_code` read
+      `run-docker.sh` unconditionally, but `scripts/` is never `COPY`ed into the
+      image either — every sibling test that reads a launcher file
+      (`test_hostmap.py`, `test_config.py`, `test_config_cli.py`) already skips
+      for exactly this reason; this one didn't, so it was a bare
+      `FileNotFoundError` in-container rather than a skip.
+
+    Net: **1122 passed, 39 skipped, exit 0** on a from-scratch `smoke.ps1`
+    (Docker build + jail gate + full pytest suite) after both fixes. The lesson
+    both items in this entry share: a doc claiming a suite count is only as good
+    as the run that produced it, and "reasoned through" is not the same claim as
+    "run."
 
 ---
 
