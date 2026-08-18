@@ -166,3 +166,34 @@ instance, `git apply`-ing its prediction, and running that instance's own `fail_
 `pass_to_pass` commands. Tiers 2 and 3 hand that step to the benchmark's official evaluation harness,
 which is the whole reason `predictions.jsonl` carries exactly the three official keys and nothing
 else.
+
+---
+
+## 6. Reconfirmation after the de-nest fix (2026-08-18) — 5/5
+
+§1's dataset was fixed after this baseline was recorded (`milestone8.md` §0.1 items 20-21): the five
+instances had been committed as bare gitlinks with no tracked content, unusable on a fresh clone.
+Same conditions as §1 otherwise (same model tag, same bounds, same command), re-run once the fix
+landed to confirm the driver still produces valid, scorable patches against the now-real dataset —
+not a required re-baseline by §1's own rule (the dataset's *content* didn't change, only its repo
+shape), but the one thing the fix's own PR test plan flagged as not directly re-verified.
+
+```
+instances      5
+empty patches  0
+outcomes       ok=5
+stopped by     -
+errors         0
+wall clock     380.0s (container launch 75.6s, harness 304.4s)
+turn time      model 302.7s, tool 1.0s, retry_sleep 0.0s, paced_sleep 0.0s, hitl_wait 0.0s, residual 0.7s
+cost           not priced (free local model)
+models         ollama:gemma4:harnesstest1
+```
+
+Scored the same way as §2 (fresh copy, `git apply --check` then apply, run the pinned
+`fail_to_pass`/`pass_to_pass` commands): **5/5 resolved**, including `gold-004-regression-trap`,
+which made zero tool calls in the §2 run and produced a real patch this time. Consistent with §2.1's
+own framing — that was already recorded as model behavior, not a harness defect, and this run is the
+confirmation: same instance, same bounds, same model tag, different outcome, nothing in the harness
+changed between the two. §2's table stays the recorded baseline; this is corroborating evidence the
+fix didn't regress the sweep, not a replacement for it.
