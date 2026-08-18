@@ -15,6 +15,7 @@ a null cost summed as zero, a join written against `thread_id`.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -628,18 +629,62 @@ def test_an_instance_whose_workspace_is_missing_still_gets_both_rows(tmp_path):
 
 
 @needs_git
-def test_an_instance_that_is_not_a_git_repo_is_rejected_by_name(tmp_path):
-    """§13 item 6, enforced. No base commit ⇒ nothing to diff against ⇒ every
-    patch empty, silently."""
+def test_a_plain_source_with_no_git_gets_a_base_commit_in_the_scratch_copy(tmp_path):
+    """§13 item 6 / §0.1 item 20. A gold-set instance ships as plain files, not
+    its own repo (a nested `.git` does not survive being tracked as ordinary
+    content — see `milestone8_next_session.md` §1). `prepare_workspace` must
+    still hand back something `patch.extract_patch` can diff against."""
     bench = tmp_path / "b"
     plain = bench / "001"
     plain.mkdir(parents=True)
     (plain / "a.py").write_text("x = 1\n")
     ds = _dataset(bench, _instance(instance_id="a", workspace="001"))
     out = tmp_path / "out"
+
+    class _EditingRunner(FakeRunner):
+        def invoke(self, workspace, prompt, limits):
+            (Path(workspace) / "a.py").write_text("x = 2\n")
+            return super().invoke(workspace, prompt, limits)
+
+    driver.run_sweep(ds, out, limits=runner_mod.Limits(40, 600),
+                     runner=_EditingRunner([_result()]), scratch_root=tmp_path / "scratch")
+    row = _read(out / "runs.jsonl")[0]
+    assert row["error"] is None
+    patch = _read(out / "predictions.jsonl")[0]["model_patch"]
+    assert "x = 2" in patch
+
+
+@needs_git
+def test_prepare_workspace_creates_a_base_commit_with_deterministic_identity(tmp_path, monkeypatch):
+    """No git identity configured on the runner must not fail the sweep at
+    instance 1, and the base SHA must not vary run to run for the same
+    instance content."""
+    for key in list(os.environ):
+        if key.startswith("GIT_"):
+            monkeypatch.delenv(key, raising=False)
+
+    bench = tmp_path / "b"
+    plain = bench / "001"
+    plain.mkdir(parents=True)
+    (plain / "a.py").write_text("x = 1\n")
+
+    target_a = driver.prepare_workspace(plain, tmp_path / "scratch" / "a")
+    target_b = driver.prepare_workspace(plain, tmp_path / "scratch" / "b")
+
+    assert patch_mod.resolve_base(target_a) == patch_mod.resolve_base(target_b)
+
+
+@needs_git
+def test_a_source_missing_entirely_is_still_reported_by_name(tmp_path):
+    """A typo'd `workspace` path (not merely "no `.git`") must still surface as
+    an error naming the instance, not as a silently created empty repo."""
+    bench = tmp_path / "b"
+    bench.mkdir()
+    ds = _dataset(bench, _instance(instance_id="a", workspace="nowhere"))
+    out = tmp_path / "out"
     driver.run_sweep(ds, out, limits=runner_mod.Limits(40, 600),
                      runner=FakeRunner([]), scratch_root=tmp_path / "scratch")
-    assert "not a git repository" in _read(out / "runs.jsonl")[0]["error"]
+    assert "does not exist" in _read(out / "runs.jsonl")[0]["error"]
 
 
 @needs_git
@@ -655,6 +700,16 @@ def test_the_scratch_copy_keeps_git_and_drops_conda(tmp_path):
     assert not (target / ".conda").exists()
     # And the copy is a usable repo: there is a base to diff against.
     assert patch_mod.resolve_base(target) == patch_mod.resolve_base(src)
+
+
+@needs_git
+def test_a_source_that_already_ships_git_is_copied_as_is_not_reinitialised(tmp_path):
+    """A foreign/tier-3 instance with its own history keeps its own base SHA —
+    the driver must not overwrite it with a fresh commit."""
+    src = _seeded_repo(tmp_path / "b", "001")
+    expected = patch_mod.resolve_base(src)
+    target = driver.prepare_workspace(src, tmp_path / "scratch" / "a")
+    assert patch_mod.resolve_base(target) == expected
 
 
 @needs_git

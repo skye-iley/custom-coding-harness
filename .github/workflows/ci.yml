@@ -34,6 +34,13 @@ jobs:
       #
       # -ra so the skip reasons are on the record: a green run here is only
       # meaningful alongside what it skipped.
+      #
+      # M8 tests/test_gold_set.py rides this same step, unmarked and ungated — a
+      # deliberate decision (milestone8.md §11), not an oversight. checkout above
+      # gives this job the full repo, so benchmarks/gold/ is present exactly like
+      # any other fixture, and it costs ~22-25s measured locally, not the ~110s
+      # ballparked before anyone timed it. It self-skips only when benchmarks/ is
+      # absent (invariant 28).
       - run: python -m pytest tests/ -ra
         working-directory: deepagent-image/project
       # M4 slice H invariant 31 (the vendored seccomp profile must stay Docker's

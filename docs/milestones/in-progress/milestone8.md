@@ -210,6 +210,23 @@ end to end by a real sweep, not only by the suite — see `milestone8_baseline.m
     stores loose objects read-only, so on Windows every scratch tree survived
     deletion and a 50-instance sweep would have filled the disk in silence.
 
+20. **The gold set shipped broken, and the fix moved the "initialised git repo"
+    requirement from the dataset to the driver.** Each instance was committed as
+    a bare gitlink (no `.gitmodules`) pointing at a nested `.git` that only ever
+    existed on the machine that authored it — a fresh clone got five empty
+    directories. §5.4's "each instance is an initialised git repo with at least
+    one commit" is now true of the **scratch copy**, not the tracked instance:
+    the five instances are tracked as plain files, and
+    `driver.prepare_workspace` runs `git init` + one commit (fixed
+    `GIT_AUTHOR_*`/`GIT_COMMITTER_*` identity, so a runner with no git identity
+    configured doesn't fail the whole sweep at instance 1) when the copy lands
+    without a `.git`. A source that ships its own `.git` — a foreign or tier-3
+    instance — is copied as-is and skips the init. Caught before the branch was
+    pushed (`git ls-files -s | grep '^160000'`), not by the suite — the
+    fixtures were present on the authoring machine the whole time, so
+    `test_gold_set.py` never saw the defect a fresh clone would hit. Recorded in
+    full in `milestone8_next_session.md`.
+
 ---
 
 ## 1. Goal & Definition of Done
@@ -519,9 +536,11 @@ with a seeded bug, a failing test that pins it, and a passing suite around it.
 
 **Hard requirements, each for a reason found in §13:**
 
-- **Each instance is an initialised git repo with at least one commit** (§13 item 6). No base
-  commit ⇒ nothing to diff against ⇒ no patch. The seeded bug is *in* that commit; the working tree
-  is clean at handoff.
+- **Each instance resolves to an initialised git repo with at least one commit before a run
+  starts** (§13 item 6). No base commit ⇒ nothing to diff against ⇒ no patch. The seeded bug is in
+  that commit; the working tree is clean at handoff. The instances themselves are tracked as plain
+  files, not repos — `driver.prepare_workspace` creates the commit in the scratch copy (§0.1 item
+  20); a nested `.git` does not survive being committed as ordinary content.
 - **Deterministic.** No network, no clock, no randomness, no filesystem outside the instance. The
   check is a `pytest` exit code.
 - **Small.** Solvable in well under the step bound, or the instance measures the bound rather than
@@ -682,6 +701,16 @@ harness is byte-for-byte Milestone 7. Specifically:
   `max_steps` is live but takes effect on the next turn, not mid-turn.
 - **`tests/test_import_isolation.py`** — `harness.bench` imports without pulling `cli`/`agent`/
   deepagents/dotenv.
+- **`tests/test_gold_set.py` (host tier, `git` + `pytest` required — skip if `benchmarks/` is
+  absent)** — the set checking itself: every instance has no nested `.git` of its own (the §0.1
+  item 20 regression guard), `driver.prepare_workspace` turns each into a repo with a base commit
+  and a clean tree, every `fail_to_pass` really fails on the seeded state, every `pass_to_pass`
+  really passes, and the set stays uncollectable by the harness suite proper (invariant 26) and
+  importless (invariant 28). **CI decision, made explicit rather than left implicit:** it runs
+  unmarked in the `host-tests` job — `actions/checkout` gives that job the full repo, so
+  `benchmarks/gold/` is present the same as any other fixture, and the subprocess-per-command cost
+  measures at ~22–25s locally, not the ~110s ballparked before measuring. No `live_model`-style gate
+  was added; the day this becomes too slow to run on every push is the day to add one, not before.
 - **`tests/test_live_model.py` (`live_model` marker)** — the tier that a stub cannot substitute for,
   and the one this milestone most depends on: a real local-model turn against a real seeded-bug
   fixture, asserting the emitted patch is non-empty, applies cleanly with `git apply --check` to a

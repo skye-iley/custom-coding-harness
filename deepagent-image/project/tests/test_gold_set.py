@@ -6,12 +6,20 @@ A benchmark whose fixtures have silently rotted reports a pass rate over a set
 nobody chose — and the failure looks exactly like a weak model, which is the
 confusion this whole milestone exists to remove. So the set checks itself:
 
-* every instance is an initialised git repo with a commit and a **clean tree**
-  (§13 item 6 — no base commit means no patch, ever);
+* every instance resolves, via `driver.prepare_workspace`, to an initialised git
+  repo with a commit and a **clean tree** (§13 item 6 — no base commit means no
+  patch, ever);
 * every `fail_to_pass` command **fails** on the seeded state, or the instance
   measures nothing;
 * every `pass_to_pass` command **passes**, or the instance is broken rather than
   hard.
+
+The instances themselves are tracked as **plain files, not nested git repos**
+(§0.1 item 20 of `milestone8.md` — a nested `.git` committed as ordinary content
+is a dangling gitlink on a fresh clone, not a repo). `driver.prepare_workspace` is
+what turns one into a repo, in a scratch copy, the same way a real sweep does —
+so these two checks exercise that seam rather than assuming git history the
+dataset no longer ships.
 
 Everything here **skips** when `benchmarks/` is absent, because invariant 28 says
 deleting that directory must break nothing.
@@ -30,6 +38,7 @@ from _bootstrap import _load
 
 dataset_mod = _load("harness.bench.dataset")
 patch_mod = _load("harness.bench.patch")
+driver = _load("harness.bench.driver")
 
 # tests/ -> project/ -> deepagent-image/ -> repo root
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -78,23 +87,38 @@ def test_the_dataset_parses_and_every_workspace_exists():
 
 
 @pytest.mark.parametrize("instance_id", _ids())
-def test_each_instance_is_a_git_repo_with_a_base_commit(instance_id):
+def test_each_instance_has_no_nested_git_of_its_own(instance_id):
+    """Regression guard for §0.1 item 20: the gold set once shipped as five bare
+    gitlinks pointing at a nested `.git` that existed only on the authoring
+    machine, so a fresh clone got five empty directories. Instances are tracked
+    as plain files; the repo is created per-run by `driver.prepare_workspace`."""
+    ws = _instance(instance_id).resolve_workspace(_DATASET)
+    assert not (ws / ".git").exists(), (
+        f"{instance_id} has its own .git — should be plain content, with the "
+        "base commit created in the scratch copy instead"
+    )
+
+
+@pytest.mark.parametrize("instance_id", _ids())
+def test_each_instance_is_a_git_repo_with_a_base_commit(instance_id, tmp_path):
     """§13 item 6, as a standing check rather than a note.
 
     No base commit means nothing to diff against, which means every patch is
     empty and every instance scores zero — silently, and indistinguishably from
-    a model that did nothing.
+    a model that did nothing. Exercised through `driver.prepare_workspace`, the
+    same seam a real sweep uses, since the instance itself is no longer a repo.
     """
     if not patch_mod.git_available():
         pytest.skip("no git binary on PATH")
     ws = _instance(instance_id).resolve_workspace(_DATASET)
-    assert (ws / ".git").exists(), f"{instance_id} is not a git repository"
-    base = patch_mod.resolve_base(ws)
+    scratch = driver.prepare_workspace(ws, tmp_path / instance_id)
+    assert (scratch / ".git").exists(), f"{instance_id}: prepare_workspace did not create a repo"
+    base = patch_mod.resolve_base(scratch)
     assert len(base) == 40
 
 
 @pytest.mark.parametrize("instance_id", _ids())
-def test_each_instance_hands_the_agent_a_clean_tree(instance_id):
+def test_each_instance_hands_the_agent_a_clean_tree(instance_id, tmp_path):
     """The seeded bug is *in* the commit, not sitting uncommitted beside it.
 
     A dirty tree at handoff would put the fixture's own leftovers into the
@@ -104,8 +128,9 @@ def test_each_instance_hands_the_agent_a_clean_tree(instance_id):
     if not patch_mod.git_available():
         pytest.skip("no git binary on PATH")
     ws = _instance(instance_id).resolve_workspace(_DATASET)
+    scratch = driver.prepare_workspace(ws, tmp_path / instance_id)
     proc = subprocess.run(
-        ["git", "-C", str(ws), "status", "--porcelain"],
+        ["git", "-C", str(scratch), "status", "--porcelain"],
         capture_output=True, text=True, check=True,
     )
     assert proc.stdout.strip() == "", f"{instance_id} was handed over dirty:\n{proc.stdout}"

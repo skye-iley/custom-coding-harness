@@ -27,6 +27,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -39,11 +40,24 @@ from harness.bench.runner import HolderRunner, Limits, RunnerError, find_repo_ro
 PREDICTIONS_FILE = "predictions.jsonl"
 RUNS_FILE = "runs.jsonl"
 
-# What the driver copies out of an instance directory. `.git` is emphatically NOT
-# here: without it there is no base to diff against and every patch is empty
-# (§13 item 2 — the finding that the whole B2/B3 design rests on). `.conda` is a
-# rebuildable environment and can be gigabytes.
+# What the driver copies out of an instance directory. `.conda` is a rebuildable
+# environment and can be gigabytes; `.git` is copied when the instance ships one
+# (a foreign/tier-3 source might), and `_init_base_commit` creates one when it
+# doesn't (a tier-1 gold instance, tracked as plain content — see §1 of
+# `milestone8_next_session.md`).
 SCRATCH_EXCLUDE = (".conda",)
+
+# Deterministic identity for the base commit `_init_base_commit` makes. A machine
+# with no git identity configured (a bare CI runner) must not fail the whole sweep
+# at instance 1, and the SHA must not vary sweep to sweep on the same instance.
+_BASE_COMMIT_ENV = {
+    "GIT_AUTHOR_NAME": "deepagents-bench",
+    "GIT_AUTHOR_EMAIL": "bench@deepagents.local",
+    "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
+    "GIT_COMMITTER_NAME": "deepagents-bench",
+    "GIT_COMMITTER_EMAIL": "bench@deepagents.local",
+    "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
+}
 
 
 def _now_iso() -> str:
@@ -53,8 +67,34 @@ def _now_iso() -> str:
 # --- scratch workspaces --------------------------------------------------------
 
 
+def _init_base_commit(target: Path) -> None:
+    """`git init` + one commit of the working tree as it stands.
+
+    A gold-set instance ships as plain files, not its own repo (§1 of
+    `milestone8_next_session.md` — a nested `.git` doesn't survive a clone as
+    real content, only as a gitlink pointing nowhere). `patch.extract_patch`
+    needs a real repo with a base commit to diff against, so the driver makes
+    one here, in the scratch copy, never in the dataset's source tree.
+    """
+    env = dict(os.environ)
+    env.update(_BASE_COMMIT_ENV)
+
+    def run(args: list[str]) -> None:
+        proc = subprocess.run(
+            ["git", "-C", str(target), *args],
+            capture_output=True, env=env, check=False,
+        )
+        if proc.returncode != 0:
+            detail = proc.stderr.decode("utf-8", "replace").strip() or f"exit {proc.returncode}"
+            raise DatasetError(f"git {' '.join(args)} failed while initialising {target}: {detail}")
+
+    run(["init", "-q"])
+    run(["add", "-A"])
+    run(["commit", "-q", "-m", "bench: base state", "--no-verify"])
+
+
 def prepare_workspace(source: Path, target: Path) -> Path:
-    """Copy an instance into a scratch tree the driver owns, `.git` included.
+    """Copy an instance into a scratch tree the driver owns, with a base commit.
 
     **The driver owns the copy, not `EPHEMERAL=1`.** Ephemeral mode reverts the
     workspace *on container close*, which means a patch can only be taken from
@@ -62,16 +102,14 @@ def prepare_workspace(source: Path, target: Path) -> Path:
     driver owning the tree, the workspace still exists after the process exits and
     **anything** can be diffed the same way, which is the seam a cross-harness
     tier needs (`milestone8.md` §5.3/§9).
+
+    A source that already ships `.git` (a foreign or tier-3 instance) is copied
+    as-is; one that doesn't (the tier-1 gold set) gets `.git` created here, after
+    the copy, so the dataset's own tree is never touched.
     """
     source = Path(source)
     if not source.is_dir():
         raise DatasetError(f"instance workspace does not exist: {source}")
-    if not (source / ".git").exists():
-        raise DatasetError(
-            f"{source} is not a git repository — a gold-set instance must be an "
-            "initialised repo with at least one commit, or there is no base to "
-            "diff against and every patch is empty (§13 item 6)"
-        )
     target = Path(target)
     remove_tree(target)
     shutil.copytree(
@@ -79,6 +117,8 @@ def prepare_workspace(source: Path, target: Path) -> Path:
         ignore=shutil.ignore_patterns(*SCRATCH_EXCLUDE),
         symlinks=True,
     )
+    if not (target / ".git").exists():
+        _init_base_commit(target)
     return target
 
 
