@@ -272,3 +272,212 @@ def test_a_real_turn_leaves_a_faithful_raw_trace(live_model, tmp_path):
                 "final_message_text leaked a reasoning block into the answer -- "
                 "it is supposed to drop them, which is why the raw trace exists"
             )
+
+
+@pytest.mark.live_model
+def test_a_real_step_bound_stops_the_turn_and_records_it_as_stopped(live_model, tmp_path):
+    """Milestone 8 B1's live case, and the one a stub structurally cannot hold.
+
+    Three things are being asserted at once, none of which a fake exception can
+    establish:
+
+    * that `config["recursion_limit"]` is a key LangGraph actually honours on the
+      pinned version, and that it raises rather than silently truncating;
+    * that the exception's *name* is still `GraphRecursionError` -- `limits`
+      matches it by name (the module is stdlib-only and cannot import langgraph),
+      so a rename upstream would turn every truncated instance back into an
+      `error` and nothing hermetic would notice;
+    * that it survives the layers between the graph and the classifier -- the
+      resilience retry loop above all, whose embedded-status scan reads
+      "Recursion limit of 500 reached" as an HTTP 500.
+
+    The bound is set to 2, which is below what any real turn needs, so the model
+    is genuinely interrupted rather than finishing first.
+    """
+    from _bootstrap import _load
+
+    pytest.importorskip("deepagents")
+    agent_mod = _load("harness.agent")
+    cli = _load("harness.cli")
+    tm = _load("harness.telemetry")
+    limits = _load("harness.limits")
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    telemetry = cli.TelemetryMiddleware(
+        tm.usage_path(tmp_path / "state"),
+        run_id="run-live-steps",
+        thread_id="live",
+        topic="live-bounds",
+        provider="live",
+        model=str(getattr(live_model, "model", "unknown")),
+    )
+    agent = agent_mod.build_agent(live_model, workspace, middleware=[telemetry])
+
+    config = {"configurable": {"thread_id": "live"}, "recursion_limit": 2}
+    with pytest.raises(Exception) as exc_info:  # noqa: PT011 - the class is the assertion
+        cli.run_turn(
+            agent,
+            "List every file in the workspace, then read each one, then summarise them.",
+            config,
+            telemetry=telemetry,
+        )
+
+    assert type(exc_info.value).__name__ == "GraphRecursionError", (
+        f"LangGraph raised {type(exc_info.value).__name__}; `limits.stop_reason_for` "
+        "matches GraphRecursionError by name, so a rename upstream silently turns "
+        "every truncated instance back into an `error`"
+    )
+    assert limits.stop_reason_for(exc_info.value) == limits.STOP_STEPS
+
+    records = tm.read_records(telemetry.sink)
+    assert len(records) == 1, "a stopped turn must still leave exactly one record"
+    rec = records[0]
+    assert rec["outcome"] == tm.OUTCOME_STOPPED
+    assert rec["stop_reason"] == "steps"
+    assert rec["failed"] is False, (
+        "a truncated instance recorded as a failure is indistinguishable from a "
+        "crashed one -- the defect milestone8.md §3 exists to remove"
+    )
+    # It got partway, and the record says how far: the partial numbers are what
+    # make a stopped instance readable rather than a blank row.
+    assert rec["model_calls"] >= 1
+    assert rec["duration_ms"] > 0
+
+
+@pytest.mark.live_model
+def test_a_real_deadline_stops_the_turn_at_the_model_boundary(live_model, tmp_path):
+    """The clock bound against a real model call.
+
+    A stub cannot show that `before_model` is reached at all on a real graph, nor
+    that the exception propagates out of `agent.invoke` rather than being
+    swallowed by LangGraph's own error handling. The clock is rigged to expire
+    between `run_turn`'s own pre-check and the graph's first model call, so the
+    middleware -- the seam under test -- is what fires.
+    """
+    from _bootstrap import _load
+
+    pytest.importorskip("deepagents")
+    agent_mod = _load("harness.agent")
+    cli = _load("harness.cli")
+    tm = _load("harness.telemetry")
+    limits = _load("harness.limits")
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    telemetry = cli.TelemetryMiddleware(
+        tm.usage_path(tmp_path / "state"),
+        run_id="run-live-deadline",
+        thread_id="live",
+        topic="live-bounds",
+        provider="live",
+        model=str(getattr(live_model, "model", "unknown")),
+    )
+    # The clock reads 0 exactly once -- when `Deadline` records its start -- and
+    # 100s thereafter, so the bound is blown by the time the graph asks for a
+    # model call. The deadline is deliberately NOT passed to `run_turn`: its
+    # pre-check would fire first and the middleware, the seam under test, would
+    # never run.
+    reads = {"n": 0}
+
+    def clock():
+        reads["n"] += 1
+        return 0.0 if reads["n"] <= 1 else 100.0
+
+    deadline = limits.Deadline(5.0, clock=clock)
+    agent = agent_mod.build_agent(
+        live_model, workspace,
+        middleware=[cli.DeadlineMiddleware(deadline), telemetry],
+    )
+
+    with pytest.raises(limits.DeadlineExceeded):
+        cli.run_turn(agent, "Reply with the single word: pong", {}, telemetry=telemetry)
+
+    rec = tm.read_records(telemetry.sink)[0]
+    assert rec["outcome"] == tm.OUTCOME_STOPPED
+    assert rec["stop_reason"] == "seconds"
+    # The deadline middleware is OUTSIDE telemetry, so the refused call is not
+    # counted as a model call that never reached a provider.
+    assert rec["model_calls"] == 0
+    assert rec["input"] == 0 and rec["output"] == 0
+
+
+@pytest.mark.live_model
+def test_a_real_turn_produces_a_patch_that_actually_applies(live_model, tmp_path):
+    """Milestone 8 B2's live case: a real model edits a real repo, and the diff
+    that comes out applies to a fresh checkout of the base.
+
+    A stub cannot hold this. It would return whatever the test wrote, so the
+    whole chain under test -- the model deciding to call `write_file`, the tool
+    actually writing into the workspace, `git add -A -N` seeing a file git has
+    never heard of, the pathspec exclusions, and the diff applying somewhere else
+    -- is exercised only when a model really drives it.
+
+    The assertion is `git apply --check` against a **fresh** copy of the base,
+    never a substring of the diff. That is the M7 §0.2 lesson applied: a
+    substring assertion against a serialised blob cannot tell a correct artifact
+    from a plausible-looking one, and `"NEW" in model_patch` would pass on a
+    patch that does not apply at all.
+    """
+    import subprocess
+
+    from _bootstrap import _load
+
+    pytest.importorskip("deepagents")
+    agent_mod = _load("harness.agent")
+    cli = _load("harness.cli")
+    patch_mod = _load("harness.bench.patch")
+
+    if not patch_mod.git_available():
+        pytest.skip("no git binary on PATH")
+
+    def git(cwd, *args):
+        return subprocess.run(["git", "-C", str(cwd), *args],
+                              capture_output=True, text=True, check=True).stdout
+
+    ws = tmp_path / "ws"
+    (ws / "src").mkdir(parents=True)
+    (ws / "src" / "app.py").write_text("def greet():\n    return 'hello'\n")
+    git(tmp_path, "init", "-q", str(ws))
+    git(ws, "config", "user.email", "t@example.com")
+    git(ws, "config", "user.name", "test")
+    git(ws, "add", "-A")
+    git(ws, "commit", "-qm", "seed")
+    base = patch_mod.resolve_base(ws)
+
+    # Harness noise the run would legitimately produce, present and dirty, so a
+    # missing exclusion fails here rather than passing by luck.
+    (ws / ".deepagents").mkdir()
+    (ws / ".deepagents" / "session.env").write_text("DEEPAGENTS_SESSION_ID=live\n")
+
+    agent = agent_mod.build_agent(live_model, ws)
+    cli.run_turn(
+        agent,
+        "Create a new file src/farewell.py in the workspace whose entire content "
+        "is exactly these two lines:\n"
+        "def farewell():\n"
+        "    return 'bye'\n"
+        "Use your file tools. Do not change any other file.",
+        {},
+    )
+
+    result = patch_mod.extract_patch(ws, base)
+    assert not patch_mod.is_empty(result), (
+        "a real turn left no patch -- either the model never called a file tool "
+        "or intent-to-add is not surfacing the new file"
+    )
+    for excluded in patch_mod.DEFAULT_EXCLUDES:
+        assert excluded not in result, f"{excluded} leaked into the patch"
+
+    # Applies to a FRESH copy of the base, not the tree it came from (which would
+    # pass trivially).
+    fresh = tmp_path / "fresh"
+    git(tmp_path, "clone", "-q", str(ws), str(fresh))
+    git(fresh, "checkout", "-q", base)
+    patch_file = tmp_path / "model.patch"
+    patch_file.write_text(result, encoding="utf-8", newline="")
+    proc = subprocess.run(
+        ["git", "-C", str(fresh), "apply", "--check", str(patch_file)],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, f"the patch does not apply: {proc.stderr}"

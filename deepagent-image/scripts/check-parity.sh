@@ -58,6 +58,14 @@ markers=(
   # jail dies at `--proc` with an EPERM that names neither profile — the exact
   # dead end §13.7 cost a measurement round to diagnose.
   "systempaths=unconfined"
+  # M8 B3: the benchmark driver pins the host state dir per instance so it can
+  # read that instance's usage.jsonl back. Dropped from one launcher only, the
+  # sweep on that platform silently joins against the wrong (or no) telemetry.
+  "STATE_HOST_DIR"
+  # M8 B3: a bench instance must be exactly what its dataset says. Dropped
+  # from one launcher only, every prediction on that platform carries three
+  # seeded harness files alongside the fix.
+  "SEED_WORKSPACE"
   "DEEPAGENTS_JAIL_SYSTEMPATHS"
   # M5: the profile file must be MOUNTED (it is gitignored, so it is not in the
   # image's COPY list -- without the mount the container's resolve_settings()
@@ -69,6 +77,11 @@ markers=(
   # test_config.py::test_prespinup_profile_keys_are_consumed_by_both_launchers
   # checks ALL of them, so a new knob is covered without editing this list.
   "/project/.harness-profile.yaml"
+  # M8 self-test findings: the bench driver selects the pytest-enabled bench
+  # image via this var. Dropped from one launcher only, a sweep on that
+  # platform silently runs the pytest-less runtime image and no instance can
+  # ever verify its own patch.
+  "DEEPAGENTS_IMAGE"
   # The caps are docker flags, not env vars, so the container can only report
   # them truthfully in `/config` if they are forwarded explicitly.
   "PIDS_LIMIT="

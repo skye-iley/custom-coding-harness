@@ -21,6 +21,13 @@ source "$ROOT/scripts/lib/config.sh"    # _resolve_host_setting (Milestone 5, C3
 WORKSPACE="${WORKSPACE:-$ROOT/project/workspace}"
 SEED_SOURCE="$ROOT/project/workspace"
 NETJAIL_DIR="$ROOT/netjail"
+# Image tag to run. Default is the shippable runtime image (no pytest, by
+# design — see the Dockerfile). The bench driver points this at
+# deepagent-harness-bench (runtime + pytest in /opt/venv, still no tests/) so a
+# benchmark instance's shell can actually run `pytest` — see the "bench pytest
+# image" section of deepagent-image/CLAUDE.md. Not a Resolve-HostSetting knob:
+# this is an internal driver detail, not something an operator saves to a profile.
+IMAGE="${DEEPAGENTS_IMAGE:-deepagent-harness}"
 
 # Resource caps (Milestone 1 §3): a Docker host-boundary control so a runaway
 # agent can't exhaust the host CPU/RAM or fork-bomb it. NOT a sandbox (the trust
@@ -224,9 +231,16 @@ ephemeral_cleanup() {
   echo "Ephemeral: workspace changes discarded."
 }
 
+# SEED_WORKSPACE=0 turns this off. A benchmark instance (M8 B3) must be exactly
+# what its dataset says it is: measured, the seeded environment.yml / .gitignore /
+# scripts/run-in-env.sh landed in the extracted patch of every instance, so a
+# scorer would have been handed three harness files alongside the fix. An
+# instance that needs a conda env ships its own environment.yml in its commit.
+# Mirror in run-docker.ps1.
 seed_workspace() {
   local target="$1"
   local seed="$2"
+  [[ "${SEED_WORKSPACE:-1}" != "0" ]] || return 0
   [[ -d "$seed" ]] || return 0
   for file in environment.yml .gitignore; do
     if [[ ! -f "$target/$file" && -f "$seed/$file" ]]; then
@@ -280,8 +294,12 @@ seed_workspace "$MOUNT_WORKSPACE" "$SEED_SOURCE"
 # by a host dir under the harness repo, keyed per-workspace so distinct repos keep
 # separate archives (mirrors the old per-workspace <workspace>/.deepagents split).
 # The Python side reads DEEPAGENTS_STATE_DIR via archive.state_dir. Mirror in run-docker.ps1.
+# STATE_HOST_DIR overrides the derived location. The benchmark driver (M8 B3)
+# sets it per instance so a sweep's telemetry is that instance's and nobody
+# else's, and so the driver can read <state-dir>/usage.jsonl back without
+# re-deriving a hash the launcher owns. Mirror in run-docker.ps1.
 WS_KEY="$(printf '%s' "$WORKSPACE" | sha256sum | cut -c1-12)"
-STATE_HOST_DIR="$ROOT/project/state/$WS_KEY"
+STATE_HOST_DIR="${STATE_HOST_DIR:-$ROOT/project/state/$WS_KEY}"
 mkdir -p "$STATE_HOST_DIR"
 
 # Git identity: mount host .gitconfig read-only into the agent user's home (uid 10001 -> /home/agent),
@@ -404,7 +422,7 @@ mask_scan() {
     -e DEEPAGENTS_STATE_DIR=/project/state \
     ${USER_FLAGS[@]+"${USER_FLAGS[@]}"} \
     ${mode_env[@]+"${mode_env[@]}"} \
-    deepagent-harness python3 -m harness mask-scan 2>"$scan_err")" \
+    "$IMAGE" python3 -m harness mask-scan 2>"$scan_err")" \
     || { echo "[mask] FATAL: mask-scan failed — refusing to launch unmasked. Fix the scan or set DEEPAGENTS_MASK=0 to disable masking." >&2; [[ -s "$scan_err" ]] && cat "$scan_err" >&2; rm -f "$scan_err"; exit 1; }
   # Surface mask-scan diagnostics (protection-reduction, symlink-escape warnings).
   [[ -s "$scan_err" ]] && cat "$scan_err" >&2
@@ -534,14 +552,14 @@ jail_setup() {
 # machine running dockerd, which for a remote daemon / Colima-Lima VM / WSL distro is
 # not this machine — a local read would need root AND would lie in exactly those cases.
 _apparmor_profile_available() {
-  docker run --rm --security-opt "apparmor=$1" deepagent-harness true >/dev/null 2>&1
+  docker run --rm --security-opt "apparmor=$1" "$IMAGE" true >/dev/null 2>&1
 }
 
 # What AppArmor profile does an ordinary container get here? Empty ⇒ this daemon's
 # host loads no AppArmor policy (Docker Desktop / WSL2 / macOS), so the jail needs
 # no profile at all.
 _apparmor_in_force() {
-  docker run --rm deepagent-harness sh -c \
+  docker run --rm "$IMAGE" sh -c \
     'cat /proc/self/attr/apparmor/current 2>/dev/null || cat /proc/self/attr/current 2>/dev/null || true' \
     2>/dev/null | tr -d '\0' | sed 's/ (.*//' | tr -d '[:space:]'
 }
@@ -637,7 +655,7 @@ build_agent_run() {
     ${MASK_MODE_ARGS[@]+"${MASK_MODE_ARGS[@]}"}
     ${RAW_TRACE_ARGS[@]+"${RAW_TRACE_ARGS[@]}"}
     "${CAP_ENV[@]}"
-    deepagent-harness)
+    "$IMAGE")
   if [[ $# -gt 0 ]]; then
     AGENT_RUN+=(python3 main.py "$@")
   fi

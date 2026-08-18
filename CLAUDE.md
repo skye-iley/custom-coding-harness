@@ -182,7 +182,16 @@ secret-safe containers.
   - `docs/milestones/in-progress/` — **being built** milestones (doc + separate invariants doc + code
     on a feature branch).
     - `milestone8.md` (+ `milestone8_invariants.md`) — **Benchmark Ladder, Tier 1 (Gold Set)**
-      (`design_doc.md` §11). **Plan + invariants written, no code yet.** Make the
+      (`design_doc.md` §11). **Slices B1–B5 are all built** — see the
+      milestone's §0.1 for what the build changed about the plan and
+      `milestone8_baseline.md` for the B5 evidence record (4/5 resolved on the shipped
+      local model). Three findings are worth carrying: a step bound was *silently
+      retryable* (`resilience.is_retryable` scans an error message for an embedded status
+      code, and `--max-steps 500` makes LangGraph say "Recursion limit of 500 reached");
+      `run-docker.ps1` swallowed every container exit code, so instances the bound stopped
+      reported a clean 0; and the launcher's workspace seeding put three harness files into
+      every prediction. The last two were found by *running a sweep*, not by review.
+      Make the
       harness runnable over a pinned set of coding tasks, unattended, on the free local model, and
       make each run emit a scorable patch plus a joinable telemetry row. Three slices: **hard
       stops** (B1), **`--emit-patch`** (B2), and the **`harness/bench/` batch driver** (B3), plus

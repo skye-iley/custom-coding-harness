@@ -413,6 +413,45 @@ FIELD_SPECS: tuple[FieldSpec, ...] = (
         name="max_tokens", tier="live", env_var="DEEPAGENTS_MAX_TOKENS", profile_key="max_tokens",
         cast=int, label="Max tokens", settable=True,
     ),
+    # --- Milestone 8 B1: the three hard stops ---------------------------------
+    #
+    # All three default to None and stay None unless set: absence is the removable
+    # contract (`milestone8.md` §10). `--max-steps` unset means the graph config
+    # carries no `recursion_limit` key at all -- NOT a large number -- so the
+    # pass-through is structural rather than arithmetic.
+    #
+    # They sit in the live tier beside max_cost/max_tokens because they are read
+    # by the harness process itself, not by `docker run`, and they persist
+    # (profile_key set) because "never let a session run more than an hour" is a
+    # standing preference in a way `headless` or `raw_trace` is not.
+    FieldSpec(
+        # Bounds the ReAct loop *inside* one turn -- the runaway `--max-turns`
+        # structurally cannot catch, since a headless benchmark instance is one
+        # turn (`milestone8.md` §3). Live because the graph `config` dict is built
+        # once in `cli.main` and passed into every `run_turn`, so an applier
+        # mutating it takes effect on the next turn with no agent rebuild (§13
+        # item 5).
+        name="max_steps", tier="live", env_var="DEEPAGENTS_MAX_STEPS",
+        profile_key="max_steps", cast=int, label="Max steps (per turn)",
+        settable=True,
+    ),
+    FieldSpec(
+        # A *session* deadline, checked at a step boundary. `float` rather than
+        # `int` so a test or a tight sweep can express sub-second bounds without a
+        # second unit.
+        name="max_seconds", tier="live", env_var="DEEPAGENTS_MAX_SECONDS",
+        profile_key="max_seconds", cast=float, label="Max seconds (session)",
+        settable=True,
+    ),
+    FieldSpec(
+        # Kept, and genuinely useful outside benchmarking (an interactive session
+        # that should not run away overnight, a multi-task headless invocation) --
+        # it is simply not the benchmark bound, and §3 is explicit that the doc
+        # must not imply it is.
+        name="max_turns", tier="live", env_var="DEEPAGENTS_MAX_TURNS",
+        profile_key="max_turns", cast=int, label="Max turns (session)",
+        settable=True,
+    ),
     FieldSpec(
         # Milestone 7. A four-valued enum, not a bool plus a "where does it go"
         # knob -- two knobs that can disagree. `cast=str` because `choices` is
@@ -455,6 +494,19 @@ FIELD_SPECS: tuple[FieldSpec, ...] = (
         # not a standing preference.
         name="headless", tier="prespinup", env_var="DEEPAGENTS_HEADLESS", profile_key=None,
         cast=_to_bool, default=False, label="Headless",
+    ),
+    FieldSpec(
+        # Milestone 8 B2. profile_key=None on `headless`'s precedent (§13 item 4):
+        # a per-sweep mode, not a preference. Being a real FieldSpec still buys
+        # validation and `harness doctor` display for free.
+        #
+        # tier="prespinup" rather than "live" because the base commit is resolved
+        # once, at startup, before the agent touches anything -- turning the flag
+        # on mid-session would have no base to diff against, and turning it off
+        # would leave a resolved base nothing reads. A knob whose live value could
+        # not take effect is worse than one that is honestly fixed.
+        name="emit_patch", tier="prespinup", env_var="DEEPAGENTS_EMIT_PATCH",
+        profile_key=None, cast=_to_bool, default=False, label="Emit patch",
     ),
     FieldSpec(
         # profile_key=None: a debugging escape hatch (M4's removable contract), not
@@ -565,11 +617,15 @@ class Settings:
     topic: str | None = None
     max_cost: float | None = None
     max_tokens: int | None = None
+    max_steps: int | None = None
+    max_seconds: float | None = None
+    max_turns: int | None = None
     raw_trace: str = "off"
     hitl: HitlSection | None = None
 
     # --- pre-spinup-only (fixed at container start; shown read-only in /config) ---
     headless: bool = False
+    emit_patch: bool = False
     mask_enabled: bool = True
     telemetry: bool = True
     mask_mode: str = "deny"
@@ -593,9 +649,13 @@ class SettingsSources:
     topic: str = "default"
     max_cost: str = "default"
     max_tokens: str = "default"
+    max_steps: str = "default"
+    max_seconds: str = "default"
+    max_turns: str = "default"
     raw_trace: str = "default"
     hitl: str = "default"
     headless: str = "default"
+    emit_patch: str = "default"
     mask_enabled: str = "default"
     telemetry: str = "default"
     mask_mode: str = "default"

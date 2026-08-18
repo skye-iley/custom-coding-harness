@@ -35,10 +35,11 @@ Prefer the wrapper (activates workspace conda automatically):
 ./scripts/run-in-env.sh Rscript analysis.R
 ```
 
-Manual activation:
+Manual activation (the `execute` tool's shell is `/bin/sh` — dash, not bash —
+which has no `source` builtin; use the POSIX-portable `.` instead):
 
 ```bash
-source /opt/conda/etc/profile.d/conda.sh
+. /opt/conda/etc/profile.d/conda.sh
 conda activate /project/workspace/.conda/env
 python -m pytest
 ```

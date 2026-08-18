@@ -316,9 +316,14 @@ def test_resolve_settings_removable_contract_matches_pre_m5_defaults(tmp_path):
 def test_live_fields_matches_milestone5_table():
     # milestone5.md §3's table, plus `raw_trace` (M7 §10.1 -- live because the
     # operator case is flipping tracing on and re-running the same prompt in the
-    # SAME session, against the same thread and accumulated context).
+    # SAME session, against the same thread and accumulated context) and M8 B1's
+    # three hard stops (read by the harness process itself, not by `docker run`,
+    # so they are live by the same test §3's table applies).
     assert cfg.LIVE_FIELDS == frozenset(
-        {"model", "thread_id", "topic", "max_cost", "max_tokens", "hitl", "raw_trace"}
+        {
+            "model", "thread_id", "topic", "max_cost", "max_tokens", "hitl",
+            "raw_trace", "max_steps", "max_seconds", "max_turns",
+        }
     )
 
 
@@ -650,3 +655,129 @@ def test_wizard_prespinup_specs_are_the_persisted_prespinup_half():
         "mask_mode", "jail", "jail_apparmor", "jail_systempaths",
         "cpus", "memory", "pids_limit", "net_jail",
     ]
+
+
+# --- Milestone 8 B1: the three hard stops -------------------------------------
+
+
+def test_hard_stops_resolve_through_all_four_tiers(tmp_path):
+    p = tmp_path / cfg.PROFILE_NAME
+    p.write_text(
+        "max_steps: 40\nmax_seconds: 600\nmax_turns: 5\n", encoding="utf-8"
+    )
+    hitl = tmp_path / "none-hitl.yaml"
+
+    settings, sources = cfg.resolve_settings(env={}, profile_path=p, hitl_path=hitl)
+    assert (settings.max_steps, sources.max_steps) == (40, "profile")
+    assert (settings.max_seconds, sources.max_seconds) == (600.0, "profile")
+    assert (settings.max_turns, sources.max_turns) == (5, "profile")
+
+    env = {
+        "DEEPAGENTS_MAX_STEPS": "60",
+        "DEEPAGENTS_MAX_SECONDS": "900.5",
+        "DEEPAGENTS_MAX_TURNS": "9",
+    }
+    settings, sources = cfg.resolve_settings(env=env, profile_path=p, hitl_path=hitl)
+    assert (settings.max_steps, sources.max_steps) == (60, "env")
+    assert (settings.max_seconds, sources.max_seconds) == (900.5, "env")
+    assert (settings.max_turns, sources.max_turns) == (9, "env")
+
+    settings, sources = cfg.resolve_settings(
+        cli={"max_steps": 12, "max_seconds": 30.0, "max_turns": 1},
+        env=env, profile_path=p, hitl_path=hitl,
+    )
+    assert (settings.max_steps, sources.max_steps) == (12, "cli")
+    assert (settings.max_seconds, sources.max_seconds) == (30.0, "cli")
+    assert (settings.max_turns, sources.max_turns) == (1, "cli")
+
+
+def test_hard_stops_default_to_none_not_to_a_number(tmp_path):
+    """The removable contract, at the resolver.
+
+    `None` is what makes the pass-through structural downstream: `cli.main` puts
+    no `recursion_limit` key in the graph config, builds no `Deadline` and no
+    `TurnCounter`. A default of "a very large number" would look identical in a
+    passing test and would be a behaviour change (`milestone8.md` §10, M7
+    invariant 18's lesson).
+    """
+    settings, sources = cfg.resolve_settings(
+        env={}, profile_path=tmp_path / "none.yaml", hitl_path=tmp_path / "none-hitl.yaml"
+    )
+    assert settings.max_steps is None
+    assert settings.max_seconds is None
+    assert settings.max_turns is None
+    for name in ("max_steps", "max_seconds", "max_turns"):
+        assert getattr(sources, name) == "default"
+
+
+def test_hard_stops_reject_a_non_numeric_value_at_every_point_of_entry(tmp_path):
+    bad_profile = tmp_path / cfg.PROFILE_NAME
+    bad_profile.write_text("max_steps: forty\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        cfg.load_profile(bad_profile)
+
+    with pytest.raises(SystemExit):
+        cfg.resolve_settings(
+            env={"DEEPAGENTS_MAX_SECONDS": "soon"},
+            profile_path=tmp_path / "none.yaml", hitl_path=tmp_path / "none-hitl.yaml",
+        )
+
+    with pytest.raises(SystemExit):
+        cfg.resolve_settings(
+            env={"DEEPAGENTS_MAX_TURNS": "lots"},
+            profile_path=tmp_path / "none.yaml", hitl_path=tmp_path / "none-hitl.yaml",
+        )
+
+
+def test_hard_stops_are_live_and_persisted():
+    # Live (read by the harness process, not by `docker run`) and persisted
+    # ("never let a session run more than an hour" is a standing preference, in a
+    # way `headless` and `raw_trace` are not -- §13 item 4).
+    for name in ("max_steps", "max_seconds", "max_turns"):
+        spec = cfg.SPECS_BY_NAME[name]
+        assert spec.tier == "live", name
+        assert spec.settable is True, name
+        assert spec.profile_key == name, name
+        assert spec.env_var == f"DEEPAGENTS_{name.upper()}", name
+        # Numeric knobs, so no `choices` -- a value list on an int field would
+        # reject every number outside it.
+        assert spec.choices is None, name
+
+
+def test_emit_patch_is_a_prespinup_knob_that_is_not_persisted():
+    """Milestone 8 B2, on `headless`'s precedent (§13 item 4).
+
+    A real FieldSpec, so it gets validation and `harness doctor` display for
+    free, but `profile_key=None`: it is a per-sweep mode, not a preference.
+    Pre-spinup rather than live because the base commit is resolved once at
+    startup -- a live toggle could not take effect, and a knob that silently
+    does nothing is worse than one that is honestly fixed.
+    """
+    spec = cfg.SPECS_BY_NAME["emit_patch"]
+    assert spec.tier == "prespinup"
+    assert spec.profile_key is None
+    assert spec.settable is False
+    assert spec.env_var == "DEEPAGENTS_EMIT_PATCH"
+    # No `choices` on a bool: a value list would reject `DEEPAGENTS_EMIT_PATCH=1`,
+    # the spelling a launcher passes (M5.1 invariant 19).
+    assert spec.choices is None
+
+
+def test_emit_patch_resolves_from_env_and_defaults_off(tmp_path):
+    hitl = tmp_path / "none-hitl.yaml"
+    settings, sources = cfg.resolve_settings(
+        env={}, profile_path=tmp_path / "none.yaml", hitl_path=hitl
+    )
+    assert settings.emit_patch is False and sources.emit_patch == "default"
+
+    settings, sources = cfg.resolve_settings(
+        env={"DEEPAGENTS_EMIT_PATCH": "1"},
+        profile_path=tmp_path / "none.yaml", hitl_path=hitl,
+    )
+    assert settings.emit_patch is True and sources.emit_patch == "env"
+
+    settings, sources = cfg.resolve_settings(
+        cli={"emit_patch": True}, env={"DEEPAGENTS_EMIT_PATCH": "0"},
+        profile_path=tmp_path / "none.yaml", hitl_path=hitl,
+    )
+    assert settings.emit_patch is True and sources.emit_patch == "cli"

@@ -98,6 +98,14 @@ if (-not $PSBoundParameters.ContainsKey('NetJail')) {
     if ($NetJailResolved -in @("1", "true", "yes", "on")) { $NetJail = [switch]$true }
 }
 
+# Image tag to run. Default is the shippable runtime image (no pytest, by
+# design -- see the Dockerfile). The bench driver points this at
+# deepagent-harness-bench (runtime + pytest in /opt/venv, still no tests/) so a
+# benchmark instance's shell can actually run `pytest` -- see the "bench pytest
+# image" section of deepagent-image/CLAUDE.md. Not a Resolve-HostSetting knob:
+# this is an internal driver detail, not something an operator saves to a profile.
+$Image = if ($env:DEEPAGENTS_IMAGE) { $env:DEEPAGENTS_IMAGE } else { "deepagent-harness" }
+
 $DefaultWorkspace = Join-Path $Root "project\workspace"
 if (-not $WorkspacePath) {
     $WorkspacePath = $DefaultWorkspace
@@ -120,13 +128,27 @@ $sha256 = [System.Security.Cryptography.SHA256]::Create()
 $WsKey = [System.BitConverter]::ToString(
     $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($WorkspacePath))
 ).Replace("-", "").Substring(0, 12).ToLower()
-$StateHostDir = Join-Path $Root "project\state\$WsKey"
+# STATE_HOST_DIR overrides the derived location. The benchmark driver (M8 B3)
+# sets it per instance so a sweep's telemetry is that instance's and nobody
+# else's, and so the driver can read <state-dir>/usage.jsonl back without
+# re-deriving a hash the launcher owns. Mirror in run-docker.sh.
+$StateHostDir = $env:STATE_HOST_DIR
+if (-not $StateHostDir) {
+    $StateHostDir = Join-Path $Root "project\state\$WsKey"
+}
 if (-not (Test-Path $StateHostDir)) {
     New-Item -ItemType Directory -Force -Path $StateHostDir | Out-Null
 }
 
+# SEED_WORKSPACE=0 turns this off. A benchmark instance (M8 B3) must be exactly
+# what its dataset says it is: measured, the seeded environment.yml / .gitignore /
+# scripts/run-in-env.sh landed in the extracted patch of every instance, so a
+# scorer would have been handed three harness files alongside the fix. An
+# instance that needs a conda env ships its own environment.yml in its commit.
+# Mirror in run-docker.sh.
 function Seed-Workspace {
     param([string]$Target, [string]$SeedSource)
+    if ($env:SEED_WORKSPACE -eq "0") { return }
     if (-not (Test-Path $SeedSource)) { return }
     foreach ($file in @("environment.yml", ".gitignore")) {
         $dest = Join-Path $Target $file
@@ -370,7 +392,7 @@ if ($MaskEnabled -eq "" -or $MaskEnabled -eq "1") {
         "-v", "${StateHostDir}:/project/state",
         "-e", "DEEPAGENTS_STATE_DIR=/project/state"
     ) + $ScanModeArgs + @(
-        "deepagent-harness", "python3", "-m", "harness", "mask-scan"
+        $Image, "python3", "-m", "harness", "mask-scan"
     )
     # Native command stderr must not become a terminating error under
     # ErrorActionPreference=Stop (see Remove-ContainerIfExists above) — mask-scan
@@ -459,10 +481,10 @@ if ($JailMode -and $JailMode -notin @("0", "false", "no", "off")) {
         # is not loaded anywhere and make the launcher announce a boundary that does not
         # exist. Ask what actually confines a container here before asking for a profile.
         $probe = "deepagent-userns"
-        $inForce = (docker run --rm deepagent-harness sh -c 'cat /proc/self/attr/apparmor/current 2>/dev/null || cat /proc/self/attr/current 2>/dev/null || true' 2>$null)
+        $inForce = (docker run --rm $Image sh -c 'cat /proc/self/attr/apparmor/current 2>/dev/null || cat /proc/self/attr/current 2>/dev/null || true' 2>$null)
         if ($inForce) { $inForce = ($inForce -replace ' \(.*', '').Trim() }
         if ($inForce -and $inForce -notin @("unconfined", "kernel")) {
-            docker run --rm --security-opt "apparmor=$probe" deepagent-harness true 2>$null | Out-Null
+            docker run --rm --security-opt "apparmor=$probe" $Image true 2>$null | Out-Null
             if ($LASTEXITCODE -eq 0) {
                 $Apparmor = $probe
             } else {
@@ -653,7 +675,7 @@ if (Test-Path $ProfileFile) {
     Write-Host "Config profile: mounted (.harness-profile.yaml present)"
 }
 
-$dockerArgs += "deepagent-harness"
+$dockerArgs += $Image
 
 if ($TaskParts.Count -gt 0) {
     $dockerArgs += "python3", "main.py"
@@ -666,9 +688,17 @@ if ($TaskParts.Count -gt 0) {
     Write-Host "Task: $($TaskParts -join ' ')"
 }
 
+# $LASTEXITCODE is captured as the FIRST statement in `finally`, before any
+# cleanup can overwrite it, and re-raised after the block. Without this the
+# script always exited 0 and the container's own exit code was lost -- measured
+# on the first M8 gold-set sweep, where every instance the step bound stopped
+# (harness exit 43) was reported to the benchmark driver as a clean 0. run-docker.sh
+# has always done this with `exit $?`; the two must agree.
+$dockerExit = 1
 try {
     & docker @dockerArgs
 } finally {
+    $dockerExit = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 1 }
     if ($NetJail) { Netjail-Down }
     if ($Ephemeral) {
         if ($SaveWorkspace) {
@@ -689,3 +719,5 @@ try {
         Remove-Item -Recurse -Force $emptyDir.FullName -ErrorAction SilentlyContinue
     }
 }
+
+exit $dockerExit

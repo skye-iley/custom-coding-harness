@@ -106,6 +106,71 @@ def test_tool_schemas_are_recorded_literally():
     assert '"properties"' in out and '"path"' in out
 
 
+# --- format_request_dedup: unchanged system/tools blocks are pointed at, not
+# --- repeated (Milestone 7 follow-up) --------------------------------------
+
+
+def test_dedup_elides_an_unchanged_system_and_tools_block():
+    request = _Obj(
+        system_message="You are an expert coding assistant.",
+        messages=[_Obj(type="human", content="do the thing")],
+        tools=[{"name": "write_file", "parameters": {"type": "object"}}],
+    )
+    first, sys_hash, tools_hash = rt.format_request_dedup(request)
+    assert "You are an expert coding assistant." in first
+    assert "write_file:" in first
+
+    second, sys_hash2, tools_hash2 = rt.format_request_dedup(
+        request, last_system_hash=sys_hash, last_tools_hash=tools_hash
+    )
+    assert "You are an expert coding assistant." not in second
+    assert "write_file:" not in second
+    assert f"unchanged from previous call, sha256={sys_hash}" in second
+    assert f"unchanged from previous call, sha256={tools_hash}" in second
+    # The hashes are stable across identical calls, so a caller threading them
+    # through (agent.py's RawTraceMiddleware) keeps deduping call after call.
+    assert (sys_hash2, tools_hash2) == (sys_hash, tools_hash)
+    # Message history is never elided, however many calls repeat the prefix.
+    assert "do the thing" in second
+
+
+def test_dedup_rerenders_full_when_either_block_changes():
+    base = _Obj(
+        system_message="prompt v1",
+        messages=[],
+        tools=[{"name": "write_file", "parameters": {}}],
+    )
+    _, sys_hash, tools_hash = rt.format_request_dedup(base)
+
+    changed_system = _Obj(system_message="prompt v2", messages=[], tools=base.tools)
+    out = rt.format_request_dedup(
+        changed_system, last_system_hash=sys_hash, last_tools_hash=tools_hash
+    )[0]
+    assert "prompt v2" in out
+    assert "unchanged from previous call" not in out.split("--- messages")[0]
+
+    changed_tools = _Obj(
+        system_message="prompt v1",
+        messages=[],
+        tools=[{"name": "read_file", "parameters": {}}],
+    )
+    out2 = rt.format_request_dedup(
+        changed_tools, last_system_hash=sys_hash, last_tools_hash=tools_hash
+    )[0]
+    assert "read_file:" in out2
+
+
+def test_dedup_full_render_matches_plain_format_request_on_first_call():
+    # No prior hashes -> byte-identical to the always-full renderer, so the
+    # first record in a file is exactly as complete as before this change.
+    request = _Obj(
+        system_message="s",
+        messages=[_Obj(type="human", content="hi")],
+        tools=[{"name": "write_file", "parameters": {}}],
+    )
+    assert rt.format_request_dedup(request)[0] == rt.format_request(request)
+
+
 def test_header_names_the_fidelity_level():
     # milestone7.md §14 "false confidence": an operator may read an L1 record as
     # the model server's template-rendered token string. The header says which.

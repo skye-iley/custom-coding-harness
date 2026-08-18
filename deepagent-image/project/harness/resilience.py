@@ -237,6 +237,7 @@ def retry_call(
     sleep: Callable[[float], None],
     rand: Callable[[], float] = random.random,
     on_retry: Callable[[int, BaseException, float], None] | None = None,
+    retryable: Callable[[BaseException], bool] | None = None,
 ) -> T:
     """Call ``fn`` with bounded exponential backoff on retryable failures.
 
@@ -249,13 +250,23 @@ def retry_call(
     ``sleep`` and ``rand`` are injected so the loop is deterministic and instant
     under test; ``on_retry(attempt, exc, delay)`` is an optional observer for a
     ``[harness] retrying...`` stage marker.
+
+    ``retryable`` overrides the classifier for callers that know something this
+    module cannot. ``is_retryable`` falls back to scanning the message for an
+    embedded status code (``Error code: 503``), which is right for a provider
+    error and wrong for an exception that merely *contains* a 4xx/5xx-shaped
+    number — ``--max-steps 500`` makes LangGraph say "Recursion limit of 500
+    reached", and retrying that just re-runs a graph that will hit the same wall
+    (Milestone 8 B1). Injecting the predicate keeps that knowledge at the seam
+    that has it rather than importing ``limits`` here.
     """
+    is_retryable_ = retryable if retryable is not None else is_retryable
     attempt = 0
     while True:
         try:
             return fn()
         except Exception as exc:  # noqa: BLE001 - classification decides re-raise
-            if attempt >= max_retries or not is_retryable(exc):
+            if attempt >= max_retries or not is_retryable_(exc):
                 raise
             # Prefer the server's own retry_delay (precise) over blind jitter; cap
             # it so a huge server wait escalates to S4 rather than freezing the run.

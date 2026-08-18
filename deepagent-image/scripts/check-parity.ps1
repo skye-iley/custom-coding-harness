@@ -55,8 +55,23 @@ $markers = @("mask-scan", "refusing to launch unmasked", "DEEPAGENTS_MASK", "DEE
              "deepagent-userns", "install-apparmor-profile", "DEEPAGENTS_JAIL_APPARMOR",
              # M4.1 fork J5: the third gate. Dropped from one launcher only, that
              # platform's jail dies at `--proc` with an EPERM naming neither profile.
-             "systempaths=unconfined", "DEEPAGENTS_JAIL_SYSTEMPATHS",
+             "systempaths=unconfined",
+             # M8 B3: the benchmark driver pins the host state dir per instance so
+             # it can read that instance's usage.jsonl back. Dropped from one
+             # launcher only, the sweep on that platform silently joins against
+             # the wrong telemetry, or none.
+             "STATE_HOST_DIR",
+             # M8 B3: a bench instance must be exactly what its dataset says. Dropped
+             # from one launcher only, every prediction on that platform carries three
+             # seeded harness files alongside the fix.
+             "SEED_WORKSPACE",
+             "DEEPAGENTS_JAIL_SYSTEMPATHS",
              "/project/.harness-profile.yaml",
+             # M8 self-test findings: the bench driver selects the pytest-enabled
+             # bench image via this var. Dropped from one launcher only, a sweep
+             # on that platform silently runs the pytest-less runtime image and
+             # no instance can ever verify its own patch.
+             "DEEPAGENTS_IMAGE",
              "PIDS_LIMIT=", "DEEPAGENTS_JAIL=1", "DEEPAGENTS_MASK_MODE=")
 $rdPs1 = Join-Path (Join-Path $Root "scripts") "run-docker.ps1"
 $rdSh  = Join-Path (Join-Path $Root "scripts") "run-docker.sh"

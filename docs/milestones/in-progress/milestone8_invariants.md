@@ -25,6 +25,15 @@ looks like paranoia about empty patches or misclassified outcomes is that rule a
 
 ## Bounds (nothing runs forever, and a stop says which bound stopped it)
 
+> **Built (B1).** 1–6 are pinned by `tests/test_limits.py` (the arithmetic, host tier,
+> injected clock), the M8 block in `tests/test_cli.py` (the classifier, the middleware, the
+> exit code, and invariant 6 asserted as the *absence* of the config key), the `stopped`
+> cases in `tests/test_telemetry.py`, and two `tests/test_live_model.py` cases — the tier
+> that catches a bound the harness believes in and LangGraph does not honour. **7 and 7a
+> are built**: 7 as part of B3 (`harness bench run`'s refusal); 7a as a post-B5 follow-on
+> (per-instance dataset bounds, `harness/bench/dataset.py` + `driver.effective_limits`),
+> pinned in `tests/test_bench.py`.
+
 1. **Each bound actually terminates its own runaway.** With `--max-steps N`, a graph that would loop
    forever ends after at most `N` super-steps. With `--max-seconds T`, a run whose model calls
    exceed `T` ends at the next step boundary. With `--max-turns K`, a session ends after `K` turns.
@@ -56,7 +65,25 @@ looks like paranoia about empty patches or misclassified outcomes is that rule a
    nothing written. An unbounded sweep is the failure mode this milestone removes; it must not be
    reachable by forgetting a flag.
 
+7a. **A per-instance bound (`dataset.Instance.max_steps`/`max_seconds`) can only tighten the CLI
+    bound, never loosen it.** `driver.effective_limits` computes `min(instance_value, ceiling)`
+    when the instance sets a value; an instance asking for more than the ceiling is clamped, logged
+    once at the point of the clamp, and the *clamped* value — never the requested one — is what
+    reaches the runner and what `runs.jsonl`'s `limits` field records. This is invariant 7 restated
+    one level down: a dataset file is authored data, not an operator override, so it cannot be the
+    thing that makes a sweep unbounded. Pinned by
+    `test_effective_limits_clamps_an_instance_asking_for_more_than_the_ceiling` and the end-to-end
+    `test_a_sweep_invokes_each_instance_with_its_own_effective_limits` (`tests/test_bench.py`).
+
 ## Patch fidelity (the artifact is scorable)
+
+> **Built (B2).** 8–12, 12a, 12b and 14 are pinned by `tests/test_bench_patch.py` (host tier,
+> skips without `git`), which drives the extractor **the way the driver does** rather than
+> through `--emit-patch` — that is invariant 12a holding today. The wiring and the removable
+> contract are in the B2 block of `tests/test_cli.py`, and
+> `test_live_model.py::test_a_real_turn_produces_a_patch_that_actually_applies` is the case a
+> stub cannot substitute for. Every one asserts by **applying** the patch. **13 is not built**:
+> `predictions.jsonl` belongs to the driver (B3).
 
 8. **A new file the agent never staged appears in the patch.** The `gold-005-new-module` case, and
    the single most likely silent defect in this milestone: without `git add -A -N` the patch is
@@ -106,6 +133,10 @@ looks like paranoia about empty patches or misclassified outcomes is that rule a
 
 ## Sweep integrity (never silently partial)
 
+> **Built (B3).** 15–18 are pinned by `tests/test_bench.py` (host tier, subprocess injected):
+> a killed sweep resumed with no duplicate row, one instance's failure not aborting the rest,
+> the empty-patch counter, and every instance appearing in both files exactly once.
+
 15. **A sweep resumes.** Killed at instance *k* of *n* and re-run, it skips the first *k* and
     completes the rest. Both output files are append-only and flushed per instance; nothing is
     buffered to the end.
@@ -122,6 +153,12 @@ looks like paranoia about empty patches or misclassified outcomes is that rule a
     duplicates on resume.
 
 ## Joinability (the M6 contract, actually exercised)
+
+> **Built (B3), and exercised for real.** 19–22 are pinned by `tests/test_bench.py` — including
+> the fixture where two instances share a `thread_id` — and were then run against five real
+> instances: `milestone8_baseline.md` §3 records a 0.3% residual, a `cost_usd` that stayed
+> `null` end to end, and the one number that had to be split in two (container launch vs.
+> harness time).
 
 19. **The join key is `run_id`, never `thread_id`.** `thread_id` repeats across resumes and is
     explicitly not the `past.sqlite` key (`cli.py:2092–2097`). A driver written against it merges
@@ -140,6 +177,11 @@ looks like paranoia about empty patches or misclassified outcomes is that rule a
 
 ## Containment & non-interference
 
+> **Built.** 23 is in `tests/test_import_isolation.py`; 25 and the gold-set collection guard
+> (26) are in `tests/test_bench.py` / `tests/test_gold_set.py`. 24 is unchanged from B2 — the
+> flag is a diff of the workspace the agent already owns, on the existing headless-JSON
+> channel, and adds no new path out of the container.
+
 23. **The driver is keyless in the strong sense.** `harness.bench` imports without pulling `cli`,
     `agent`, deepagents, or dotenv — pinned in `tests/test_import_isolation.py` alongside `entry` /
     `doctor` / `telemetry` / `config_cli`.
@@ -156,6 +198,9 @@ looks like paranoia about empty patches or misclassified outcomes is that rule a
     anything under `benchmarks/`.
 
 ## Removability
+
+> **Built.** 28 is pinned by `tests/test_gold_set.py` over the parsed AST (a docstring example
+> naming the directory is not a dependency; the first draft's substring scan said otherwise).
 
 27. **Deleting the feature reverts to M7.** Removing `harness/bench/`, `harness/limits.py`, the
     `DeadlineMiddleware`, the four `FieldSpec` entries, the `entry.dispatch` route,

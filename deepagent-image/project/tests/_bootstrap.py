@@ -37,9 +37,16 @@ _HARNESS = Path(__file__).resolve().parent.parent / "harness"
 
 
 def _load(modname: str) -> types.ModuleType:
-    """Load `harness.<sub>` by file path, registering a bare `harness` package
-    first so `__init__.py` never runs. Returns the cached module on repeat calls
-    so each harness submodule is a singleton (see module docstring)."""
+    """Load `harness.<sub>` (or `harness.<pkg>.<sub>`) by file path, registering
+    bare package objects along the way so no `__init__.py` ever runs. Returns the
+    cached module on repeat calls so each harness submodule is a singleton (see
+    module docstring).
+
+    Sub-packages (`harness.bench.patch`) get the same treatment `harness` itself
+    does -- a bare package object with a `__path__` and no code -- for the same
+    reason: running a real `__init__.py` is what would pull whatever it imports,
+    and the point of this loader is to import one module and nothing else.
+    """
     cached = sys.modules.get(modname)
     if cached is not None:
         return cached
@@ -47,8 +54,23 @@ def _load(modname: str) -> types.ModuleType:
         pkg = types.ModuleType("harness")
         pkg.__path__ = [str(_HARNESS)]  # mark as a package
         sys.modules["harness"] = pkg
+
+    # A bare name ("seccomp") is the long-standing spelling for a top-level
+    # harness module and still works; only a dotted name walks sub-packages.
+    parts = modname.split(".")
+    if parts[0] != "harness":
+        parts = ["harness", *parts]
+    directory = _HARNESS
+    for i, part in enumerate(parts[1:-1], start=2):
+        directory = directory / part
+        name = ".".join(parts[:i])
+        if name not in sys.modules:
+            sub = types.ModuleType(name)
+            sub.__path__ = [str(directory)]
+            sys.modules[name] = sub
+
     spec = importlib.util.spec_from_file_location(
-        modname, _HARNESS / f"{modname.split('.')[-1]}.py"
+        modname, directory / f"{parts[-1]}.py"
     )
     mod = importlib.util.module_from_spec(spec)
     sys.modules[modname] = mod

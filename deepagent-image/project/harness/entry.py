@@ -68,6 +68,18 @@ def dispatch(argv: list[str]) -> int:
         from harness.telemetry import telemetry_main
 
         return telemetry_main(argv[1:])
+    if argv and argv[0] == "bench":
+        # Milestone 8 B3. Routed here for the same reason `telemetry` is: the
+        # driver is a host-side admin command and must stay keyless in the strong
+        # sense -- no API key, no network, no model, and no runtime stack. It
+        # drives `run-docker` per instance rather than running inside a container,
+        # so importing `cli.py` here would drag deepagents into a process whose
+        # whole job is launching other processes. Imported from the submodule, not
+        # the package: `harness/bench/__init__.py` is deliberately empty of
+        # imports so the guarantee cannot be lost to a convenience re-export.
+        from harness.bench.driver import bench_main
+
+        return bench_main(argv[1:])
     if argv and argv[0] == "seccomp-sync":
         from harness.seccomp import seccomp_sync_main
 

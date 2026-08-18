@@ -106,6 +106,8 @@ See [ENV_VARS.md](./ENV_VARS.md#not-in-env--launcher-environment-host-side) for 
 | `EPHEMERAL` | `-Ephemeral` | off | Mount a throwaway copy of the workspace; revert on close. |
 | `SAVE_WORKSPACE` | `-SaveWorkspace` | off | Snapshot the ephemeral copy before discard; implies ephemeral. |
 | `NET_JAIL` | `-NetJail` | off | Deny-all-egress network jail (see `netjail/`). |
+| `STATE_HOST_DIR` | — | unset → derived | Where `/project/state` is backed on the host. Unset derives `project/state/<sha256(workspace)[:12]>`. The M8 benchmark driver pins it per instance so a sweep's telemetry is that instance's, and so it can read `usage.jsonl` back without re-deriving a hash the launcher owns. |
+| `SEED_WORKSPACE` | — | unset → on | Seed a workspace missing `environment.yml` / `.gitignore` / `scripts/run-in-env.sh`. `0` turns it off — a benchmark instance must be exactly what its dataset says it is, and all three seeded files came out in every prediction of the first M8 sweep. |
 | `DEEPAGENTS_JAIL_SYSTEMPATHS` | `-JailSystempaths` | unset → `unconfined` | Docker's `/proc` masks under the jail — the **third** gate (M4.1 §13.7). Default passes `--security-opt systempaths=unconfined`, without which the kernel refuses bwrap's fresh `--proc`. `default` keeps the masks; the jail then won't start on most Linux hosts, which is how the LSM-only control is reproduced. Only consulted when `DEEPAGENTS_JAIL` is on; read from the host env, `.env`, or the profile like its AppArmor twin. |
 | `DEEPAGENTS_JAIL_APPARMOR` | — | unset → auto | AppArmor stance for the bwrap jail. Read from the host env **or `.env`**, same as `DEEPAGENTS_JAIL`, but it only affects `docker run` flags — nothing reads it inside the container. Unset → **auto**: pass nothing where no LSM is in force, select slice J's `deepagent-userns` where it is loaded, and **abort pre-flight** where an LSM is in force but the profile is not loaded. `unconfined` → `--security-opt apparmor=unconfined` (works everywhere; drops the whole profile). Any other value is passed through as a host-loaded profile name. See "AppArmor: the second gate" below. |
 
@@ -462,6 +464,15 @@ Six things to know before touching this code:
   (L2, deferred), and **not** the chat-template token string (L3) — Ollama renders the
   template server-side, so that needs `OLLAMA_DEBUG=1` / `/api/show`. `design_doc.md` §11's
   old "raw tags included" wording promised L3 and is corrected there.
+- **Request-side dedup (post-M7, found via M8 self-test).** The system prompt and tool-schema
+  blocks are large and near-static call to call — a multi-step turn otherwise reprints both in
+  full at every step for no diagnostic gain. `rawtrace.format_request_dedup` (the function
+  `RawTraceMiddleware` actually calls; `format_request` is now test-only) replaces a block with
+  `(unchanged from previous call, sha256=…)` when it hashes identical to the immediately
+  preceding call's rendering of that block, and always re-renders in full the moment either
+  changes — so the full body is guaranteed to exist earlier in the same file and no change is
+  ever silently absorbed. Message content, tool calls, and tool results are **never** elided —
+  only these two blocks. `milestone7.md` §0.3/invariant 1 has the amended wording.
 
 Other properties worth not rediscovering: `off` is a **true pass-through** (mode checked
 before any work — no file, no directory, no formatting), which is what makes a live toggle
@@ -487,6 +498,424 @@ substitution, headless contract), `tests/test_config.py` (the knob), and
 catches a trace which is internally consistent and describes nothing real. It already
 earned itself: a stub passed while the real `system_message` (a `SystemMessage` object,
 not a string) was being rendered as a `repr` with the whole prompt escaped inside it.
+
+## Hard stops (Milestone 8, slice B1)
+
+Three bounds an operator can put on a run, and one outcome that says a bound
+fired. **All three default to unset**, and unset means *absent*, not infinite.
+
+| Knob | Bounds | Env | Seam |
+|---|---|---|---|
+| `--max-steps` | the ReAct loop **inside one turn** | `DEEPAGENTS_MAX_STEPS` | `config["recursion_limit"]`, set in `cli.main` |
+| `--max-seconds` | wall clock for the whole session | `DEEPAGENTS_MAX_SECONDS` | `DeadlineMiddleware.before_model` |
+| `--max-turns` | turns in a session | `DEEPAGENTS_MAX_TURNS` | a counter checked at the top of `run_turn` |
+
+All three are **live** (`/config set max_steps 40`) and persist to
+`.harness-profile.yaml`.
+
+**`--max-steps` is the one that matters, and `--max-turns` is not a substitute.**
+A headless run is *one* turn — `run_batch` iterates tasks, and a benchmark sweep
+passes one task per instance — so a runaway is not many turns, it is one turn
+whose ReAct loop does not terminate. A turn counter is checked between turns and
+is therefore never reached. The only thing bounding that loop before M8 was
+LangGraph's `recursion_limit`, which the harness never set, and whose inherited
+default on the pinned version is **`10007`** (`langgraph/_internal/_config.py`),
+not the widely-quoted 25. On a free local model, where no cost accrues to stop
+anything, that is not a bound. Re-read the constant rather than trusting either
+number, including this one.
+
+**A stop is an outcome, not a failure.** `telemetry.OUTCOME_STOPPED` joins
+`ok`/`denied`/`budget`/`cancelled`/`aborted`/`error`, and the record carries
+**`stop_reason`** (`"steps"` / `"seconds"` / `"turns"`, `null` otherwise) so one
+outcome can answer *which* ceiling was measured. Three consequences worth
+holding onto:
+
+- `GraphRecursionError` used to fall through `cli._turn_outcome` to `error`, so a
+  **truncated** instance was recorded identically to a **crashed** one. A sweep's
+  failure count mixed "the harness broke" with "the harness ran out of rope" —
+  the M6 invariant 2a conflation, one level down. `_turn_outcome` + `_stop_reason`
+  are the one classifier; a new bound is a line there, not a new flag.
+- It is **not** folded into `budget`. A `--max-cost` cap firing and an agent
+  failing to converge lead to opposite actions (raise the cap vs. fix the loop),
+  and the M1 caps still record `budget`.
+- The process exit code for a stopped headless run is **`limits.EXIT_STOPPED`
+  (43)**, distinct from 0 and from 1, so a driver reading only the process status
+  can make the same distinction the ledger does.
+
+Session vs. turn is a real split: `--max-seconds` and `--max-turns` end the
+**session** (same deterministic close `BudgetExceeded` already gets), while
+`--max-steps` bounds **one turn** and an interactive REPL drops back to the
+prompt. All three are `stopped` in the ledger either way; only the session's fate
+differs.
+
+Layout mirrors telemetry's and raw trace's: **`harness/limits.py`** is stdlib-only
+(the exceptions, `Deadline`, `TurnCounter`, `stop_reason_for`), so the arithmetic
+lives in the host test tier; **`cli.DeadlineMiddleware`** sits with the other
+middleware because it needs the langchain base. `limits.py` matches
+`GraphRecursionError` **by name** rather than importing langgraph — that is what
+keeps it stdlib-only, and the name is also the more stable half, so
+`test_live_model` pins it against a real graph.
+
+Two non-obvious placements, both load-bearing:
+
+- **`DeadlineMiddleware` is appended BEFORE telemetry**, so langchain's
+  first-is-outermost composition makes it the outer `before_model`. Inner, it
+  would raise *after* telemetry opened a model span, and every deadline stop
+  would report a phantom model call that never reached a provider.
+- **Both bound checks live inside `run_turn`'s `try`**, not in the callers' loops,
+  so a stop is classified by `_turn_outcome` and written by the same `finally` as
+  every other turn. A bound that ended a session with no record would be a stop
+  nothing in the ledger can see.
+
+One repair this slice made along the way: `resilience.retry_call` now takes an
+optional `retryable=` predicate, and `_invoke_resilient` passes one that refuses
+to retry a bound stop. `is_retryable` falls back to scanning the message for an
+embedded status code, so `--max-steps 500` produced "Recursion limit of 500
+reached", which read as an HTTP 500 — and the harness retried a graph guaranteed
+to hit the same wall, turning one stop into four.
+
+Tests: `tests/test_limits.py` (host — the arithmetic, with an injected clock, so
+nothing sleeps), the M8 block in `tests/test_cli.py` (image — the classifier, the
+middleware, the exit code, the removable contract asserted as the *absence* of
+the config key), `tests/test_telemetry.py` (the outcome and the `stop_reasons`
+roll-up), `tests/test_config.py` (four-tier resolution), and
+`tests/test_live_model.py` — the tier that catches a bound the harness believes in
+and LangGraph does not honour.
+
+## Scorable patch out (Milestone 8, slice B2)
+
+`harness/bench/patch.py` turns a workspace the agent worked in into a `git diff`
+an *official* scorer can consume — the `model_patch` of a SWE-bench-style
+predictions line. Stdlib + the `git` binary only, so it stays in the host test
+tier and imports no harness sibling.
+
+```bash
+python3 main.py --headless --emit-patch "fix the failing test"
+# -> {"final_message": ..., "model_patch": "diff --git a/...", "exit_code": 0}
+```
+
+**`--emit-patch` is a convenience, not the mechanism.** There is exactly one
+extractor and the *driver* calls it directly, against a workspace the driver
+prepared. A foreign harness (Aider, SWE-agent, Claude Code) has no such flag and
+never will, so a sweep that depended on one could never compare anything — and
+two implementations of `git add -A -N` is two chances to get the untracked-file
+case wrong, in which the one that gets it wrong is the one nobody is looking at.
+The flag exists for an operator running a single instance by hand.
+
+Four things are load-bearing, each guarding a failure that is otherwise silent:
+
+- **Intent-to-add.** `git diff` shows *nothing* for an untracked file. An agent
+  that fixes a bug by adding a new module would emit an **empty patch** — which
+  applies cleanly as a no-op and scores zero with a signature identical to "the
+  model did nothing". `git add -A -N` is what makes the new file visible.
+- **The real index is never touched.** The intent-to-add marks go into a
+  throwaway `GIT_INDEX_FILE` **outside the workspace**, seeded with `read-tree
+  <base>`. Extraction is therefore read-only with respect to the operator's repo
+  *and* independent of whatever the agent staged mid-run. Outside the workspace
+  is not fussiness — measured: a scratch index inside it gets swept up by
+  `git add -A` into the very diff it is computing.
+- **Exclusion is by pathspec** (`:(exclude).deepagents` and four more), never by
+  filtering the diff text afterwards. A unified diff edited after the fact does
+  not apply.
+- **The base is a SHA recorded at startup, not `HEAD`.** `git-pr` commits at
+  `session.end`, and after a commit `git diff HEAD` is empty — the patch is
+  silently lost and looks exactly like an agent that changed nothing. The diff is
+  also taken from `run_batch`, *before* `main`'s `finally` runs `session.end`, so
+  the tree is still dirty when it is read.
+
+`model_patch` is on the headless payload as **`null` when the flag is off** —
+present, not absent, the same convention M6 used for `run_id`/`topic`/`usage_log`
+— and with the flag off **no git subprocess runs at all**. `--emit-patch` on a
+workspace with no base commit **refuses to start** rather than reporting a null
+that cannot be told apart from "you did not ask".
+
+Tests: `tests/test_bench_patch.py` (host, skips without `git`) drives the
+extractor **the way the driver does**, not through the flag; the B2 block in
+`tests/test_cli.py` covers the wiring and the removable contract; and
+`tests/test_live_model.py::test_a_real_turn_produces_a_patch_that_actually_applies`
+is the one a stub cannot substitute for. Every patch assertion is made by
+**applying the patch** (`git apply --check`) against a *fresh* copy of the base —
+never by substring, which is M7 §0.2's lesson: a substring assertion against a
+serialised blob cannot tell a correct artifact from a plausible-looking one.
+
+## Benchmark sweeps — `harness bench` (Milestone 8, slices B3–B5)
+
+Run a pinned dataset of coding tasks through the harness, unattended, and get two
+files an *official* scorer and a human can each read.
+
+```bash
+cd deepagent-image/project
+python -m harness bench run ../../benchmarks/gold/gold.jsonl \
+    --out /tmp/gold-run --max-steps 120 --max-seconds 900
+python -m harness bench show --out /tmp/gold-run
+```
+
+| File | Contents |
+|---|---|
+| `predictions.jsonl` | **exactly** `instance_id`, `model_name_or_path`, `model_patch` |
+| `runs.jsonl` | everything else: outcome, `stop_reason`, both exit codes, the wall-clock decomposition, per-tool counts, tokens, cost |
+
+`predictions.jsonl` carries three keys and nothing else because anything extra
+risks a scorer rejecting the file. **Scoring is a hard non-goal** — correctness
+comes from the benchmark's own evaluation harness, and a scorer written here
+would be a number nobody else could compare against.
+
+**`--out` is a container, not a single sweep's directory.** Each invocation of
+`harness bench run` gets its own `run-<timestamp>-<hex>` subfolder underneath
+it, holding everything that invocation produced — `predictions.jsonl`,
+`runs.jsonl`, `scratch/`, and `state/<instance_id>/` (`usage.jsonl`,
+`session.json`, `raw-trace/` when enabled):
+
+```
+bench-out/
+├── run-20260818-150531-dee21e/
+│   ├── predictions.jsonl
+│   ├── runs.jsonl
+│   ├── scratch/
+│   └── state/gold-001-off-by-one/{usage.jsonl,session.json,raw-trace/}
+└── run-20260818-160210-a1b2c3/
+    └── ...
+```
+
+`resolve_run_dir` picks which subfolder an invocation writes into: the most
+recent one is **reused** when it is not yet complete for the instances this
+invocation selected (resume, one level up from the per-instance resume
+`completed_instance_ids` already does — a sweep killed mid-way continues in the
+same folder), and a **new** one is created when the most recent is already
+complete for that selection, so re-running a finished sweep never reads as a
+silent no-op. `bench show --out <dir>` accepts either a container (reports the
+most recent run inside it) or a specific run's own folder directly — the same
+detection (does `predictions.jsonl` sit right in `<dir>`?) also keeps the
+pre-nesting flat layout working unchanged for anyone pointing `--out` at an
+already-finished sweep's folder.
+
+**`harness bench run` refuses to start without `--max-steps` and `--max-seconds`.**
+The harness itself still defaults to no bound (that is a choice about interactive
+runs), so the driver is where the requirement lives: a sweep on an inherited
+`recursion_limit` of 10007 is unbounded, and that must not be reachable by
+forgetting a flag.
+
+**A dataset instance can ask for a tighter bound than the CLI flags, never a
+looser one (post-B5 follow-on, `milestone8_invariants.md` 7a).** `dataset.Instance`
+carries optional `max_steps`/`max_seconds`; `driver.effective_limits` clamps them
+to `min(instance_value, ceiling)` before the runner sees them, logs once when a
+clamp happens, and `runs.jsonl`'s `limits` field records the bound *actually
+used* (plus `clamped_to_ceiling`), not just the sweep's ceiling. This is what
+lets one sweep mix a fast toy instance (`--max-steps` on the CLI stays the safety
+ceiling; the instance itself asks for far less) with a slower multi-file one
+without either starving the other or reopening invariant 7's "never unbounded" —
+a dataset file is authored data, not an operator override, so it can tighten the
+rope but never lengthen it.
+
+**It runs on the host, one container per instance**, driving `run-docker.ps1` /
+`run-docker.sh`. Three reasons: a clean container per instance *is* the isolation;
+the whole security posture (mask, state dir, netjail, caps) comes along for free;
+and the driver stays keyless and stdlib-only, routed through `entry.dispatch` like
+`telemetry` / `doctor` / `config`. Serial on purpose — one local Ollama daemon and
+one GPU, so parallel instances would contend for the same weights and make
+`model_ms` meaningless.
+
+Four launch decisions are the **driver's**, not the harness's, and each closes a
+silent failure:
+
+- **`DEEPAGENTS_WORKFLOWS_DIR` points at a path that does not exist**, so
+  `git-branch` and `git-pr` never run (the loader returns early on a missing
+  directory). Their commit would empty `git diff <base>` and lose the patch — and
+  a 50-instance sweep would otherwise open 50 pull requests.
+- **`SEED_WORKSPACE=0`.** `run-docker` writes `environment.yml`, `.gitignore` and
+  `scripts/run-in-env.sh` into a workspace missing them — right for an interactive
+  session, wrong for a benchmark instance, which must be exactly what its dataset
+  says. Measured: all three came out in every prediction of the first sweep.
+- **`STATE_HOST_DIR` per instance, always absolute.** So the telemetry the driver
+  joins is that instance's, and so the driver can find `usage.jsonl` without
+  re-deriving a path hash the launcher owns. `bench_main` resolves `--out` (and
+  `--scratch`, if given) to absolute **before** either downstream path is built,
+  because `HolderRunner.invoke` launches the launcher with `cwd=repo_root` — not
+  the directory `harness bench run` was invoked from, which is exactly what the
+  worked example above is (`cd deepagent-image/project`, `--out ../../bench-out`).
+  A relative path crossing that boundary means two different things to the two
+  processes that read it; measured once (an operator's real run, not review):
+  the launcher's own `if (-not (Test-Path $WorkspacePath)) { New-Item ... }`
+  silently created an *empty* directory two levels above the repo and mounted
+  it, so every instance correctly found nothing to fix and produced an empty
+  patch. Not a model failure — a workspace that was never really there.
+- **The driver owns the scratch copy, not `EPHEMERAL=1`.** Ephemeral mode reverts
+  the tree *on container close*, so a patch could only be taken from inside — i.e.
+  only our own harness could produce one. A driver-owned tree can be diffed after
+  the process exits, which is what a cross-harness tier needs.
+
+**`--raw-trace {file,console,both}`** forwards M7's raw trace per instance, off by
+default. `file` is the useful one for a bad patch: the sink already lands at
+`<state-dir>/raw-trace/<run_id>.log`, which — now that `STATE_HOST_DIR` is pinned
+per instance under `<run-dir>/state/<instance_id>/` — sits right beside that
+instance's own `usage.jsonl`, in the same per-sweep folder as `predictions.jsonl`
+and `runs.jsonl`. `console`/`both` are wired the same way but weaker
+for this: `runs.jsonl`'s `stderr_tail` is dropped on any instance that didn't
+fail, which is exactly the successful-but-empty-patch case this flag exists to
+debug.
+
+**The `Runner` seam is declared, with one implementation.** `HolderRunner` is the
+only runner here; tier 2 adds Aider/SWE-agent/Claude Code adapters. Patch
+extraction is deliberately **not** on the protocol — the driver does it uniformly
+for every runner, which is what makes a comparison fair rather than a comparison
+of whose extractor is better. `capabilities()` lets a runner say what it can
+measure, and the ledger writes **`null`** for the rest, never an estimate.
+
+**Resume is real:** both files are append-only and flushed per instance, and a
+re-run skips ids already in `predictions.jsonl`. A sweep killed at instance 40 of
+50 keeps 39. One instance failing never aborts the sweep — it gets a prediction
+with an empty patch and a ledger row carrying its outcome.
+
+**Read `bench show`'s two clocks separately.** `wall clock` is the container
+lifetime the driver timed; `harness` is what the harness measured inside it. The
+difference is container start-up (~18s each), real time a sweep spends that the
+harness structurally cannot see, so it is its own column rather than a mysterious
+gap in the decomposition.
+
+### The gold set (`benchmarks/gold/`)
+
+Five small self-contained Python projects, each an initialised git repo with one
+commit, a seeded bug, a failing test that pins it, and a passing suite around it.
+They vary the **loop shape**, not the domain — each is a distinct way the agent
+can fail that a single instance could not distinguish: a one-line edit, a bug in a
+module the prompt does not name, a symptom that must be reproduced before it can
+be fixed, a regression trap where the tempting fix breaks two other tests, and a
+fix that requires creating a **new file** (the case that silently produces an
+empty patch without `git add -A -N`).
+
+`tests/test_gold_set.py` keeps the set honest: every instance is a repo with a
+clean tree, every `fail_to_pass` command really fails on the seeded state, every
+`pass_to_pass` command really passes. A rotted fixture otherwise reads exactly
+like a weak model. It **skips** when `benchmarks/` is absent, because deleting
+that directory must break nothing.
+
+### The spec set (`benchmarks/spec/`) — a different capability genre, not more of the same
+
+Five small **implement-from-a-spec** instances (leap year, run-length
+encode/decode, matrix rotation, word frequencies, balanced brackets): a stub
+function that `raise NotImplementedError`, a docstring, and a test suite —
+**no existing behaviour to localize a defect in**. Every gold-set instance is
+"read code, find what's wrong with it"; these are "read a spec, write code that
+satisfies it," which is closer to what Aider's polyglot benchmark exercises
+(tier 2) than to SWE-bench (tier 3, and the gold set's own shape). Deliberately
+**Python-only rather than true multi-language** — the image ships no
+C++/Go/Java/Rust toolchain (`Dockerfile` has no compiler in its `apt-get
+install` list), so a real polyglot set would need per-instance toolchain
+provisioning that does not exist yet. This gets the capability-genre coverage
+without that lift. Each instance is authored with a **tighter-than-gold**
+per-instance bound (`max_steps <= 60`, `max_seconds <= 300` — no existing suite
+to run repeatedly while narrowing a cause, so far fewer steps are needed),
+which is what first exercised `driver.effective_limits` against a real
+dataset rather than only its unit tests.
+
+`tests/test_spec_set.py` mirrors `test_gold_set.py`'s checks, plus one this set
+adds: a reference implementation was verified (by hand, once, at authoring time
+— not shipped) to make every instance's suite pass, so a set nobody can actually
+solve is caught here rather than read as "the model is weak." Same
+skip-when-`benchmarks/`-is-absent contract.
+
+### The silver set (`benchmarks/silver/`) — one step up in scale from gold, not a leap to mini-project
+
+Three instances, each **4-7 files with real cross-module coupling**, one step
+harder than the gold set's mostly-one-file localize-and-fix, deliberately short
+of a full mini-project (still runs offline, no framework/dependency beyond the
+stdlib): an event published under one name and subscribed under another
+(`001-event-wiring`), a delete that doesn't propagate through a
+store→cache→service→api chain (`002-cache-invalidation`), and a "shared" retry
+budget that turns out not to be shared across call sites
+(`003-retry-budget`). Each bug is real and isolated — the seeded state's
+`pass_to_pass` commands (every silver instance has at least one, unlike spec)
+already pass, proving the bug doesn't entangle the whole instance — but finding
+it means tracing a call across three or four files that each look correct
+read in isolation, which the gold set's instances don't require. Authored with
+a per-instance bound **above** the recorded gold baseline
+(`milestone8_baseline.md`: 120 steps / 900 seconds) — `max_steps: 150`,
+`max_seconds: 1200` — the other side of the `effective_limits` clamp from the
+spec set.
+
+`tests/test_silver_set.py` mirrors `test_gold_set.py`'s checks, plus a
+file-count guard (`>= 3` source files at the instance root) that would fail
+loudly if a future silver instance shrank back to gold-set scale by accident.
+
+`docs/milestones/in-progress/milestone8_baseline.md` is the B5 record: what a
+green sweep looked like, on what host, against which model tag, under which
+bounds — plus the three defects the first sweeps found. Re-baseline whenever any
+of those change; a model upgrade is a re-baseline, not a regression.
+
+### The bench pytest image — a working test runner inside the container (post-B5 fix)
+
+`docs/milestones/in-progress/milestone8_selftest_findings.md` §1 found that **every**
+gold-set instance, in every self-test sweep, had zero working route to a test
+runner inside its own container: the shippable `deepagent-harness` runtime image
+ships no pytest (deliberately — see the Dockerfile's runtime-stage header), the
+workspace conda env never exists for a `SEED_WORKSPACE=0` instance with no
+`environment.yml`, and `AGENTS.md`'s manual-activation fallback used `source`,
+which the agent's `/bin/sh` (dash) has no builtin for. A model can still
+one-shot a correct fix by reading source, but it can never *verify* one — the
+capability the gold set's `gold-003-read-the-failure` instance exists to
+exercise.
+
+Fix: a **separate image tag**, `deepagent-harness-bench` — the `bench` Dockerfile
+stage, `runtime` plus `pytest` installed into `/opt/venv` (the harness venv,
+already first on `PATH`) and nothing else, no `tests/`. It is **not** the
+shippable image; that one stays pytest-free. Build it explicitly
+(`scripts/build.{ps1,sh} -Bench` / `BENCH=1 ./build.sh`); it is not built by a
+plain `build.ps1`/`build.sh` run. `run-docker.{ps1,sh}` now read the image tag to
+run from **`DEEPAGENTS_IMAGE`** (default `deepagent-harness`) instead of a
+hardcoded literal, and `HolderRunner.build_env` (`harness/bench/runner.py`) sets
+it to `deepagent-harness-bench` **unconditionally** for every bench instance —
+not opt-in, because an instance's ability to verify its own patch must not
+depend on an operator remembering a flag. `check-parity.{sh,ps1}` gates
+`DEEPAGENTS_IMAGE` as a semantic-parity marker, same reasoning as `STATE_HOST_DIR`
+/ `SEED_WORKSPACE`: dropped from one launcher only, a sweep on that platform
+silently reverts to the pytest-less runtime image with no error anywhere.
+
+Pytest lands in `/opt/venv`, not a workspace conda env, because a benchmark
+instance is plain-stdlib code with no `environment.yml` — there is no workspace
+env to put it in, and this is the test-running *tool* the driver supplies
+regardless of what the instance ships, not one of the workspace's own
+dependencies (the two-stack rule is about the latter). `AGENTS.md`'s manual
+fallback now uses `.` instead of `source`, and `conda-init-workspace.sh` exits 0
+(not 1) when `environment.yml` is absent — a workspace with no conda
+dependencies has nothing to activate, which is not an error.
+
+### `harness bench score` — UNOFFICIAL local diagnostic (post-B5 addition)
+
+`harness/bench/score.py`, deliberately **not** part of the §9 non-goal it looks
+adjacent to. §9's "no bespoke scorer, ever" is about the number that gets
+compared against someone else's run — a self-authored gold set scored by a
+self-authored scorer is grading your own homework twice, and `dataset.py`'s
+`fail_to_pass`/`pass_to_pass` are documented as "carried, not run" for exactly
+that reason. This is the opposite use: **local-only, never published, never
+compared against anyone else's number** — the question it answers is "is my
+harness (or this run's settings) even capable of solving these, or is the
+model" — which is diagnosis, not scoring.
+
+```bash
+python -m harness bench score benchmarks/gold/gold.jsonl --out /tmp/gold-run
+```
+
+For each row in `predictions.jsonl`: a **fresh** clone of the instance's base
+state via `driver.prepare_workspace` (never the driver's post-sweep `scratch/`
+— stale env or leftover files there would make a patch look like it fixed
+something it didn't), `git apply` the `model_patch`, then run the dataset's own
+`fail_to_pass` then `pass_to_pass` commands. Writes `<run-dir>/scores.jsonl` —
+a **separate** file from `predictions.jsonl`/`runs.jsonl`, never read by
+`bench run` or `bench show`, so the official contract is untouched by this
+existing at all. Three outcomes, not two, and keeping them apart is the whole
+point:
+
+| Outcome | Meaning |
+|---|---|
+| `apply_failed` | the patch itself is broken — an extractor/harness bug, not a model judgement |
+| `unresolved` | patch applied, `fail_to_pass`/`pass_to_pass` still not all green — the model didn't solve it |
+| `resolved` | applied and every test green |
+| `unscored` (`resolved: null`) | the instance carries no `fail_to_pass` commands — measures nothing, not a failure |
+
+Needs `pytest` importable by whatever runs the command — a scoring-time
+requirement, not a harness dependency (same as `tests/test_gold_set.py` already
+has for running these same commands directly). Tests: `tests/test_bench_score.py`
+(host, skips without `git`).
 
 ## Present / past memory (Milestone 2)
 
@@ -1392,6 +1821,7 @@ When a session is running, type these at the `you>` prompt:
 | `/refresh [subpath]` | Pull live host edits into ephemeral workspace copy (ephemeral mode only). Omit subpath to refresh root. | `/refresh src/` |
 | `/config` | Show resolved config (source-tagged); `set <field> <value>` edits one live field; `save` persists session edits to the profile | `/config set model openai:gpt-5.5` |
 | `/config set raw_trace` | Raw prompt/response trace (`off`/`file`/`console`/`both`). Bare (no value) opens the picker. `console`/`both` print the record **instead of** the answer. | `/config set raw_trace file` |
+| `/config set max_steps` | Hard stops (M8): also `max_seconds` / `max_turns`. `max_steps` bounds the ReAct loop inside one turn and takes effect on the NEXT turn, not the running one. | `/config set max_steps 40` |
 
 ## Admin Commands (keyless, outside container)
 
@@ -1421,6 +1851,26 @@ harness config security                     # security-only wizard + .agentignor
 harness telemetry show [--run <run-id>] [--state-dir <path>]
 harness telemetry list [--topic LABEL] [--limit N]
 harness telemetry pr-block [--run <run-id>]  # the markdown block open-pr.sh appends
+
+# Benchmark sweeps (Milestone 8) -- runs the harness over a pinned dataset,
+# one container per instance, and writes predictions.jsonl + runs.jsonl.
+# Both bounds are REQUIRED: an unbounded sweep is the failure mode M8 removes.
+# --out is a CONTAINER (default bench-out): each invocation gets its own
+# run-<timestamp>-<hex> subfolder, reused if incomplete, else a new one.
+harness bench run <dataset.jsonl> --max-steps N --max-seconds T \
+    [--out DIR] [--limit N] [--only ID,ID] [--dry-run] [--model SPEC] [--net-jail] \
+    [--raw-trace file|console|both]          # M7 trace per instance, for troubleshooting
+harness bench show [--out DIR]               # the container's latest run, or a run's own dir
+
+# UNOFFICIAL local diagnostic (harness/bench/score.py) -- NOT the M8 contract.
+# §9 "no bespoke scorer, ever" is about a number compared against anyone else's
+# run; this is a local-only fresh-clone-+ git apply + fail_to_pass/pass_to_pass
+# check, for telling "harness didn't converge" apart from "model isn't capable
+# of this" on your own gold set. Writes scores.jsonl beside predictions.jsonl /
+# runs.jsonl -- additive, never read by `bench run`/`bench show`. Needs pytest
+# importable by whatever runs this command (same requirement test_gold_set.py
+# already has for running these same commands directly).
+harness bench score <dataset.jsonl> [--out DIR] [--only ID,ID]
 ```
 
 "Keyless" here means no API key, no network and no model — **and, since M5 §0.1 F6
@@ -1449,6 +1899,8 @@ how to disable them, and what behavior they enable/disable:
 | Unified Config profile | M5 | n/a (`.harness-profile.yaml`) | off (no file) | Never; hand-edit `.env`/flags for a one-off | No `.harness-profile.yaml` present ⇒ every knob resolves exactly as it did pre-M5 (env var → default) |
 | Telemetry | M6 | `DEEPAGENTS_TELEMETRY` | 1 | Rarely — the run you want telemetry for is the one you did not expect to go wrong | No `usage.jsonl`, no `session.json`, no PR block, no middleware appended, no new stderr line |
 | Raw trace | M7 | `DEEPAGENTS_RAW_TRACE` | `off` | n/a — off IS the default; turn it **on** (`file`/`console`/`both`) to debug a model, then back off | Middleware installed but a pure pass-through: no file, no directory, no output, no formatting performed |
+| Hard stops | M8 | `DEEPAGENTS_MAX_STEPS` / `_MAX_SECONDS` / `_MAX_TURNS` | unset | n/a — unset IS the default; set one to bound a run | No `recursion_limit` in the graph config, no deadline computed, no turn counter compared. Absent, not infinite |
+| `--emit-patch` | M8 | `DEEPAGENTS_EMIT_PATCH` | off | n/a — off IS the default; turn it on to get a scorable diff on the headless JSON | No git subprocess runs; `model_patch` is `null` (present, not absent) |
 
 **Removable contract:** Each "off" state is byte-for-byte identical to the prior milestone 
 (see [Glossary](../docs/README.md#glossary)). E.g., `DEEPAGENTS_MASK=0` ⇒ M3 parity.
