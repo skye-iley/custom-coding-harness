@@ -134,6 +134,14 @@ class HolderRunner:
     launcher: Path | None = None
     model: str | None = None
     net_jail: bool = False
+    # M7's raw trace, forwarded per instance. `None` (the default) means the
+    # flag is never passed -- byte-for-byte the pre-existing behaviour. `"file"`
+    # is the troubleshooting case this exists for: M7's file sink already lives
+    # at `<state-dir>/raw-trace/<run_id>.log`, and once `state_root` is pinned
+    # per instance (below), that puts the trace right next to this instance's
+    # own `usage.jsonl` -- one folder to open when an instance's patch needs
+    # explaining, not a console log mixed across five containers' stderr.
+    raw_trace: str | None = None
     state_root: Path | None = None
     env: dict[str, str] = field(default_factory=dict)
     timeout_slack_seconds: float = 120.0
@@ -174,6 +182,8 @@ class HolderRunner:
         ]
         if self.model:
             forwarded += ["--model", self.model]
+        if self.raw_trace:
+            forwarded += ["--raw-trace", self.raw_trace]
         forwarded.append(prompt)
 
         if self._is_windows():

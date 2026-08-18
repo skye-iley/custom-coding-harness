@@ -676,13 +676,32 @@ silent failure:
   `scripts/run-in-env.sh` into a workspace missing them — right for an interactive
   session, wrong for a benchmark instance, which must be exactly what its dataset
   says. Measured: all three came out in every prediction of the first sweep.
-- **`STATE_HOST_DIR` per instance**, so the telemetry the driver joins is that
-  instance's, and so the driver can find `usage.jsonl` without re-deriving a path
-  hash the launcher owns.
+- **`STATE_HOST_DIR` per instance, always absolute.** So the telemetry the driver
+  joins is that instance's, and so the driver can find `usage.jsonl` without
+  re-deriving a path hash the launcher owns. `bench_main` resolves `--out` (and
+  `--scratch`, if given) to absolute **before** either downstream path is built,
+  because `HolderRunner.invoke` launches the launcher with `cwd=repo_root` — not
+  the directory `harness bench run` was invoked from, which is exactly what the
+  worked example above is (`cd deepagent-image/project`, `--out ../../bench-out`).
+  A relative path crossing that boundary means two different things to the two
+  processes that read it; measured once (an operator's real run, not review):
+  the launcher's own `if (-not (Test-Path $WorkspacePath)) { New-Item ... }`
+  silently created an *empty* directory two levels above the repo and mounted
+  it, so every instance correctly found nothing to fix and produced an empty
+  patch. Not a model failure — a workspace that was never really there.
 - **The driver owns the scratch copy, not `EPHEMERAL=1`.** Ephemeral mode reverts
   the tree *on container close*, so a patch could only be taken from inside — i.e.
   only our own harness could produce one. A driver-owned tree can be diffed after
   the process exits, which is what a cross-harness tier needs.
+
+**`--raw-trace {file,console,both}`** forwards M7's raw trace per instance, off by
+default. `file` is the useful one for a bad patch: the sink already lands at
+`<state-dir>/raw-trace/<run_id>.log`, which — now that `STATE_HOST_DIR` is pinned
+per instance under `<out>/state/<instance_id>/` — sits right beside that
+instance's own `usage.jsonl`. `console`/`both` are wired the same way but weaker
+for this: `runs.jsonl`'s `stderr_tail` is dropped on any instance that didn't
+fail, which is exactly the successful-but-empty-patch case this flag exists to
+debug.
 
 **The `Runner` seam is declared, with one implementation.** `HolderRunner` is the
 only runner here; tier 2 adds Aider/SWE-agent/Claude Code adapters. Patch
@@ -1663,7 +1682,8 @@ harness telemetry pr-block [--run <run-id>]  # the markdown block open-pr.sh app
 # one container per instance, and writes predictions.jsonl + runs.jsonl.
 # Both bounds are REQUIRED: an unbounded sweep is the failure mode M8 removes.
 harness bench run <dataset.jsonl> --max-steps N --max-seconds T \
-    [--out DIR] [--limit N] [--only ID,ID] [--dry-run] [--model SPEC] [--net-jail]
+    [--out DIR] [--limit N] [--only ID,ID] [--dry-run] [--model SPEC] [--net-jail] \
+    [--raw-trace file|console|both]          # M7 trace per instance, for troubleshooting
 harness bench show [--out DIR]               # summarize a completed sweep
 ```
 

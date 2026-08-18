@@ -255,6 +255,54 @@ cost. The gold set is exercised end to end by a real sweep, not only by the suit
     as the run that produced it, and "reasoned through" is not the same claim as
     "run."
 
+22. **A relative `--out` silently ran the whole sweep against an empty phantom
+    workspace — found from a real user run, not review.** `harness bench run`
+    was invoked exactly the way §5's example shows it (`cd
+    deepagent-image/project`, `--out ../../bench-out`), and every one of 5
+    instances came back with an empty patch. First read as model behaviour
+    (the model's own tool calls — `ls`, `glob`, `read_file` — looked like real
+    exploration that just never reached an edit). It wasn't: `bench_main` built
+    `out_dir`/`state_root` as **relative** `Path`s, but `HolderRunner.invoke`
+    launches `run-docker.ps1` with `cwd=repo_root` — a directory that is *not*
+    the one this process started from whenever the documented example is
+    followed literally. The same relative string then means two different
+    absolute locations to two different processes: the driver's own
+    `shutil.copytree` resolved it correctly (against its own cwd) and
+    populated the real scratch copy; the launcher resolved the *identical*
+    string against `repo_root` and got a location two directories above the
+    repo that had never existed — and `run-docker.ps1`'s own
+    `if (-not (Test-Path $WorkspacePath)) { New-Item ... }` auto-created it,
+    empty, and mounted that. Every instance's agent then correctly found
+    nothing to fix. The state dir landed the same way, which is what made
+    `runs.jsonl`'s own `outcome`/`tool_calls` read as `None`/`{}` — a second,
+    independent symptom of the one root cause, not two bugs.
+
+    Fixed by resolving `out_dir` (and `--scratch`, if given) to absolute in
+    `bench_main`, once, before either downstream path is built — see
+    `driver.py`'s comment at that line for why `.resolve()` is not a style
+    choice here. Verified live: re-ran the same relative-`--out` invocation
+    after the fix and the phantom directory did not reappear; the real
+    workspace was mounted, the agent called `edit_file`, and the patch applied.
+
+    Test-suite lesson generalizes from item 21: a path that crosses a
+    **subprocess boundary with a different `cwd`** needs to be absolute before
+    it crosses, and nothing in the type system says so — `Path` doesn't carry
+    "resolved" as a fact, so the bug reads as ordinary code until two processes
+    disagree about what it means.
+
+23. **`--raw-trace {file,console,both}` added to `harness bench run`**, forwarded
+    per instance exactly like `--model`. Not a fix — asked for, while
+    diagnosing item 22, as a standing troubleshooting tool: M7's file sink
+    already lives at `<state-dir>/raw-trace/<run_id>.log`, and once item 22's
+    fix pins `state_root` per instance under `<out>/state/<instance_id>/`,
+    `file` mode puts the trace right beside that instance's own `usage.jsonl`
+    — one folder to open, not a console log interleaved across five
+    containers' stderr. `console`/`both` are wired identically but are the
+    weaker choice for this use: `runs.jsonl`'s `stderr_tail` is only kept on a
+    **failed** instance (`exit_code` truthy) — the exact case this exists to
+    debug, a *successful*-but-empty-patch instance, drops it. Off by default;
+    no effect on any existing invocation.
+
 ---
 
 ## 1. Goal & Definition of Done

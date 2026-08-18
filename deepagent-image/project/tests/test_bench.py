@@ -259,6 +259,16 @@ def test_every_forwarded_flag_is_spelled_with_a_double_dash(tmp_path):
     assert cmd[-1] == "fix it"
 
 
+def test_raw_trace_is_forwarded_only_when_set(tmp_path):
+    r = _runner(tmp_path, raw_trace="file")
+    cmd = r.build_command(tmp_path / "ws", "fix it", runner_mod.Limits(40, 600))
+    assert cmd[cmd.index("--raw-trace") + 1] == "file"
+
+    off = _runner(tmp_path)
+    cmd_off = off.build_command(tmp_path / "ws", "fix it", runner_mod.Limits(40, 600))
+    assert "--raw-trace" not in cmd_off
+
+
 def test_the_stop_parsing_token_is_never_used(tmp_path):
     # `--%` was named as a fallback in an early draft and would itself have been
     # the bug: it lands as a literal argument and collapses the rest into one
@@ -797,6 +807,49 @@ def test_bench_run_refuses_to_start_without_both_bounds(argv, capsys):
 def test_bench_run_rejects_a_nonsensical_bound(capsys):
     with pytest.raises(SystemExit):
         driver.bench_main(["run", "d.jsonl", "--max-steps", "0", "--max-seconds", "600"])
+
+
+def test_relative_out_resolves_before_the_runner_is_built(tmp_path, monkeypatch):
+    """Regression guard for the empty-workspace bug.
+
+    `HolderRunner.invoke` launches run-docker with `cwd=repo_root` -- generally
+    NOT the directory this process was started from (the documented example
+    runs `harness bench run` from `deepagent-image/project` with a relative
+    `--out ../../bench-out`). A relative `out_dir` then means two different
+    things to two different processes: this one resolves it against its own
+    cwd; the launcher resolves the identical string against `repo_root`.
+    Measured, not theorised: that mismatch made `run-docker.ps1`'s own
+    `if (-not (Test-Path $WorkspacePath)) { New-Item ... }` auto-create an
+    EMPTY directory two levels above the repo and mount THAT -- every instance
+    then correctly found nothing to fix and produced an empty patch, and the
+    state dir landed the same way, invisible to `runs.jsonl`'s own join.
+    """
+    captured = {}
+
+    class _CapturingRunner:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def capabilities(self):
+            return frozenset()
+
+        def invoke(self, *a, **k):
+            raise AssertionError("dry run must never reach invoke")
+
+    bench = tmp_path / "b"
+    _seeded_repo(bench, "001")
+    ds = _dataset(bench, _instance(instance_id="a", workspace="001"))
+
+    monkeypatch.setattr(driver, "HolderRunner", _CapturingRunner)
+    monkeypatch.chdir(tmp_path)
+
+    rc = driver.bench_main([
+        "run", str(ds), "--out", "relout",
+        "--max-steps", "5", "--max-seconds", "5", "--dry-run",
+    ])
+    assert rc == 0
+    assert captured["state_root"].is_absolute()
+    assert captured["state_root"] == tmp_path / "relout" / "state"
 
 
 def test_show_reports_empty_patches_prominently(tmp_path):

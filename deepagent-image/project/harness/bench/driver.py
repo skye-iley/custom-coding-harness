@@ -615,6 +615,10 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="run each instance under the deny-all-egress network jail")
     run.add_argument("--scratch", default=None,
                      help="where instance copies are made (default: <out>/scratch)")
+    run.add_argument("--raw-trace", choices=("file", "console", "both"), default=None,
+                     help="M7 raw trace per instance, for troubleshooting a bad patch. "
+                          "'file' lands at <out>/state/<instance_id>/raw-trace/<run_id>.log "
+                          "-- right beside that instance's usage.jsonl. Off by default.")
 
     show = sub.add_parser("show", help="summarize a completed sweep")
     show.add_argument("--out", default="bench-out", help="output directory")
@@ -648,8 +652,23 @@ def bench_main(argv: list[str]) -> int:
     if args.max_steps < 1 or args.max_seconds <= 0:
         parser.error("--max-steps must be >= 1 and --max-seconds > 0")
 
-    out_dir = Path(args.out)
-    scratch_root = Path(args.scratch) if args.scratch else out_dir / "scratch"
+    # .resolve() here, unconditionally -- not a style choice. HolderRunner.invoke
+    # launches run-docker.{ps1,sh} with cwd=repo_root, which is generally NOT the
+    # cwd this process was started from (the docs' own example runs this from
+    # deepagent-image/project with `--out ../../bench-out`). A relative out_dir
+    # would then mean two different things to two different processes: this one
+    # resolves it against its own cwd when it does `shutil.copytree`, and the
+    # launcher resolves the SAME string against repo_root when it builds
+    # -WorkspacePath / STATE_HOST_DIR. Measured, not theorised: with a relative
+    # --out matching the documented example, the launcher's own
+    # `if (-not (Test-Path $WorkspacePath)) { New-Item ... }` auto-created an
+    # EMPTY directory two levels above the repo and bind-mounted THAT -- the real,
+    # populated scratch copy sat untouched one level over. Every instance's agent
+    # then correctly found an empty workspace and produced an empty patch, and the
+    # state dir landed the same way, invisible to `runs.jsonl`'s own join. Not a
+    # model failure; a workspace that was never really there.
+    out_dir = Path(args.out).resolve()
+    scratch_root = Path(args.scratch).resolve() if args.scratch else out_dir / "scratch"
     try:
         repo_root = find_repo_root()
     except RunnerError as exc:
@@ -660,6 +679,7 @@ def bench_main(argv: list[str]) -> int:
         repo_root=repo_root,
         model=args.model,
         net_jail=args.net_jail,
+        raw_trace=args.raw_trace,
         state_root=out_dir / "state",
     )
     try:
