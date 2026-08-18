@@ -40,8 +40,17 @@ dataset_mod = _load("harness.bench.dataset")
 patch_mod = _load("harness.bench.patch")
 driver = _load("harness.bench.driver")
 
-# tests/ -> project/ -> deepagent-image/ -> repo root
-_REPO_ROOT = Path(__file__).resolve().parents[3]
+# tests/ -> project/ -> deepagent-image/ -> repo root (on a host checkout). Inside
+# the built image, tests/ lands at /project/tests -- only two ancestors, not
+# three -- because benchmarks/ is never COPYed into the image (CLAUDE.md
+# "Benchmark sweeps"). `parents[3]` raises IndexError there, which used to crash
+# collection outright rather than let the skip below run. Falling back to the
+# filesystem root points `_DATASET` at a path that structurally cannot exist
+# in-container, so the skipif below still does its job (invariant 28).
+try:
+    _REPO_ROOT = Path(__file__).resolve().parents[3]
+except IndexError:
+    _REPO_ROOT = Path(__file__).resolve().root
 _GOLD = _REPO_ROOT / "benchmarks" / "gold"
 _DATASET = _GOLD / "gold.jsonl"
 
