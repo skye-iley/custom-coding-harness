@@ -1,0 +1,1 @@
+Registering a user should land in the audit log, but it doesn't. Trace the event from where it's published through to where it's (not) picked up -- the bus, the audit wiring, and the metrics wiring all subscribe to the same kind of event, and only one of them is wrong.

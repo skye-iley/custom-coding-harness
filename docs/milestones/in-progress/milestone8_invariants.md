@@ -29,8 +29,10 @@ looks like paranoia about empty patches or misclassified outcomes is that rule a
 > injected clock), the M8 block in `tests/test_cli.py` (the classifier, the middleware, the
 > exit code, and invariant 6 asserted as the *absence* of the config key), the `stopped`
 > cases in `tests/test_telemetry.py`, and two `tests/test_live_model.py` cases — the tier
-> that catches a bound the harness believes in and LangGraph does not honour. **7 is not
-> built**: it belongs to `harness bench run` (B3).
+> that catches a bound the harness believes in and LangGraph does not honour. **7 and 7a
+> are built**: 7 as part of B3 (`harness bench run`'s refusal); 7a as a post-B5 follow-on
+> (per-instance dataset bounds, `harness/bench/dataset.py` + `driver.effective_limits`),
+> pinned in `tests/test_bench.py`.
 
 1. **Each bound actually terminates its own runaway.** With `--max-steps N`, a graph that would loop
    forever ends after at most `N` super-steps. With `--max-seconds T`, a run whose model calls
@@ -62,6 +64,16 @@ looks like paranoia about empty patches or misclassified outcomes is that rule a
 7. **`harness bench run` refuses to start without a step bound and a time bound.** Exit non-zero,
    nothing written. An unbounded sweep is the failure mode this milestone removes; it must not be
    reachable by forgetting a flag.
+
+7a. **A per-instance bound (`dataset.Instance.max_steps`/`max_seconds`) can only tighten the CLI
+    bound, never loosen it.** `driver.effective_limits` computes `min(instance_value, ceiling)`
+    when the instance sets a value; an instance asking for more than the ceiling is clamped, logged
+    once at the point of the clamp, and the *clamped* value — never the requested one — is what
+    reaches the runner and what `runs.jsonl`'s `limits` field records. This is invariant 7 restated
+    one level down: a dataset file is authored data, not an operator override, so it cannot be the
+    thing that makes a sweep unbounded. Pinned by
+    `test_effective_limits_clamps_an_instance_asking_for_more_than_the_ceiling` and the end-to-end
+    `test_a_sweep_invokes_each_instance_with_its_own_effective_limits` (`tests/test_bench.py`).
 
 ## Patch fidelity (the artifact is scorable)
 

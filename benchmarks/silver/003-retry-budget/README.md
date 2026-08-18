@@ -1,0 +1,1 @@
+A batch of jobs is supposed to draw down ONE shared retry budget, but somehow every job gets its own full allowance. Trace the budget object from where it's created in scheduler.py through to where each job actually uses it in worker.py.

@@ -695,6 +695,18 @@ runs), so the driver is where the requirement lives: a sweep on an inherited
 `recursion_limit` of 10007 is unbounded, and that must not be reachable by
 forgetting a flag.
 
+**A dataset instance can ask for a tighter bound than the CLI flags, never a
+looser one (post-B5 follow-on, `milestone8_invariants.md` 7a).** `dataset.Instance`
+carries optional `max_steps`/`max_seconds`; `driver.effective_limits` clamps them
+to `min(instance_value, ceiling)` before the runner sees them, logs once when a
+clamp happens, and `runs.jsonl`'s `limits` field records the bound *actually
+used* (plus `clamped_to_ceiling`), not just the sweep's ceiling. This is what
+lets one sweep mix a fast toy instance (`--max-steps` on the CLI stays the safety
+ceiling; the instance itself asks for far less) with a slower multi-file one
+without either starving the other or reopening invariant 7's "never unbounded" —
+a dataset file is authored data, not an operator override, so it can tighten the
+rope but never lengthen it.
+
 **It runs on the host, one container per instance**, driving `run-docker.ps1` /
 `run-docker.sh`. Three reasons: a clean container per instance *is* the isolation;
 the whole security posture (mask, state dir, netjail, caps) comes along for free;
@@ -776,6 +788,54 @@ clean tree, every `fail_to_pass` command really fails on the seeded state, every
 `pass_to_pass` command really passes. A rotted fixture otherwise reads exactly
 like a weak model. It **skips** when `benchmarks/` is absent, because deleting
 that directory must break nothing.
+
+### The spec set (`benchmarks/spec/`) — a different capability genre, not more of the same
+
+Five small **implement-from-a-spec** instances (leap year, run-length
+encode/decode, matrix rotation, word frequencies, balanced brackets): a stub
+function that `raise NotImplementedError`, a docstring, and a test suite —
+**no existing behaviour to localize a defect in**. Every gold-set instance is
+"read code, find what's wrong with it"; these are "read a spec, write code that
+satisfies it," which is closer to what Aider's polyglot benchmark exercises
+(tier 2) than to SWE-bench (tier 3, and the gold set's own shape). Deliberately
+**Python-only rather than true multi-language** — the image ships no
+C++/Go/Java/Rust toolchain (`Dockerfile` has no compiler in its `apt-get
+install` list), so a real polyglot set would need per-instance toolchain
+provisioning that does not exist yet. This gets the capability-genre coverage
+without that lift. Each instance is authored with a **tighter-than-gold**
+per-instance bound (`max_steps <= 60`, `max_seconds <= 300` — no existing suite
+to run repeatedly while narrowing a cause, so far fewer steps are needed),
+which is what first exercised `driver.effective_limits` against a real
+dataset rather than only its unit tests.
+
+`tests/test_spec_set.py` mirrors `test_gold_set.py`'s checks, plus one this set
+adds: a reference implementation was verified (by hand, once, at authoring time
+— not shipped) to make every instance's suite pass, so a set nobody can actually
+solve is caught here rather than read as "the model is weak." Same
+skip-when-`benchmarks/`-is-absent contract.
+
+### The silver set (`benchmarks/silver/`) — one step up in scale from gold, not a leap to mini-project
+
+Three instances, each **4-7 files with real cross-module coupling**, one step
+harder than the gold set's mostly-one-file localize-and-fix, deliberately short
+of a full mini-project (still runs offline, no framework/dependency beyond the
+stdlib): an event published under one name and subscribed under another
+(`001-event-wiring`), a delete that doesn't propagate through a
+store→cache→service→api chain (`002-cache-invalidation`), and a "shared" retry
+budget that turns out not to be shared across call sites
+(`003-retry-budget`). Each bug is real and isolated — the seeded state's
+`pass_to_pass` commands (every silver instance has at least one, unlike spec)
+already pass, proving the bug doesn't entangle the whole instance — but finding
+it means tracing a call across three or four files that each look correct
+read in isolation, which the gold set's instances don't require. Authored with
+a per-instance bound **above** the recorded gold baseline
+(`milestone8_baseline.md`: 120 steps / 900 seconds) — `max_steps: 150`,
+`max_seconds: 1200` — the other side of the `effective_limits` clamp from the
+spec set.
+
+`tests/test_silver_set.py` mirrors `test_gold_set.py`'s checks, plus a
+file-count guard (`>= 3` source files at the instance root) that would fail
+loudly if a future silver instance shrank back to gold-set scale by accident.
 
 `docs/milestones/in-progress/milestone8_baseline.md` is the B5 record: what a
 green sweep looked like, on what host, against which model tag, under which

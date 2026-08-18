@@ -1,0 +1,1 @@
+A deleted user profile is still returned by the API. The bug is somewhere in the store/cache/service/api chain -- trace a delete request through all four files to find the layer that doesn't actually invalidate.

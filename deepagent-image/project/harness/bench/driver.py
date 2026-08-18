@@ -162,6 +162,33 @@ def _discard(path: Path) -> None:
         _log(f"  ! could not remove scratch workspace {path}")
 
 
+# --- per-instance bounds --------------------------------------------------------
+
+
+def effective_limits(instance, ceiling: Limits) -> tuple[Limits, bool]:
+    """This instance's `Limits`, and whether it was clamped down to fit.
+
+    `ceiling` is what `--max-steps`/`--max-seconds` set for the whole sweep.
+    `instance.max_steps`/`max_seconds` (dataset-authored, optional) may ask for
+    *less* than that -- a toy instance that should stop on a runaway loop long
+    before the ceiling a bigger instance in the same sweep needs. They may never
+    ask for *more*: `min()` against the ceiling, not the instance's own number,
+    is what keeps invariant 7's "never unbounded" true regardless of what a
+    dataset file claims. `max_turns` is never per-instance -- an instance IS one
+    turn (`Limits`'s own docstring), so there is nothing to override.
+    """
+    steps = ceiling.max_steps if instance.max_steps is None else min(instance.max_steps, ceiling.max_steps)
+    seconds = (
+        ceiling.max_seconds if instance.max_seconds is None
+        else min(instance.max_seconds, ceiling.max_seconds)
+    )
+    clamped = (
+        (instance.max_steps is not None and instance.max_steps > ceiling.max_steps)
+        or (instance.max_seconds is not None and instance.max_seconds > ceiling.max_seconds)
+    )
+    return Limits(max_steps=steps, max_seconds=seconds, max_turns=ceiling.max_turns), clamped
+
+
 # --- resume --------------------------------------------------------------------
 
 
@@ -334,6 +361,8 @@ def build_run_row(
     started_at: str,
     ended_at: str,
     patch_error: str | None = None,
+    limits: Limits | None = None,
+    limits_clamped: bool = False,
 ) -> dict:
     """One `runs.jsonl` row: the ledger a sweep is actually read from.
 
@@ -409,6 +438,15 @@ def build_run_row(
         "cost_usd": (_sum_optional(records, "cost_usd") if has_cost else None),
         "patch_empty": patch_mod.is_empty(patch),
         "patch_paths": patch_mod.changed_paths(patch),
+        # The bound this instance actually ran under, not just the sweep's
+        # ceiling -- a per-instance dataset override (dataset.Instance.max_steps/
+        # max_seconds) makes those two potentially different, and a reader of
+        # runs.jsonl needs to know which one a `stopped/steps` outcome means.
+        "limits": (
+            {"max_steps": limits.max_steps, "max_seconds": limits.max_seconds,
+             "clamped_to_ceiling": limits_clamped}
+            if limits is not None else None
+        ),
         "error": result.error or patch_error,
         "stderr_tail": (result.stderr_tail if result.exit_code else ""),
         "started_at": started_at,
@@ -470,9 +508,14 @@ def run_sweep(
     if dry_run:
         for inst in instances:
             mark = "skip (done)" if inst.instance_id in done else "run"
-            _log(f"{mark}: {inst.instance_id} <- {inst.resolve_workspace(dataset_path)}")
+            eff, clamped = effective_limits(inst, limits)
+            note = " (clamped to ceiling)" if clamped else ""
+            _log(
+                f"{mark}: {inst.instance_id} <- {inst.resolve_workspace(dataset_path)}"
+                f"  [max_steps={eff.max_steps} max_seconds={eff.max_seconds:g}{note}]"
+            )
         _log(
-            f"dry run: {len(todo)} instance(s) would run with max_steps="
+            f"dry run: {len(todo)} instance(s) would run under a ceiling of max_steps="
             f"{limits.max_steps} max_seconds={limits.max_seconds:g} "
             f"max_turns={limits.max_turns}"
         )
@@ -506,8 +549,15 @@ def run_sweep(
             )
             continue
 
+        eff_limits, clamped = effective_limits(inst, limits)
+        if clamped:
+            _log(
+                f"  ! {inst.instance_id} asked for more than the sweep ceiling "
+                f"(max_steps={inst.max_steps}, max_seconds={inst.max_seconds}); "
+                f"clamped to max_steps={eff_limits.max_steps} max_seconds={eff_limits.max_seconds:g}"
+            )
         try:
-            result = runner.invoke(scratch, inst.task_prompt, limits)
+            result = runner.invoke(scratch, inst.task_prompt, eff_limits)
         except RunnerError as exc:
             # A launcher that cannot be found is not an instance failure — every
             # later instance would fail the same way. Stop and say so.
@@ -536,6 +586,7 @@ def run_sweep(
             started_at, _now_iso(),
             model=(result.payload or {}).get("model"),
             patch_error=patch_error,
+            limits=eff_limits, limits_clamped=clamped,
         )
         _discard(scratch)
 
@@ -557,11 +608,13 @@ def _failed_result(exc: BaseException, elapsed_s: float):
 
 
 def _write_pair(predictions_path, runs_path, inst, result, patch, records,
-                capabilities, started_at, ended_at, *, model, patch_error) -> None:
+                capabilities, started_at, ended_at, *, model, patch_error,
+                limits: Limits | None = None, limits_clamped: bool = False) -> None:
     _append(predictions_path, build_prediction_row(inst, model, patch))
     _append(runs_path, build_run_row(
         inst, result, patch=patch, records=records, capabilities=capabilities,
         started_at=started_at, ended_at=ended_at, patch_error=patch_error,
+        limits=limits, limits_clamped=limits_clamped,
     ))
 
 

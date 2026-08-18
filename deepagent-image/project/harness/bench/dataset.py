@@ -21,6 +21,13 @@ optional today, so the format does not change under tiers 2 and 3.
 (`milestone8.md` §9), and a scorer written here would be a number nobody else
 could compare against.
 
+`max_steps` / `max_seconds` are optional per-instance bound overrides. A dataset
+mixing toy and multi-file instances can give the toy ones a tighter bound than
+the sweep's `--max-steps`/`--max-seconds` ceiling; they can never exceed it — the
+driver clamps (`harness.bench.driver.effective_limits`), never raises the
+ceiling, so `harness bench run`'s refusal to start without a bound (invariant 7)
+stays true regardless of what any one dataset file asks for.
+
 Stdlib only: no yaml, no pydantic, no runtime stack.
 """
 
@@ -54,6 +61,16 @@ class Instance:
     # Tier 3's clone-at-commit source. Parsed and carried so the format is stable
     # across tiers; nothing in tier 1 reads it.
     repo: str | None = None
+    # Per-instance bound overrides. `None` means "use the sweep's --max-steps /
+    # --max-seconds ceiling unchanged" -- the pre-existing behaviour. A dataset
+    # spanning toy and multi-file instances in one sweep otherwise has to run
+    # every instance under the slowest one's bound (wasted ceiling on the toy
+    # tasks) or the fastest one's (the bigger tasks never finish). The driver
+    # still refuses to start without a ceiling (invariant 7) and clamps any
+    # instance value above it -- a dataset entry can ask for less rope, never
+    # more than the operator allowed.
+    max_steps: int | None = None
+    max_seconds: float | None = None
 
     def resolve_workspace(self, dataset_path: Path | str) -> Path:
         """The instance directory, resolved **relative to the dataset file**.
@@ -69,7 +86,22 @@ class Instance:
 
 
 _REQUIRED = ("instance_id", "workspace", "task_prompt")
-_KNOWN = (*_REQUIRED, "base_commit", "fail_to_pass", "pass_to_pass", "repo")
+_KNOWN = (
+    *_REQUIRED, "base_commit", "fail_to_pass", "pass_to_pass", "repo",
+    "max_steps", "max_seconds",
+)
+
+
+def _as_positive_number(value, where: str, key: str, cast):
+    if value is None:
+        return None
+    try:
+        n = cast(value)
+    except (TypeError, ValueError):
+        raise DatasetError(f"{where}: {key} must be a positive number")
+    if n <= 0:
+        raise DatasetError(f"{where}: {key} must be a positive number")
+    return n
 
 
 def _as_commands(value, where: str, key: str) -> tuple[str, ...]:
@@ -103,6 +135,8 @@ def parse_instance(obj: dict, where: str) -> Instance:
         fail_to_pass=_as_commands(obj.get("fail_to_pass"), where, "fail_to_pass"),
         pass_to_pass=_as_commands(obj.get("pass_to_pass"), where, "pass_to_pass"),
         repo=(str(obj["repo"]).strip() if obj.get("repo") else None),
+        max_steps=_as_positive_number(obj.get("max_steps"), where, "max_steps", int),
+        max_seconds=_as_positive_number(obj.get("max_seconds"), where, "max_seconds", float),
     )
 
 

@@ -219,12 +219,112 @@ def test_select_applies_only_then_limit(tmp_path):
     assert [i.instance_id for i in dataset_mod.select(instances, only=("c", "a"))] == ["a", "c"]
 
 
+def test_per_instance_bounds_parse_as_optional(tmp_path):
+    path = _dataset(tmp_path, _instance(max_steps=10, max_seconds=30))
+    inst = dataset_mod.load_dataset(path)[0]
+    assert (inst.max_steps, inst.max_seconds) == (10, 30.0)
+
+    path2 = _dataset(tmp_path, _instance(), name="d2.jsonl")
+    inst2 = dataset_mod.load_dataset(path2)[0]
+    assert (inst2.max_steps, inst2.max_seconds) == (None, None)
+
+
+@pytest.mark.parametrize("field, bad", [("max_steps", 0), ("max_steps", -1),
+                                        ("max_seconds", 0), ("max_seconds", -1.5)])
+def test_a_non_positive_per_instance_bound_is_rejected(tmp_path, field, bad):
+    path = _dataset(tmp_path, _instance(**{field: bad}))
+    with pytest.raises(dataset_mod.DatasetError, match=f"{field} must be a positive number"):
+        dataset_mod.load_dataset(path)
+
+
 def test_an_only_id_that_matches_nothing_is_an_error(tmp_path):
     """Not an empty sweep. The usual cause is a typo, and silently running zero
     instances then reporting a clean sweep is the worst possible answer."""
     path = _dataset(tmp_path, _instance(instance_id="a", workspace="a"))
     with pytest.raises(dataset_mod.DatasetError, match="unknown instance"):
         dataset_mod.select(dataset_mod.load_dataset(path), only=("typo",))
+
+
+# =============================================================================
+# per-instance bounds: the global flags act as a ceiling, never a floor
+# =============================================================================
+
+
+def test_effective_limits_uses_the_ceiling_when_the_instance_sets_nothing():
+    inst = dataset_mod.parse_instance(_instance(), "x:1")
+    eff, clamped = driver.effective_limits(inst, runner_mod.Limits(40, 600))
+    assert (eff.max_steps, eff.max_seconds) == (40, 600)
+    assert clamped is False
+
+
+def test_effective_limits_lets_an_instance_ask_for_less_than_the_ceiling():
+    inst = dataset_mod.parse_instance(_instance(max_steps=5, max_seconds=30), "x:1")
+    eff, clamped = driver.effective_limits(inst, runner_mod.Limits(40, 600))
+    assert (eff.max_steps, eff.max_seconds) == (5, 30.0)
+    assert clamped is False
+
+
+def test_effective_limits_clamps_an_instance_asking_for_more_than_the_ceiling():
+    """The ceiling protects invariant 7's 'never unbounded' -- a dataset entry
+    is data, not an operator override, so it can never raise the bound the
+    operator set on the command line."""
+    inst = dataset_mod.parse_instance(_instance(max_steps=500, max_seconds=5000), "x:1")
+    eff, clamped = driver.effective_limits(inst, runner_mod.Limits(40, 600))
+    assert (eff.max_steps, eff.max_seconds) == (40, 600)
+    assert clamped is True
+
+
+def test_effective_limits_never_overrides_max_turns():
+    # An instance IS one turn -- there is nothing to override per-instance.
+    inst = dataset_mod.parse_instance(_instance(), "x:1")
+    eff, _ = driver.effective_limits(inst, runner_mod.Limits(40, 600, max_turns=1))
+    assert eff.max_turns == 1
+
+
+def test_a_run_row_records_the_bound_actually_used():
+    inst = dataset_mod.parse_instance(_instance(max_steps=5), "x:1")
+    eff, clamped = driver.effective_limits(inst, runner_mod.Limits(40, 600))
+    row = driver.build_run_row(
+        inst, _result(), patch="", records=[], capabilities=frozenset(),
+        started_at="A", ended_at="B", limits=eff, limits_clamped=clamped,
+    )
+    assert row["limits"] == {"max_steps": 5, "max_seconds": 600, "clamped_to_ceiling": False}
+
+
+def test_a_run_row_with_no_limits_given_records_null():
+    inst = dataset_mod.parse_instance(_instance(), "x:1")
+    row = driver.build_run_row(
+        inst, _result(), patch="", records=[], capabilities=frozenset(),
+        started_at="A", ended_at="B",
+    )
+    assert row["limits"] is None
+
+
+@needs_git
+def test_a_sweep_invokes_each_instance_with_its_own_effective_limits(tmp_path):
+    """End-to-end: a per-instance dataset override actually reaches the runner,
+    clamped against the sweep's ceiling, not just computed and discarded."""
+    bench = tmp_path / "b"
+    _seeded_repo(bench, "001")
+    _seeded_repo(bench, "002")
+    ds = _dataset(
+        bench,
+        _instance(instance_id="toy", workspace="001", max_steps=5, max_seconds=20),
+        _instance(instance_id="over-asks", workspace="002", max_steps=999, max_seconds=999),
+    )
+    out = tmp_path / "out"
+    runner = FakeRunner([_result(), _result()])
+
+    driver.run_sweep(ds, out, limits=runner_mod.Limits(40, 600), runner=runner,
+                     scratch_root=tmp_path / "scratch")
+
+    limits_by_call = {call[0].name: call[2] for call in runner.calls}
+    assert limits_by_call["toy"] == runner_mod.Limits(5, 20.0, 1)
+    assert limits_by_call["over-asks"] == runner_mod.Limits(40, 600, 1)
+
+    rows = {r["instance_id"]: r for r in _read(out / "runs.jsonl")}
+    assert rows["toy"]["limits"] == {"max_steps": 5, "max_seconds": 20.0, "clamped_to_ceiling": False}
+    assert rows["over-asks"]["limits"]["clamped_to_ceiling"] is True
 
 
 # =============================================================================

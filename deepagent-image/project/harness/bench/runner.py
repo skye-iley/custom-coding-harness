@@ -46,12 +46,20 @@ class RunnerError(RuntimeError):
 
 @dataclass(frozen=True)
 class Limits:
-    """The bounds every instance runs under.
+    """The bounds one instance runs under.
 
     `max_turns` defaults to 1 because a benchmark instance **is** one turn. The
     other two have no default on purpose: `harness bench run` refuses to start
     without them (invariant 7), and a default here would be exactly the silent
     fallback that refusal exists to prevent.
+
+    A `Limits` built straight from `argv` is the sweep's **ceiling** -- what
+    `driver.effective_limits` clamps every instance's own `max_steps`/
+    `max_seconds` (`dataset.Instance`, optional) down to. A dataset entry can
+    ask for a tighter bound than the ceiling (a toy task that should stop fast
+    on a runaway loop); it can never exceed it -- the ceiling is what the
+    refusal-to-start-unbounded actually protects, and a per-instance value is
+    data, not an operator override.
     """
 
     max_steps: int
