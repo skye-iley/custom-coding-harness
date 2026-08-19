@@ -17,6 +17,7 @@ import pytest
 from _bootstrap import _load
 
 jail = _load("jail")
+agentprofile = _load("profile")
 
 
 def _pairs(args: list[str], flag: str) -> list[tuple[str, str]]:
@@ -142,6 +143,89 @@ def test_state_dir_is_not_bound_when_absent(ws):
     """
     args = jail.bwrap_args(ws, None)
     assert not any("state" in target for _, target in _pairs(args, "--bind") if target != str(ws))
+
+
+# --- AgentProfile bind scoping (M9, milestone9_invariants.md) ----------------
+
+
+def test_no_profile_argument_is_byte_identical_to_the_default_profile(ws, state):
+    """Invariant 1: every existing call site passes no `profile` and must not need
+    editing -- the implicit default and an explicit DEFAULT_PROFILE must agree."""
+    assert jail.bwrap_args(ws, state) == jail.bwrap_args(ws, state, profile=agentprofile.DEFAULT_PROFILE)
+
+
+def test_default_profile_resolves_to_the_exact_pre_m9_bind_pair(ws, state):
+    """Invariant 2: not "an equivalent line" -- the identical two-element pair."""
+    args = jail.bwrap_args(ws, state, profile=agentprofile.DEFAULT_PROFILE)
+    assert (str(ws), str(ws)) in _pairs(args, "--bind")
+
+
+def test_a_readonly_profile_produces_a_ro_bind_instead_of_a_bind(ws, state):
+    """milestone9.md §3.5: the second, deliberately narrower profile proof."""
+    readonly = agentprofile.AgentProfile(
+        name="readonly-docs", binds=[agentprofile.BindEntry(".", "ro")]
+    )
+    args = jail.bwrap_args(ws, state, profile=readonly)
+    assert (str(ws), str(ws)) in _pairs(args, "--ro-bind")
+    assert (str(ws), str(ws)) not in _pairs(args, "--bind")
+
+
+def test_a_scoped_profile_mixes_rw_and_ro_bind_flags(ws, state):
+    """Invariant 5: one --bind, one --ro-bind, not two of the same kind."""
+    scoped = agentprofile.AgentProfile(
+        name="architect",
+        binds=[
+            agentprofile.BindEntry("src", "rw"),
+            agentprofile.BindEntry("docs", "ro"),
+        ],
+    )
+    args = jail.bwrap_args(ws, state, profile=scoped)
+    assert (str(ws / "src"), str(ws / "src")) in _pairs(args, "--bind")
+    assert (str(ws / "docs"), str(ws / "docs")) in _pairs(args, "--ro-bind")
+
+
+def test_scoped_profile_binds_join_onto_workspace(ws, state):
+    """Invariant 6: same join convention as the masked-overmount loop."""
+    scoped = agentprofile.AgentProfile(name="narrow", binds=[agentprofile.BindEntry("src/components", "rw")])
+    args = jail.bwrap_args(ws, state, profile=scoped)
+    assert (str(ws / "src/components"), str(ws / "src/components")) in _pairs(args, "--bind")
+
+
+def test_masked_overmounts_still_land_after_every_profile_bind(ws, state):
+    """Invariant 7: a scoped profile cannot reopen what masking already closed."""
+    empty = jail.ensure_empty_file(state)
+    scoped = agentprofile.AgentProfile(
+        name="architect",
+        binds=[
+            agentprofile.BindEntry("src", "rw"),
+            agentprofile.BindEntry("docs", "ro"),
+        ],
+    )
+    masked = [{"relpath": ".env", "type": "file", "tier": "floor"}]
+
+    args = jail.bwrap_args(ws, state, masked, empty_file=empty, profile=scoped)
+
+    profile_bind_indices = [i for i, a in enumerate(args) if a in (str(ws / "src"), str(ws / "docs"))]
+    overmount_at = max(i for i, a in enumerate(args) if a == str(ws / ".env"))
+    assert overmount_at > max(profile_bind_indices)
+
+
+def test_only_the_workspace_bind_segment_changes_with_a_profile(ws, state):
+    """Invariant 8: system binds, project_root, and the state-dir bind are unaffected.
+
+    Both calls use a single-entry profile (three argv tokens: flag, src, dst), so
+    the substituted segment is exactly indices [i, i+3) and everything outside it
+    must be identical.
+    """
+    default_args = jail.bwrap_args(ws, state)
+    scoped = agentprofile.AgentProfile(name="narrow", binds=[agentprofile.BindEntry("src", "ro")])
+    scoped_args = jail.bwrap_args(ws, state, profile=scoped)
+
+    i = default_args.index("--bind")
+    assert default_args[i : i + 3] == ["--bind", str(ws), str(ws)]
+    assert scoped_args[i : i + 3] == ["--ro-bind", str(ws / "src"), str(ws / "src")]
+    assert default_args[:i] == scoped_args[:i]
+    assert default_args[i + 3 :] == scoped_args[i + 3 :]
 
 
 def test_jail_is_off_by_default():

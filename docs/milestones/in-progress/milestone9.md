@@ -2,9 +2,88 @@
 
 ## 0. Status
 
-**In-progress — doc + `milestone9_invariants.md` written, no code yet.** Checkable properties:
-`milestone9_invariants.md` (same folder) until the milestone moves to `complete/`, at which point
-it folds in here as a section, per `docs/README.md`'s milestone lifecycle.
+**Built — all seven §3 done-when items land on `feat/milestone9-agentprofile`.** Checkable
+properties: `milestone9_invariants.md` (same folder) until the milestone moves to `complete/`, at
+which point it folds in here as a section, per `docs/README.md`'s milestone lifecycle. **The one
+gap found in post-build review is now closed — see §0.2.**
+
+### 0.1 What the build confirmed rather than changed
+
+No design fork in §5 needed revisiting — the build matched the plan exactly:
+
+- `harness/profile.py` (new, stdlib-only, no harness-sibling imports) defines `BindEntry`
+  (workspace-relative-only, per-entry `rw`/`ro`, raises at construction on an absolute path or a
+  `..`-escape) and `AgentProfile` (`name`, `binds`, reserved `harness_profile_key`/`network`).
+  `DEFAULT_PROFILE` is a single `BindEntry(relpath=".", mode="rw")`, and `Path(workspace) / "."`
+  normalizes to `Path(workspace)` exactly (verified), which is what makes invariant 2's "identical
+  two-element pair, not an equivalent one" hold without special-casing `"."`.
+- `jail.bwrap_args` gained `profile: AgentProfile | None = None` (keyword-only, after `*`) and now
+  imports `harness.profile` — the one deliberate exception to "imports no harness sibling" the
+  module's own docstring claims, noted inline as safe because `profile.py` itself imports nothing
+  and so carries no cycle risk. The single hardcoded `--bind` line became a loop over
+  `(profile or DEFAULT_PROFILE).binds`, in the same position between the `project_root` bind and
+  the state-dir bind. `jail.maybe_reexec`'s one internal call site passes no `profile`, so it and
+  the pre-M9 test suite (51 tests) are byte-identical with zero edits.
+- `scripts/sandbox-exec.sh` reads `AGENT_BIND_SCOPE` (`relpath:mode,relpath:mode`); unset or
+  empty short-circuits before the loop body ever runs (invariant 3), and a malformed entry
+  (missing `:mode`, empty relpath, unknown mode) exits 2 before `bwrap` is ever reached — verified
+  via a stub `bwrap` on `PATH` that logs argv instead of exec'ing (`tests/test_sandbox_exec.py`,
+  new, needs a real `bash` — the script uses arrays and `${var@Q}`, not POSIX `sh`).
+- The ordering invariant (masked overmounts strictly after every profile bind, regardless of how
+  many bind lines the profile contributes) and the "only the substituted segment differs" argv-diff
+  invariant are both asserted directly in `tests/test_jail.py`'s new M9 section, argv-equality
+  style — never a substring check, per the M7/M8 lesson.
+- No `run-docker.{ps1,sh}`, `config.py`, or `.harness-profile.yaml` touched, and `check-parity`
+  stays green untouched — there is still no selection surface (§4, §6), exactly as scoped.
+
+Full test run: `pytest tests/` — 1283 passed, 14 skipped (pre-existing Windows/live-model skips
+only), including the new `test_profile.py` (9), the M9 additions to `test_jail.py` (8), and
+`test_sandbox_exec.py` (6).
+
+### 0.2 Closed gap — `sandbox-exec.sh`'s `AGENT_BIND_SCOPE` skipped the §10 escape check (found in
+post-build review, fixed same session)
+
+`harness/profile.py`'s `BindEntry` rejects an absolute or `..`-escaping `relpath` **at
+construction** (§5 Fork A, invariant 4) — the direct mitigation for `design_doc.md` §10's "Sandbox
+Escape (Dynamic Binds)" risk. That check exists **only** on the Python side. `sandbox-exec.sh`'s
+`AGENT_BIND_SCOPE` parser (§2/§6) does no equivalent validation — `target="$WS/$relpath"` is plain
+string concatenation, so `AGENT_BIND_SCOPE="../../etc:rw"` produces the literal bwrap argument
+`$WS/../../etc`. **Verified live**: bwrap resolves it and binds host `/etc` **read-write** into the
+nested shell jail — the exact escape §10 exists to name.
+
+Currently inert: no shipped launcher sets `AGENT_BIND_SCOPE` yet (§4). But §2 itself calls an env
+var "the existing pattern" for this seam — whatever wires chain item 4 (config-driven selection)
+is expected to set it directly, and would land the escape live unless this closes first. Not a
+missed §3 done-when item (Fork A/invariant 4 only ever scoped the Python object), but a real gap
+in the seam this milestone shipped, worth closing before anything sets the var for real.
+
+**Fix, scoped small — port `_validate_relpath`'s three checks into the shell:**
+- `deepagent-image/scripts/sandbox-exec.sh`, in the per-entry loop (currently lines ~27–33, right
+  after the existing empty/malformed check and before the `case "$mode"` block), add:
+  - reject `relpath` starting with `/`
+  - reject a Windows-style drive prefix (`?:`) — parity with the Python check, low-value on Linux
+    alone but keeps the two validators textually mirrored
+  - reject any `/`-separated segment equal to `..` (e.g. `case "/$relpath/" in *"/../"*) ...`)
+  - same failure shape as the existing malformed-entry branch: message to stderr, `exit 2`, no
+    `bwrap` invocation
+- `tests/test_sandbox_exec.py`: two new hard-failure cases mirroring the existing three
+  malformed-entry tests (same `bwrap_stub` fixture, assert non-zero exit + empty argv log) —
+  `AGENT_BIND_SCOPE="../../etc:rw"` and `AGENT_BIND_SCOPE="/etc:ro"` — mirroring
+  `test_bind_entry_rejects_dotdot_escape` / `test_bind_entry_rejects_absolute_paths` in
+  `tests/test_profile.py`.
+- `milestone9_invariants.md`: new invariant between 10 and 11 ("Removability"), stated the way
+  invariant 4 is stated for the Python side — `sandbox-exec.sh`'s `AGENT_BIND_SCOPE` parser
+  rejects an absolute or `..`-escaping relpath before `bwrap` is ever reached, same as `BindEntry`
+  does at construction.
+
+**Landed as planned, no deviation.** `sandbox-exec.sh`'s per-entry loop now rejects a leading `/`,
+a `?:` drive prefix, and any `/`-separated `..` segment, each exiting 2 with no `bwrap` invocation
+— same failure shape as the pre-existing malformed-entry branch. Two new
+`tests/test_sandbox_exec.py` cases (`test_absolute_relpath_is_a_hard_failure`,
+`test_dotdot_escape_is_a_hard_failure`) reproduce the live-verified escape and confirm it now hard-
+fails; the previously-passing `AGENT_BIND_SCOPE="src:rw"` case still reaches the bwrap check
+unchanged. Full host suite: 1053 passed, 22 skipped (runtime-stack `importorskip`s on a bare
+interpreter). Invariant 10a in `milestone9_invariants.md` flips from NOT YET BUILT to Built.
 
 Source: `design_doc.md` §2 ("HarnessProfile dynamic bind mounts", "Specialized Profiles") + §4
 ("Specialized Profiles": Architect vs. Coder toolsets) + the "Core identity — dependency chain"
