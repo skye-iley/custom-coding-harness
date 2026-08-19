@@ -4,8 +4,8 @@
 
 **Built — all seven §3 done-when items land on `feat/milestone9-agentprofile`.** Checkable
 properties: `milestone9_invariants.md` (same folder) until the milestone moves to `complete/`, at
-which point it folds in here as a section, per `docs/README.md`'s milestone lifecycle. **One gap
-found in post-build review, not yet fixed — see §0.2, next session's first task.**
+which point it folds in here as a section, per `docs/README.md`'s milestone lifecycle. **The one
+gap found in post-build review is now closed — see §0.2.**
 
 ### 0.1 What the build confirmed rather than changed
 
@@ -40,8 +40,8 @@ Full test run: `pytest tests/` — 1283 passed, 14 skipped (pre-existing Windows
 only), including the new `test_profile.py` (9), the M9 additions to `test_jail.py` (8), and
 `test_sandbox_exec.py` (6).
 
-### 0.2 Known gap — `sandbox-exec.sh`'s `AGENT_BIND_SCOPE` skips the §10 escape check (found in
-post-build review, next session's first task)
+### 0.2 Closed gap — `sandbox-exec.sh`'s `AGENT_BIND_SCOPE` skipped the §10 escape check (found in
+post-build review, fixed same session)
 
 `harness/profile.py`'s `BindEntry` rejects an absolute or `..`-escaping `relpath` **at
 construction** (§5 Fork A, invariant 4) — the direct mitigation for `design_doc.md` §10's "Sandbox
@@ -75,6 +75,15 @@ in the seam this milestone shipped, worth closing before anything sets the var f
   invariant 4 is stated for the Python side — `sandbox-exec.sh`'s `AGENT_BIND_SCOPE` parser
   rejects an absolute or `..`-escaping relpath before `bwrap` is ever reached, same as `BindEntry`
   does at construction.
+
+**Landed as planned, no deviation.** `sandbox-exec.sh`'s per-entry loop now rejects a leading `/`,
+a `?:` drive prefix, and any `/`-separated `..` segment, each exiting 2 with no `bwrap` invocation
+— same failure shape as the pre-existing malformed-entry branch. Two new
+`tests/test_sandbox_exec.py` cases (`test_absolute_relpath_is_a_hard_failure`,
+`test_dotdot_escape_is_a_hard_failure`) reproduce the live-verified escape and confirm it now hard-
+fails; the previously-passing `AGENT_BIND_SCOPE="src:rw"` case still reaches the bwrap check
+unchanged. Full host suite: 1053 passed, 22 skipped (runtime-stack `importorskip`s on a bare
+interpreter). Invariant 10a in `milestone9_invariants.md` flips from NOT YET BUILT to Built.
 
 Source: `design_doc.md` §2 ("HarnessProfile dynamic bind mounts", "Specialized Profiles") + §4
 ("Specialized Profiles": Architect vs. Coder toolsets) + the "Core identity — dependency chain"

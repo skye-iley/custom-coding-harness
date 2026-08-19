@@ -86,10 +86,13 @@ argv.** Every invariant below is that rule applied to one seam.
 
 **10a. `sandbox-exec.sh`'s `AGENT_BIND_SCOPE` parser rejects an absolute or `..`-escaping
 relpath before `bwrap` is ever reached — same as `BindEntry` does at construction (invariant 4),
-on the shell side.** **NOT YET BUILT** (`milestone9.md` §0.2, found in post-build review): today
-the shell parser validates entry shape (invariants 3/9/10) but not path safety, so
-`AGENT_BIND_SCOPE="../../etc:rw"` binds host `/etc` read-write into the nested jail — verified
-live. Next session's first task; `milestone9.md` §0.2 has the scoped fix.
+on the shell side.** **Built** (`milestone9.md` §0.2 fix landed): the per-entry loop rejects a
+leading `/`, a Windows-style drive prefix (`?:`), and any `/`-separated `..` segment, each with
+the same failure shape as the existing malformed-entry branch (stderr message, `exit 2`, no
+`bwrap` invocation). Asserted by `test_absolute_relpath_is_a_hard_failure` and
+`test_dotdot_escape_is_a_hard_failure` in `tests/test_sandbox_exec.py`, mirroring
+`test_bind_entry_rejects_absolute_paths` / `test_bind_entry_rejects_dotdot_escape` in
+`tests/test_profile.py`.
 
 ## Removability
 

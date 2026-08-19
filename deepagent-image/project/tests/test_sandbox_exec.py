@@ -130,3 +130,25 @@ def test_malformed_entry_unknown_mode_is_a_hard_failure(bwrap_stub, tmp_path):
 
     assert result.returncode != 0
     assert argv == []
+
+
+@needs_bash
+def test_absolute_relpath_is_a_hard_failure(bwrap_stub, tmp_path):
+    """§0.2 gap: an absolute relpath must be rejected, not concatenated onto $WS."""
+    bin_dir, log_path = bwrap_stub
+    ws = tmp_path / "workspace"
+    result, argv = _run(bin_dir, log_path, ws, bind_scope="/etc:rw")
+
+    assert result.returncode != 0
+    assert argv == []
+
+
+@needs_bash
+def test_dotdot_escape_is_a_hard_failure(bwrap_stub, tmp_path):
+    """§0.2 gap, verified live: AGENT_BIND_SCOPE="../../etc:rw" bound host /etc rw."""
+    bin_dir, log_path = bwrap_stub
+    ws = tmp_path / "workspace"
+    result, argv = _run(bin_dir, log_path, ws, bind_scope="../../etc:rw")
+
+    assert result.returncode != 0
+    assert argv == []

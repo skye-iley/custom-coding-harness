@@ -31,6 +31,20 @@ if [[ -n "${AGENT_BIND_SCOPE:-}" ]]; then
       echo "sandbox-exec: malformed AGENT_BIND_SCOPE entry: ${entry@Q}" >&2
       exit 2
     fi
+    if [[ "$relpath" == /* ]]; then
+      echo "sandbox-exec: AGENT_BIND_SCOPE relpath must be workspace-relative, got an absolute path: ${relpath@Q}" >&2
+      exit 2
+    fi
+    if [[ "${relpath:1:1}" == ":" ]]; then
+      echo "sandbox-exec: AGENT_BIND_SCOPE relpath must be workspace-relative, got an absolute path: ${relpath@Q}" >&2
+      exit 2
+    fi
+    case "/$relpath/" in
+      *"/../"*)
+        echo "sandbox-exec: AGENT_BIND_SCOPE relpath must not escape the workspace with '..': ${relpath@Q}" >&2
+        exit 2
+        ;;
+    esac
     case "$mode" in
       rw) flag="--bind" ;;
       ro) flag="--ro-bind" ;;
