@@ -4,7 +4,8 @@
 
 **Built — all seven §3 done-when items land on `feat/milestone9-agentprofile`.** Checkable
 properties: `milestone9_invariants.md` (same folder) until the milestone moves to `complete/`, at
-which point it folds in here as a section, per `docs/README.md`'s milestone lifecycle.
+which point it folds in here as a section, per `docs/README.md`'s milestone lifecycle. **One gap
+found in post-build review, not yet fixed — see §0.2, next session's first task.**
 
 ### 0.1 What the build confirmed rather than changed
 
@@ -38,6 +39,42 @@ No design fork in §5 needed revisiting — the build matched the plan exactly:
 Full test run: `pytest tests/` — 1283 passed, 14 skipped (pre-existing Windows/live-model skips
 only), including the new `test_profile.py` (9), the M9 additions to `test_jail.py` (8), and
 `test_sandbox_exec.py` (6).
+
+### 0.2 Known gap — `sandbox-exec.sh`'s `AGENT_BIND_SCOPE` skips the §10 escape check (found in
+post-build review, next session's first task)
+
+`harness/profile.py`'s `BindEntry` rejects an absolute or `..`-escaping `relpath` **at
+construction** (§5 Fork A, invariant 4) — the direct mitigation for `design_doc.md` §10's "Sandbox
+Escape (Dynamic Binds)" risk. That check exists **only** on the Python side. `sandbox-exec.sh`'s
+`AGENT_BIND_SCOPE` parser (§2/§6) does no equivalent validation — `target="$WS/$relpath"` is plain
+string concatenation, so `AGENT_BIND_SCOPE="../../etc:rw"` produces the literal bwrap argument
+`$WS/../../etc`. **Verified live**: bwrap resolves it and binds host `/etc` **read-write** into the
+nested shell jail — the exact escape §10 exists to name.
+
+Currently inert: no shipped launcher sets `AGENT_BIND_SCOPE` yet (§4). But §2 itself calls an env
+var "the existing pattern" for this seam — whatever wires chain item 4 (config-driven selection)
+is expected to set it directly, and would land the escape live unless this closes first. Not a
+missed §3 done-when item (Fork A/invariant 4 only ever scoped the Python object), but a real gap
+in the seam this milestone shipped, worth closing before anything sets the var for real.
+
+**Fix, scoped small — port `_validate_relpath`'s three checks into the shell:**
+- `deepagent-image/scripts/sandbox-exec.sh`, in the per-entry loop (currently lines ~27–33, right
+  after the existing empty/malformed check and before the `case "$mode"` block), add:
+  - reject `relpath` starting with `/`
+  - reject a Windows-style drive prefix (`?:`) — parity with the Python check, low-value on Linux
+    alone but keeps the two validators textually mirrored
+  - reject any `/`-separated segment equal to `..` (e.g. `case "/$relpath/" in *"/../"*) ...`)
+  - same failure shape as the existing malformed-entry branch: message to stderr, `exit 2`, no
+    `bwrap` invocation
+- `tests/test_sandbox_exec.py`: two new hard-failure cases mirroring the existing three
+  malformed-entry tests (same `bwrap_stub` fixture, assert non-zero exit + empty argv log) —
+  `AGENT_BIND_SCOPE="../../etc:rw"` and `AGENT_BIND_SCOPE="/etc:ro"` — mirroring
+  `test_bind_entry_rejects_dotdot_escape` / `test_bind_entry_rejects_absolute_paths` in
+  `tests/test_profile.py`.
+- `milestone9_invariants.md`: new invariant between 10 and 11 ("Removability"), stated the way
+  invariant 4 is stated for the Python side — `sandbox-exec.sh`'s `AGENT_BIND_SCOPE` parser
+  rejects an absolute or `..`-escaping relpath before `bwrap` is ever reached, same as `BindEntry`
+  does at construction.
 
 Source: `design_doc.md` §2 ("HarnessProfile dynamic bind mounts", "Specialized Profiles") + §4
 ("Specialized Profiles": Architect vs. Coder toolsets) + the "Core identity — dependency chain"
